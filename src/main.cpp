@@ -8,53 +8,93 @@
 #define ID_TRAY_ABOUT 201
 #define ID_TRAY_EXIT 202
 
-HDC hDC;
-WORD originalGammaRamp[3][256];
-WORD redGammaRamp[3][256];
+HDC hDC = nullptr;
+WORD originalGammaRamp[3][256] = {};
+WORD redGammaRamp[3][256] = {};
+WORD fallbackLinearGammaRamp[3][256] = {};
 bool isRedlightActive = false;
+bool hasOriginalGammaRamp = false;
 NOTIFYICONDATA nid = {};
+UINT WM_TASKBARCREATED = 0;
 
 void ToggleRedlight();
 void UpdateTrayIconTip(const char* tip);
-void InitializeTrayIcon(HINSTANCE hInstance);
+bool InitializeTrayIcon(HINSTANCE hInstance);
+void RemoveTrayIcon();
 void ShowAboutDialog(HWND parent);
+void BuildRedGammaRamp();
+void BuildFallbackLinearGammaRamp();
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nShowCmd) {
-
     // silently exit multiple instances
-    HANDLE hMutex = CreateMutex(NULL, TRUE, "Global\\RedLightApp");
+    HANDLE hMutex = CreateMutex(nullptr, TRUE, "Global\\RedLightApp");
+    if (!hMutex) {
+        MessageBox(nullptr, "Failed to create single-instance mutex.", "Error", MB_ICONERROR);
+        return 1;
+    }
+
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
-        return 1;
+        CloseHandle(hMutex);
+        return 0;
     }
 
-    hDC = GetDC(NULL);
+    hDC = GetDC(nullptr);
     if (!hDC) {
-        MessageBox(NULL, "Failed to get device context.", "Error", MB_ICONERROR);
+        MessageBox(nullptr, "Failed to get device context.", "Error", MB_ICONERROR);
+        CloseHandle(hMutex);
         return 1;
     }
 
-    GetDeviceGammaRamp(hDC, originalGammaRamp); // store the original gamma ramp
+    hasOriginalGammaRamp = GetDeviceGammaRamp(hDC, originalGammaRamp) == TRUE;
+    BuildRedGammaRamp();
+    BuildFallbackLinearGammaRamp();
 
-    for (int i = 0; i < 256; i++) {
-        redGammaRamp[0][i] = (WORD)(i << 8);
-        redGammaRamp[1][i] = redGammaRamp[2][i] = 0;
+    WM_TASKBARCREATED = RegisterWindowMessage(TEXT("TaskbarCreated"));
+
+    if (!InitializeTrayIcon(hInstance)) {
+        ReleaseDC(nullptr, hDC);
+        ReleaseMutex(hMutex);
+        CloseHandle(hMutex);
+        MessageBox(nullptr, "Failed to initialize tray icon.", "Error", MB_ICONERROR);
+        return 1;
     }
-
-    InitializeTrayIcon(hInstance);
 
     MSG msg = {};
-    while (GetMessage(&msg, NULL, 0, 0)) {
+    BOOL result = 0;
+    while ((result = GetMessage(&msg, nullptr, 0, 0)) > 0) {
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
 
-    SetDeviceGammaRamp(hDC, originalGammaRamp); // restore the original gamma ramp
-    ReleaseDC(NULL, hDC);
+    RemoveTrayIcon();
+    if (isRedlightActive && hasOriginalGammaRamp) {
+        SetDeviceGammaRamp(hDC, originalGammaRamp); // restore original gamma ramp
+    }
 
+    ReleaseDC(nullptr, hDC);
     ReleaseMutex(hMutex);
     CloseHandle(hMutex);
-    return 0;
+
+    return (result == -1) ? 1 : 0;
+}
+
+void BuildRedGammaRamp() {
+    for (int i = 0; i < 256; i++) {
+        redGammaRamp[0][i] = static_cast<WORD>(i << 8);
+        redGammaRamp[1][i] = 0;
+        redGammaRamp[2][i] = 0;
+    }
+}
+
+
+void BuildFallbackLinearGammaRamp() {
+    for (int i = 0; i < 256; i++) {
+        const WORD value = static_cast<WORD>(i << 8);
+        fallbackLinearGammaRamp[0][i] = value;
+        fallbackLinearGammaRamp[1][i] = value;
+        fallbackLinearGammaRamp[2][i] = value;
+    }
 }
 
 void UpdateTrayIconTip(const char* tip) {
@@ -63,23 +103,34 @@ void UpdateTrayIconTip(const char* tip) {
 }
 
 void ToggleRedlight() {
-    if (isRedlightActive) {
-        SetDeviceGammaRamp(hDC, originalGammaRamp);
-    } else {
-        SetDeviceGammaRamp(hDC, redGammaRamp);
+    bool nextStateActive = !isRedlightActive;
+    WORD(*targetRamp)[256] = nextStateActive
+        ? redGammaRamp
+        : (hasOriginalGammaRamp ? originalGammaRamp : fallbackLinearGammaRamp);
+
+    if (!SetDeviceGammaRamp(hDC, targetRamp)) {
+        MessageBox(nullptr, "Failed to apply gamma ramp.", "Error", MB_ICONERROR);
+        return;
     }
-    isRedlightActive = !isRedlightActive;
+
+    isRedlightActive = nextStateActive;
     UpdateTrayIconTip(isRedlightActive ? "RedLight ON" : "RedLight off");
 }
 
-void InitializeTrayIcon(HINSTANCE hInstance) {
+bool InitializeTrayIcon(HINSTANCE hInstance) {
     WNDCLASS wc = {0};
     wc.lpfnWndProc = WindowProc;
     wc.hInstance = hInstance;
-    wc.lpszClassName = "TrayOnlyClass";
-    RegisterClass(&wc);
+    wc.lpszClassName = TEXT("TrayOnlyClass");
 
-    HWND hwnd = CreateWindowEx(0, "TrayOnlyClass", "RedLight", 0, 0, 0, 0, 0, NULL, NULL, hInstance, NULL);
+    if (!RegisterClass(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+        return false;
+    }
+
+    HWND hwnd = CreateWindowEx(0, TEXT("TrayOnlyClass"), TEXT("RedLight"), 0, 0, 0, 0, 0, nullptr, nullptr, hInstance, nullptr);
+    if (!hwnd) {
+        return false;
+    }
 
     nid.cbSize = sizeof(NOTIFYICONDATA);
     nid.hWnd = hwnd;
@@ -87,12 +138,21 @@ void InitializeTrayIcon(HINSTANCE hInstance) {
     nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     nid.uCallbackMessage = WM_TRAYICON;
     nid.hIcon = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_REDLIGHT_ICON));
+    if (!nid.hIcon) {
+        nid.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
+    }
     strcpy_s(nid.szTip, "RedLight off");
-    Shell_NotifyIcon(NIM_ADD, &nid);
+
+    return Shell_NotifyIcon(NIM_ADD, &nid) == TRUE;
+}
+
+void RemoveTrayIcon() {
+    if (nid.hWnd != nullptr) {
+        Shell_NotifyIcon(NIM_DELETE, &nid);
+    }
 }
 
 void ShowAboutDialog(HWND parent) {
-    const HINSTANCE hInstance = GetModuleHandle(NULL);
     char aboutText[512];
     sprintf_s(aboutText, sizeof(aboutText), "RedLight v0.4.0-beta\n\ngithub.com/michaelmawhinney/redlight");
     const char* aboutTitle = "About";
@@ -101,6 +161,11 @@ void ShowAboutDialog(HWND parent) {
 }
 
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    if (WM_TASKBARCREATED != 0 && uMsg == WM_TASKBARCREATED) {
+        Shell_NotifyIcon(NIM_ADD, &nid);
+        return 0;
+    }
+
     switch (uMsg) {
     case WM_TRAYICON:
         if (lParam == WM_RBUTTONDOWN) {
@@ -112,7 +177,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 AppendMenu(hMenu, MF_STRING, ID_TRAY_ABOUT, TEXT("About"));
                 AppendMenu(hMenu, MF_STRING, ID_TRAY_EXIT, TEXT("Exit"));
                 SetForegroundWindow(hwnd);
-                TrackPopupMenu(hMenu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, NULL);
+                TrackPopupMenu(hMenu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, nullptr);
                 DestroyMenu(hMenu);
             }
         } else if (lParam == WM_LBUTTONDOWN) {
@@ -124,7 +189,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         if (LOWORD(wParam) == ID_TRAY_TOGGLE) {
             ToggleRedlight();
         } else if (LOWORD(wParam) == ID_TRAY_EXIT) {
-            Shell_NotifyIcon(NIM_DELETE, &nid);
+            RemoveTrayIcon();
             PostQuitMessage(0);
         } else if (LOWORD(wParam) == ID_TRAY_ABOUT) {
             ShowAboutDialog(hwnd);
@@ -132,7 +197,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         break;
 
     case WM_DESTROY:
-        Shell_NotifyIcon(NIM_DELETE, &nid);
+        RemoveTrayIcon();
         PostQuitMessage(0);
         return 0;
     }

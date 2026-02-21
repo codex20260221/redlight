@@ -23,6 +23,15 @@ After starting RedLight, an icon will appear in the system tray.
 * This application will conflict with other apps/features that change your screen color temperature, such as f.lux or the Windows Night Light feature. If you want to use RedLight, you should close or disable any other similar apps to avoid unexpected behavior.
 * RedLight is provided as-is and without any warranty of any kind. Although the code is simple and straightforward, you are still advised to use at your own risk!
 
+## Windows Compatibility and Reliability
+RedLight is designed for modern Windows builds and is continuously built on GitHub Actions for both Windows Server 2019 and Windows Server 2022 images (representative of Windows 10/11 API behavior for this app). Runtime hardening includes:
+
+- Single-instance enforcement to avoid conflicting gamma writes.
+- Automatic tray icon re-registration when Windows Explorer restarts.
+- Defensive error handling for gamma ramp read/write failures and tray initialization failures.
+
+Because this app depends on Windows display drivers and third-party display utilities, no software can guarantee literal **100% reliability** in every machine configuration. The project targets the highest practical reliability and fails safely when the operating system rejects gamma operations.
+
 ## Building from Source
 You can compile this C++ code using any modern C++ compiler such as MSVC or g++, as long as the standard is C++11 or newer.
 This repository provides a basic CMake configuration that can be  used to build RedLight.exe from source using MSVC.
