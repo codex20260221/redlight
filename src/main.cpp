@@ -68,8 +68,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     }
 
     RemoveTrayIcon();
-    if (isRedlightActive && hasOriginalGammaRamp) {
-        SetDeviceGammaRamp(hDC, originalGammaRamp); // restore original gamma ramp
+    if (isRedlightActive) {
+        WORD(*restoreRamp)[256] = hasOriginalGammaRamp ? originalGammaRamp : fallbackLinearGammaRamp;
+        SetDeviceGammaRamp(hDC, restoreRamp); // restore original (or neutral fallback) gamma ramp
     }
 
     ReleaseDC(nullptr, hDC);
