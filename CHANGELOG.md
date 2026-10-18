@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Retain the last native session-notification registration/unregistration failure in cached support reports after successful retry or cleanup, with separate current error/availability, explicit no-code errors, allocation-free history access, and unchanged exact-window ownership/recovery guards.
 - Cache the tray process ID and checked Windows session ID at startup for logs/support reports, distinguishing zero IDs, absent metadata, and failed lookups with supplied/absent native errors; preserve backend ownership/recovery without process enumeration, new owned handles, or report-time queries.
 - Stamp copied support reports with validated UTC calendar time and milliseconds, preserving stable copied metadata, explicit absent/invalid labels, and monotonic scheduling/recovery independence; format normal and expanded Windows years without allocation or extra backend inspection.
 - Show milliseconds past an armed countdown's deadline in cached support reports, distinguishing exact-expiry zero from unarmed/unexpired state and preserving recovery retry cadence; use one supplied capture tick for countdown, verification, display-context, and restoration-history ages.
@@ -95,6 +96,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Support Unicode diagnostics paths and report log-write failures to the debugger.
 
 ### Fixed
+- Clear native error state before session-notification registration/unregistration so an API failure without an error code cannot inherit an earlier call's error; capture failure diagnostics before logging while preserving the existing retry state.
 - Drop Gamma's active confirmation before restoration writes, retaining the original calibration/DC/global ownership through failed or unconfirmed restoration and shutdown. Exclude stale GDI error codes across initialization, capture, writes, read-back, verification, and DC cleanup; explicitly report when no native code was supplied.
 - Separate Magnification runtime ownership from completed initialization; retry failed capture/cleanup safely, confirm owned backend writes before committing state, distinguish strict red-only comparison from arbitrary-original restoration, drop active confirmation on ambiguous restoration, and clear stale native errors. Keep live controls after failed shutdown on queue errors and retain failed session-end recovery while Windows permits; standalone reset now reports cleanup failure.
 - Require one canonical portable ZIP root, reject Windows path aliases and file/directory collisions before reading entries, validate directory contents, and require every current documentation file with exact source spelling/hash; add synthetic package-path policy checks without extraction or app execution.

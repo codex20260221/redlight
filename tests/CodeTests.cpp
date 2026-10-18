@@ -169,6 +169,8 @@ struct Fake {
     int stdoutFailOnCall = 0;
     bool sessionRegister = true, sessionUnregister = true, sessionRegisterThrows = false;
     DWORD sessionError = 1702, sessionFlags = 999;
+    bool sessionErrorSupplied = true;
+    DWORD sessionRegisterErrorBefore = 999, sessionUnregisterErrorBefore = 999;
     int sessionRegisters = 0, sessionUnregisters = 0;
     HWND sessionRegisteredOwner = nullptr, sessionUnregisterOwner = nullptr;
     SessionNotifications* sessionCallbackTarget = nullptr;
@@ -2828,6 +2830,88 @@ void SessionNotificationReentrancyAndUnwind() {
     Check(caught && !notifications.isRegistered() && !fake.sessionRegisteredOwner, "injected pre-registration exception does not claim success");
     fake.sessionRegisterThrows = false;
     Check(notifications.ensure(owner) && notifications.release(), "scoped guard unwinds so later registration and release remain possible");
+}
+void SessionNotificationFailureHistoryLifecycle() {
+    SessionNotifications notifications; const auto owner = reinterpret_cast<HWND>(std::uintptr_t{0x1234});
+    Check(!notifications.lastFailure(), "new notification ownership has no invented native failure");
+    fake.sessionRegister = false;
+    Check(!notifications.ensure(owner) && notifications.lastFailure() == SessionNotificationFailure{SessionNotificationApi::Register, 1702}, "failed native registration captures operation and error");
+    fake.sessionRegister = true;
+    Check(notifications.ensure(owner) && notifications.lastError() == 0 && notifications.isRegistered() &&
+        notifications.lastFailure() == SessionNotificationFailure{SessionNotificationApi::Register, 1702}, "successful retry clears current error while retaining historical native registration failure");
+    const auto registers = fake.sessionRegisters;
+    Check(notifications.ensure(owner) && fake.sessionRegisters == registers && notifications.lastFailure()->errorCode == 1702, "healthy retry neither duplicates registration nor erases history");
+    fake.sessionUnregister = false; fake.sessionError = ERROR_ACCESS_DENIED;
+    Check(!notifications.release() && notifications.isRegistered() && fake.sessionRegisteredOwner == owner &&
+        notifications.lastFailure() == SessionNotificationFailure{SessionNotificationApi::Unregister, ERROR_ACCESS_DENIED}, "failed cleanup replaces history while retaining exact owner for retry");
+    fake.sessionUnregister = true;
+    Check(notifications.release() && notifications.lastError() == 0 && !notifications.isRegistered() && notifications.ensure(owner) &&
+        notifications.lastFailure() == SessionNotificationFailure{SessionNotificationApi::Unregister, ERROR_ACCESS_DENIED} && notifications.release(),
+        "release and a fresh ownership cycle cannot silently clear the last native failure");
+}
+void SessionNotificationSyntheticErrorsPreserveApiHistory() {
+    SessionNotifications notifications; const auto owner = reinterpret_cast<HWND>(std::uintptr_t{0x1234}), other = reinterpret_cast<HWND>(std::uintptr_t{0x5678});
+    Check(!notifications.ensure(nullptr) && !notifications.lastFailure() && fake.sessionRegisters == 0, "local validation errors do not invent native API failure records");
+    fake.sessionRegister = false;
+    Check(!notifications.ensure(owner), "record initial registration failure"); const auto history = notifications.lastFailure();
+    fake.sessionRegister = true; fake.sessionCallbackTarget = &notifications;
+    Check(notifications.ensure(owner) && !fake.nestedSessionEnsure && !fake.nestedSessionRelease && notifications.lastFailure() == history && notifications.lastError() == 0,
+        "reentrant busy rejections retain the older native failure and successful outer ownership");
+    const auto registers = fake.sessionRegisters;
+    Check(!notifications.ensure(other) && notifications.lastFailure() == history && fake.sessionRegisters == registers && fake.sessionRegisteredOwner == owner &&
+        notifications.release() && notifications.lastFailure() == history, "wrong-window validation preserves native failure provenance and exact-owner cleanup");
+}
+void SessionNotificationNativeFailureErrorProvenance() {
+    for (bool unregister : {false, true}) for (bool supplied : {false, true}) {
+        Reset(); SessionNotifications notifications; const auto owner = reinterpret_cast<HWND>(std::uintptr_t{0x1234});
+        if (unregister) Check(notifications.ensure(owner), "prepare cleanup failure fixture");
+        fake.sessionErrorSupplied = supplied; fake.sessionError = 4321; fake.lastError = 0xbad;
+        fake.captureDiagnosticText = fake.diagnosticsClobbersError = true;
+        if (unregister) fake.sessionUnregister = false; else fake.sessionRegister = false;
+        Check(!(unregister ? notifications.release() : notifications.ensure(owner)) && notifications.lastError() == (supplied ? 4321u : 0u) &&
+            notifications.lastFailure() == SessionNotificationFailure{unregister ? SessionNotificationApi::Unregister : SessionNotificationApi::Register, supplied ? 4321u : 0u} &&
+            (unregister ? fake.sessionUnregisterErrorBefore : fake.sessionRegisterErrorBefore) == ERROR_SUCCESS &&
+            notifications.isRegistered() == unregister && std::string_view(fake.diagnosticText.data()).find(supplied ? "error 4321" : "no native error code") != std::string_view::npos,
+            "native hook failures exclude stale errors, capture supplied/absent codes before logging, and retain the original registration state");
+        fake.sessionRegister = fake.sessionUnregister = true;
+        Check(notifications.release(), "cleanup owner after native provenance fixture");
+    }
+}
+void SessionNotificationFailureCachedReports() {
+    SessionNotifications notifications; const auto owner = reinterpret_cast<HWND>(std::uintptr_t{0x1234});
+    fake.sessionRegister = false; Check(!notifications.ensure(owner), "capture registration history");
+    fake.sessionRegister = true; Check(notifications.ensure(owner), "recover current hook availability");
+    SupportReportState state; state.sessionNotifications = notifications.isRegistered(); state.sessionNotificationError = static_cast<std::uint32_t>(notifications.lastError());
+    state.sessionNotificationFailure = notifications.lastFailure();
+    const auto report = BuildSupportReport(state);
+    Check(report.find("Session notifications: registered\r\nLast session-notification error: 0\r\nLast session-notification API failure: WTSRegisterSessionNotification (native error 1702)") != std::string::npos,
+        "current recovery and retained native cause have separate cached report fields");
+    fake.sessionUnregister = false; fake.sessionError = ERROR_ACCESS_DENIED;
+    Check(!notifications.release() && BuildSupportReport(state) == report && notifications.lastFailure()->operation == SessionNotificationApi::Unregister,
+        "a copied history record remains stable after a later different native failure");
+    state.sessionNotificationFailure = SessionNotificationFailure{SessionNotificationApi::Unregister, 0};
+    Check(BuildSupportReport(state).find("WTSUnRegisterSessionNotification (no native error code)") != std::string::npos &&
+        BuildSupportReport({}).find("Last session-notification API failure: none recorded") != std::string::npos &&
+        std::string_view(SessionNotificationApiName(static_cast<SessionNotificationApi>(99))) == "Unknown", "no-code, no-history, and unknown operation labels are explicit");
+    fake.sessionUnregister = true; Check(notifications.release(), "finish native history report fixture");
+}
+void SessionNotificationFailureReportsPreserveRecovery() {
+    GammaRampFilter filter; SessionNotifications notifications;
+    Check(filter.initialize(), "prepare Gamma recovery"); fake.writes = {Write::FailAfterApply, Write::Fail};
+    Check(!filter.enable() && filter.needsRestore(), "retain original Gamma calibration after unconfirmed rollback");
+    const auto owner = reinterpret_cast<HWND>(std::uintptr_t{0x1234});
+    fake.sessionRegister = false; Check(!notifications.ensure(owner), "record hook failure while recovery is pending");
+    fake.sessionRegister = true; Check(notifications.ensure(owner), "restore hook registration");
+    const auto statistics = filter.statistics(); const auto clocks = fake.backendClockReads;
+    const auto reads = fake.gammaReads, writes = fake.gammaWrites, releases = fake.mutexReleases, registers = fake.sessionRegisters; const auto error = std::string(filter.lastError());
+    std::optional<SessionNotificationFailure> failure; bool unused = false;
+    { TestMemory::FailNextAllocation fail; failure = notifications.lastFailure(); unused = TestMemory::AllocationFailurePending(); }
+    SupportReportState state; state.sessionNotifications = notifications.isRegistered(); state.sessionNotificationFailure = failure; state.needsRestore = true;
+    Check(unused && BuildSupportReport(state).find("WTSRegisterSessionNotification (native error 1702)") != std::string::npos &&
+        filter.needsRestore() && !filter.isActive() && fake.mutexOwned && filter.statistics() == statistics && error == filter.lastError() &&
+        fake.gammaReads == reads && fake.gammaWrites == writes && fake.mutexReleases == releases && fake.sessionRegisters == registers && fake.backendClockReads == clocks,
+        "historical getters and report formatting allocate no getter state and cannot query/rewrite display output, clear errors, or release recovery ownership");
+    Check(notifications.release() && filter.disable() && filter.shutdown(), "notification and Gamma ownership both stay recoverable");
 }
 void SessionNotificationReport() {
     SupportReportState state; state.sessionNotificationError = 1702;
@@ -6056,20 +6140,20 @@ int GetSystemMetrics(int metric) {
 }
 void SetLastError(DWORD value) { fake.lastError = value; }
 BOOL WTSRegisterSessionNotification(HWND owner, DWORD flags) {
-    ++fake.sessionRegisters; fake.sessionFlags = flags;
+    ++fake.sessionRegisters; fake.sessionFlags = flags; fake.sessionRegisterErrorBefore = fake.lastError;
     if (fake.sessionCallbackTarget) {
         auto* target = fake.sessionCallbackTarget; fake.sessionCallbackTarget = nullptr;
         fake.nestedSessionEnsure = target->ensure(owner);
         fake.nestedSessionRelease = target->release();
     }
     if (fake.sessionRegisterThrows) throw std::runtime_error("injected pre-registration failure");
-    if (!fake.sessionRegister) { fake.lastError = fake.sessionError; return FALSE; }
+    if (!fake.sessionRegister) { if (fake.sessionErrorSupplied) fake.lastError = fake.sessionError; return FALSE; }
     fake.sessionRegisteredOwner = owner;
     return 1;
 }
 BOOL WTSUnRegisterSessionNotification(HWND owner) {
-    ++fake.sessionUnregisters; fake.sessionUnregisterOwner = owner;
-    if (!fake.sessionUnregister || owner != fake.sessionRegisteredOwner) { fake.lastError = fake.sessionError; return FALSE; }
+    ++fake.sessionUnregisters; fake.sessionUnregisterOwner = owner; fake.sessionUnregisterErrorBefore = fake.lastError;
+    if (!fake.sessionUnregister || owner != fake.sessionRegisteredOwner) { if (fake.sessionErrorSupplied) fake.lastError = fake.sessionError; return FALSE; }
     fake.sessionRegisteredOwner = nullptr;
     return 1;
 }
@@ -6451,6 +6535,9 @@ int main() {
         {"Read-back location formatting bounds/allocation", ReadbackLocationFormattingBoundsAndAllocation}, {"Read-back location cache preserves recovery", ReadbackLocationCacheReportsPreserveRecovery},
         {"Session notification ownership", SessionNotificationOwnership}, {"Session notification failure/retry", SessionNotificationFailureRecovery},
         {"Session notification reentrancy/unwind", SessionNotificationReentrancyAndUnwind}, {"Session notification support report", SessionNotificationReport},
+        {"Session hook native failure history", SessionNotificationFailureHistoryLifecycle}, {"Session hook synthetic error provenance", SessionNotificationSyntheticErrorsPreserveApiHistory},
+        {"Session hook native error provenance", SessionNotificationNativeFailureErrorProvenance}, {"Session hook cached failure reports", SessionNotificationFailureCachedReports},
+        {"Session hook failure reports preserve recovery", SessionNotificationFailureReportsPreserveRecovery},
         {"Read-only exception with queued restore", ReadOnlyFailureHonorsQueuedRestore}, {"Queued restore under outer busy scope", QueuedRestoreRetainsOuterBusyOwnership},
         {"Gamma preferred Luma without output changes", GammaPreferredLumaWithoutBackendChanges}, {"Live Luma preference commit rules", MagnificationLumaPreferenceCommitRules},
         {"Gamma preferred Luma during recovery", GammaPreferredLumaDuringRecoveryAndSaveFailure},

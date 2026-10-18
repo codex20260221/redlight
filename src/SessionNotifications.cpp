@@ -11,9 +11,12 @@ bool SessionNotifications::ensure(HWND owner) {
     }
     if (registered_) return true; // One unregister per successful register; do not register twice.
     ScopedFlag changing(changing_);
+    SetLastError(ERROR_SUCCESS);
     if (!WTSRegisterSessionNotification(owner, NOTIFY_FOR_THIS_SESSION)) {
         lastError_ = GetLastError();
-        Diagnostics::LogFormat("WTSRegisterSessionNotification failed (error %lu); registration remains unavailable.", lastError_);
+        lastFailure_ = SessionNotificationFailure{SessionNotificationApi::Register, static_cast<std::uint32_t>(lastError_)};
+        if (lastError_) Diagnostics::LogFormat("WTSRegisterSessionNotification failed (error %lu); registration remains unavailable.", lastError_);
+        else Diagnostics::Log("WTSRegisterSessionNotification failed (no native error code); registration remains unavailable.");
         return false;
     }
     owner_ = owner;
@@ -26,9 +29,12 @@ bool SessionNotifications::release() {
     if (changing_) { lastError_ = ERROR_BUSY; return false; }
     if (!registered_) return true;
     ScopedFlag changing(changing_);
+    SetLastError(ERROR_SUCCESS);
     if (!WTSUnRegisterSessionNotification(owner_)) {
         lastError_ = GetLastError();
-        Diagnostics::LogFormat("WTSUnRegisterSessionNotification failed (error %lu); ownership retained for retry.", lastError_);
+        lastFailure_ = SessionNotificationFailure{SessionNotificationApi::Unregister, static_cast<std::uint32_t>(lastError_)};
+        if (lastError_) Diagnostics::LogFormat("WTSUnRegisterSessionNotification failed (error %lu); ownership retained for retry.", lastError_);
+        else Diagnostics::Log("WTSUnRegisterSessionNotification failed (no native error code); ownership retained for retry.");
         return false;
     }
     registered_ = false;

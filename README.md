@@ -101,6 +101,8 @@ On an Explorer restart, display change, sleep/wake, or session change, RedLight 
 
 **Expert controls → Diagnostics → Retry session recovery** retries registration for lock, unlock, and disconnect notifications. About and support reports show registration availability and the last error. Windows can reject registration while session services are still starting; see [Microsoft's session-notification API notes](https://learn.microsoft.com/en-us/windows/win32/api/wtsapi32/nf-wtsapi32-wtsregistersessionnotification). A healthy retry avoids duplicate registration. Retrying does not activate filtering or alter preferences; restore requests received during the call are honored afterward.
 
+Support reports also retain the most recent native registration or unregistration failure for that process, even after a retry succeeds and the current error clears. The record names the API and its native error, or explicitly reports that no code was supplied. Local invalid-owner/busy rejections leave this native failure history intact. Failed unregistration retains the original window owner for retry; viewing history makes no registration, display, or timing call.
+
 ### Shortcut profiles
 
 **Expert controls → Shortcut profile** offers Ctrl+Alt+R (default), Ctrl+Alt+F9, Ctrl+Alt+F10, or Disabled. Toggle uses the chosen combination; Restore adds Shift. Tray captions, About, and support reports show the actual registered combinations. Disabling shortcuts leaves tray controls and the restore command available.

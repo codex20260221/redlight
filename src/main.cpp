@@ -1003,6 +1003,7 @@ void CopySupportReport(HWND owner) {
     if (g_hotkeys.restore()) state.restoreBinding = ShortcutBindingName(*g_hotkeys.restore());
     state.sessionNotifications = g_sessionNotifications.isRegistered();
     state.sessionNotificationError = static_cast<std::uint32_t>(g_sessionNotifications.lastError());
+    state.sessionNotificationFailure = g_sessionNotifications.lastFailure();
     state.sessionMinutes = g_sessionTimer.minutes();
     state.expiryWarning = ExpiryWarningName(g_preferences.expiryWarning);
     state.backendStatistics = g_displayFilter->statistics();

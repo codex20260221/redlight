@@ -9,6 +9,7 @@
 #include "Diagnostics.h"
 #include "UtcTimestamp.h"
 #include "ProcessContext.h"
+#include "SessionNotificationDiagnostics.h"
 #include <cstdint>
 #include <optional>
 #include <sstream>
@@ -45,6 +46,7 @@ struct SupportReportState {
     bool restoreRequested = false;
     bool toggleHotkey = false, restoreHotkey = false, sessionNotifications = false;
     std::uint32_t sessionNotificationError = 0;
+    std::optional<SessionNotificationFailure> sessionNotificationFailure;
     unsigned sessionMinutes = 0;
     std::string_view expiryWarning = "Off";
     BackendStatistics backendStatistics{};
@@ -123,8 +125,14 @@ inline std::string BuildSupportReport(const SupportReportState& state) {
         << "\r\nToggle shortcut: " << (state.toggleHotkey ? "registered" : "unavailable") << " (" << state.toggleBinding << ")"
         << "\r\nRestore shortcut: " << (state.restoreHotkey ? "registered" : "unavailable") << " (" << state.restoreBinding << ")"
         << "\r\nSession notifications: " << (state.sessionNotifications ? "registered" : "unavailable")
-        << "\r\nLast session-notification error: " << state.sessionNotificationError
-        << "\r\nSession limit: ";
+        << "\r\nLast session-notification error: " << state.sessionNotificationError;
+    report << "\r\nLast session-notification API failure: ";
+    if (state.sessionNotificationFailure) {
+        report << SessionNotificationApiName(state.sessionNotificationFailure->operation);
+        if (state.sessionNotificationFailure->errorCode) report << " (native error " << state.sessionNotificationFailure->errorCode << ")";
+        else report << " (no native error code)";
+    } else report << "none recorded";
+    report << "\r\nSession limit: ";
     if (state.sessionMinutes) report << state.sessionMinutes << " minutes";
     else report << "unlimited";
     report << "\r\nExpiry warning: " << state.expiryWarning << "\r\nCountdown: ";
