@@ -10,3 +10,7 @@ int NormalizeSettingsProfileFile(const wchar_t* path) noexcept;
 // Validate a bounded read-only input, then compare with saved/default preferences.
 // JSON output. 0 match, 5 different, 4 invalid data, 1 file/settings/output failure.
 int CompareSettingsProfileFile(const wchar_t* path) noexcept;
+
+// Validate/close bounded input before an explicit guarded next-start preference save.
+// JSON output. 0 saved, 6 instance present, 4 invalid data, 1 I/O/storage/guard/output failure.
+int SaveSettingsProfileFile(const wchar_t* path) noexcept;

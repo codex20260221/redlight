@@ -24,6 +24,7 @@ BOOL SetDeviceGammaRamp(HDC, void*);
 using HANDLE = void*;
 using HGLOBAL = void*;
 constexpr BOOL FALSE = 0;
+constexpr BOOL TRUE = 1;
 constexpr DWORD ERROR_SUCCESS = 0;
 constexpr unsigned CP_UTF8 = 65001;
 constexpr DWORD MB_ERR_INVALID_CHARS = 8;

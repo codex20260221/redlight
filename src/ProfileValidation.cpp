@@ -1,5 +1,6 @@
 #include "ProfileValidation.h"
 #include "ProfileComparison.h"
+#include "ProfileSave.h"
 #include "Preferences.h"
 #include "JsonString.h"
 #include "StandardOutput.h"
@@ -9,7 +10,7 @@
 #include <cstdio>
 
 namespace {
-enum class ProfileFileAction { Validate, Normalize, Compare };
+enum class ProfileFileAction { Validate, Normalize, Compare, Save };
 struct File {
     explicit File(HANDLE value) noexcept : handle(value) {}
     ~File() { close(); }
@@ -109,6 +110,7 @@ int ProfileFileCommand(const wchar_t* path, ProfileFileAction action) {
     } else {
         const auto parsed = ParsePreferences(std::string_view(read.bytes.data(), read.length));
         if (parsed.preferences) {
+            if (action == ProfileFileAction::Save) return SaveSettingsProfileForNextStart(*parsed.preferences);
             if (action == ProfileFileAction::Compare) return CompareSavedSettingsProfile(*parsed.preferences);
             if (normalize) {
                 const auto text = SerializePreferences(*parsed.preferences);
@@ -158,6 +160,14 @@ int CompareSettingsProfileFile(const wchar_t* path) noexcept {
     try { return ProfileFileCommand(path, ProfileFileAction::Compare); }
     catch (...) {
         Diagnostics::Log("Offline profile-file comparison failed before complete output.");
+        return 1;
+    }
+}
+
+int SaveSettingsProfileFile(const wchar_t* path) noexcept {
+    try { return ProfileFileCommand(path, ProfileFileAction::Save); }
+    catch (...) {
+        Diagnostics::Log("Offline profile-file save failed before complete output.");
         return 1;
     }
 }

@@ -172,6 +172,17 @@ $json | ConvertFrom-Json
 
 Comparison JSON uses protocol 1. A complete result has `status: "profiles-match"` or `"profiles-differ"`, a Boolean `match`, and `differences` listing changed field names (`mode`, `luma`, `backend`, `session_minutes`, `hotkeys`, `expiry_warning`) without values. Exit codes are `0` for a match, `5` for valid differences, `4` for invalid candidate data, `1` for file/settings/output/internal failure, and `2` for invalid arguments. Candidate/file errors use the validator's JSON; unusable saved settings produce `settings-error` with `match: null`. Output failure takes precedence over a match/difference result; discard partial output after failure. The same bounded read-only disk-file rules apply, and the input closes before saved settings are read or output begins.
 
+`--save-profile=<file>` explicitly replaces all saved preferences with a validated file for the next start, without a confirmation dialog. Close RedLight normally first so its display restoration completes. The command refuses any existing same-session tray/startup/reset guard, including an instance whose controls are unavailable; it does not wait for or ask that instance to restore. When the guard is available, the input is already validated/closed before one complete current-format record is saved. This can repair corrupt saved settings because the replacement comes entirely from the validated file. Starting RedLight afterward loads the choices with filtering off.
+
+```powershell
+$json = & .\RedLight.exe '--save-profile=C:\Profiles\night.profile' | Out-String
+$result = $LASTEXITCODE
+$json | ConvertFrom-Json
+if ($result -ne 0) { throw "Profile save did not complete cleanly (exit $result); inspect saved status." }
+```
+
+Exit codes are `0` for a completed save, `6` when an instance guard already exists, `4` for invalid profile data, `1` for file/guard/settings/cleanup/output/internal failure, and `2` for invalid arguments. Save-result JSON uses protocol 1 with `status`, Boolean `saved`, `stage`, and `error_code` (null when no specific native code is available). A cleanup failure after a confirmed write returns `1` with `saved: true`; output failure also returns `1` even when preferences were saved. Inspect `--export-profile` or `--compare-profile` after uncertain results. Input errors use the validator's JSON before any guard or preference write. The command initializes no display backend or tray, registers no shortcuts, and preserves the source file. The shared [Windows named mutex](https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createmutexw) guard covers this session; saved preferences remain per user.
+
 ## Scriptable status
 
 `RedLight.exe --status` writes JSON for the existing tray instance. It never starts a tray instance, activates a filter, or reads the display backend. In PowerShell, use a pipeline so the GUI executable completes before reading its output and exit code:
@@ -184,7 +195,7 @@ if ($result -eq 0) { $json | ConvertFrom-Json }
 
 Exit codes are `0` for a valid snapshot (including an off filter), `3` when no tray instance exists, and `1` for timeout, incompatible response, or output failure. A missing instance produces `status: "not-running"`; query failures produce `query-failed` or `invalid-response` when output is available. Responses use protocol 1. A request waits up to three seconds for the tray; it opens no dialogs and creates no console window. Redirected standard output is preserved; otherwise it uses an existing parent console if available.
 
-Malformed `--status`, `--validate-profile`, `--compare-profile`, or `--build-info` requests produce JSON with `status: "invalid-arguments"` and exit code `2`, keeping script errors noninteractive. Output failure returns `1`.
+Malformed `--status`, `--validate-profile`, `--compare-profile`, `--save-profile`, or `--build-info` requests produce JSON with `status: "invalid-arguments"` and exit code `2`, keeping script errors noninteractive. Output failure returns `1`.
 
 Snapshots report backend/mode/luma selection, configured session limit and remaining whole seconds, preferred/actual shortcuts, unsaved settings, session-notification registration, and logging health flags. `remaining_seconds` is null when the countdown is unarmed. `restore_pending` means restoration data or ownership cleanup is pending, including during a normal active session. `backend_active` is the last confirmed backend activation flag; `active` is true only when `status` is `on`, and becomes false for busy, recovery-needed, backend-changed, or verification-unavailable states. `verification` describes the last explicit check, which may be `not-checked`. A status query does not refresh verification or measure physical output. Full diagnostic counters and build identity remain available in the support report.
 
@@ -240,7 +251,7 @@ Do not run software you do not trust. RedLight is provided as-is and without war
   * `RedLight.exe --reset-display`
 * With a running instance, reset mode asks that instance to restore its saved state. A busy or unresponsive instance is not bypassed.
 * Without a running instance, reset mode applies an identity Magnification matrix. This clears Magnification color effects, including those from other tools; it cannot recover a lost gamma-ramp snapshot after a crash.
-* Exit codes: `0` for success (including an already-running instance), `1` for startup/recovery/query/file/settings/output failure, `2` for invalid arguments, `3` when `--status` finds no tray instance, `4` when an offline profile command finds invalid candidate data, and `5` when `--compare-profile` finds valid differences. `--help` and `--version` display informational dialogs. Options are case-sensitive and exactly one option is accepted.
+* Exit codes: `0` for success (including an already-running instance), `1` for startup/recovery/query/file/settings/cleanup/output failure, `2` for invalid arguments, `3` when `--status` finds no tray instance, `4` when an offline profile command finds invalid candidate data, `5` when `--compare-profile` finds valid differences, and `6` when `--save-profile` refuses an existing instance guard. `--help` and `--version` display informational dialogs. Options are case-sensitive and exactly one option is accepted.
 * Logs support Unicode Windows profile paths. Rotation runs at startup and before a write would push the current log past a 1 MiB target, retaining up to three archives. Long records are truncated with a marker. About/support reports show file-logging health, missing/truncated record counts, and the last file error. If rotation or storage fails, affected disk writes are skipped and debugger output continues; **Expert controls → Retry file logging** can retry after the underlying problem is fixed. Earlier missing-record counts remain visible after recovery. Rotation and size checks are best effort when other processes or filesystem restrictions interfere.
 * To remove RedLight, exit it, delete its folder, and optionally delete `%LOCALAPPDATA%\RedLight` and the `HKCU\Software\RedLight` registry key. No service or startup entry is installed.
 

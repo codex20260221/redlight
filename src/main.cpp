@@ -17,6 +17,7 @@
 #include "PreferencesStore.h"
 #include "PreferencesImport.h"
 #include "PreferencePreview.h"
+#include "InstanceName.h"
 #include "CommandIds.h"
 #include "TrayMenu.h"
 #include "SessionLimitDialog.h"
@@ -159,6 +160,11 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
         Diagnostics::Shutdown();
         return result;
     }
+    if (action == StartupAction::SaveProfile) {
+        const int result = SaveSettingsProfileFile(options.profilePath.c_str());
+        Diagnostics::Shutdown();
+        return result;
+    }
     if (action == StartupAction::ExportProfile) {
         const int result = ExportSavedSettingsProfile();
         Diagnostics::Shutdown();
@@ -174,6 +180,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
             "--validate-profile=<file>: validate a settings file offline (JSON)\n"
             "--normalize-profile=<file>: write a canonical current-format profile\n"
             "--compare-profile=<file>: compare with saved preferences (JSON)\n"
+            "--save-profile=<file>: explicitly save for next start (JSON)\n"
             "--export-profile: write saved/default preferences as profile text\n"
             "--backend=auto|magnification|gamma: one-start backend override\n\n"
             "Without options, start in the tray with the filter off.\n"
@@ -195,7 +202,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
     }
 
     // silently exit multiple instances
-    HANDLE hMutex = CreateMutex(NULL, TRUE, "Local\\RedLightApp");
+    HANDLE hMutex = CreateMutexW(NULL, TRUE, RedLightInstanceMutexName);
     if (!hMutex) {
         Diagnostics::LogFormat("CreateMutex failed (GetLastError=%lu).", static_cast<unsigned long>(GetLastError()));
         ReportError("RedLight could not acquire its instance guard. See the diagnostics log for details.");
@@ -340,7 +347,7 @@ bool ResetDisplay() {
     }};
 
     // Never bypass a live/starting owner's recovery data with an identity reset.
-    HANDLE owner = CreateMutexA(NULL, TRUE, "Local\\RedLightApp");
+    HANDLE owner = CreateMutexW(NULL, TRUE, RedLightInstanceMutexName);
     const DWORD mutexError = GetLastError();
     if (!owner) {
         Diagnostics::LogFormat("Reset mode: could not acquire instance guard (error %lu).", mutexError);

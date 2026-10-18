@@ -22,6 +22,8 @@
 #include "ProfileValidation.h"
 #include "ProfileExport.h"
 #include "ProfileComparison.h"
+#include "ProfileSave.h"
+#include "InstanceName.h"
 #include "JsonString.h"
 #include "BackendComparison.h"
 #include "BackendTiming.h"
@@ -85,6 +87,12 @@ struct Fake {
     int mutexClosesWhileOwned = 0, gammaUnownedWrites = 0, gammaWritesAtMutexRelease = -1;
     const wchar_t* mutexName = nullptr;
     BOOL mutexInitialOwner = -1;
+    bool instanceCreate = true, instancePresent = false, instanceRelease = true, instanceClose = true, instanceOwned = false, instanceOpen = false;
+    std::deque<bool> instanceReleaseResults, instanceCloseResults;
+    unsigned instanceCreates = 0, instanceReleases = 0, instanceCloses = 0, instanceClosesWhileOwned = 0;
+    unsigned instanceCreatesWhileProfileOpen = 0, registryWritesWithInstanceOwner = 0, stdoutWhileInstanceOpen = 0;
+    BOOL instanceInitialOwner = FALSE;
+    const wchar_t* instanceName = nullptr;
     bool argumentsRead = true, argumentsFree = true, argumentsOutstanding = false;
     int argumentsCount = 1, argumentReads = 0, argumentFrees = 0;
     std::array<LPWSTR, 8> arguments{};
@@ -2703,6 +2711,134 @@ void BackendTimingReportsAndResetAreReadOnly() {
         filter.isActive() && filter.needsRestore(), "report/reset require no clock/native operation and preserve active ownership");
     Check(filter.disable() && filter.statistics().restoration.timing == BackendOperationTiming{1, 5, 5, 5}, "timing resumes after reset without losing restoration data");
 }
+void ProfileSaveFileValidatedGuardedAndInactive() {
+    const auto candidate = ComparisonCandidate(63);
+    fake.profileData = *SerializePreferences(candidate); fake.profileChunk = 3; fake.stdoutChunk = 5;
+    const auto source = fake.profileData;
+    Check(SaveSettingsProfileFile(L"C:\\profiles\\赤 光.txt") == 0 && fake.stdoutText ==
+        "{\"protocol\":1,\"status\":\"profile-saved\",\"saved\":true,\"stage\":\"none\",\"error_code\":null}\n",
+        "an explicit valid save produces complete JSON after partial input/output operations");
+    Check(fake.profileData == source && !fake.profileHandleOpen && fake.errorMode == 2 && fake.instanceCreatesWhileProfileOpen == 0 &&
+        fake.instanceCreates == 1 && fake.instanceInitialOwner == TRUE && std::wstring_view(fake.instanceName) == RedLightInstanceMutexName &&
+        fake.registryWrites == 1 && fake.registryWritesWithInstanceOwner == 1 && fake.instanceReleases == 1 && fake.instanceCloses == 1 &&
+        !fake.instanceOwned && !fake.instanceOpen && fake.instanceClosesWhileOwned == 0 && fake.stdoutWhileInstanceOpen == 0,
+        "input closes before guard acquisition, the complete record saves under ownership, and guard cleanup precedes output");
+    Check(LoadPreferences().preferences == candidate && fake.magInitializes == 0 && fake.dcRequests == 0 && fake.magReads == 0 && fake.gammaReads == 0 &&
+        fake.magWrites == 0 && fake.gammaWrites == 0 && fake.statusSends == 0 && fake.hotkeyRegisters == 0 && fake.sessionRegisters == 0 && fake.clipOpens == 0 && fake.mutexWaits == 0,
+        "save changes only persisted preferences without tray requests, display work, registrations, clipboard, or mutex waits");
+}
+void ProfileSaveRefusesExistingInstanceWithoutRecoveryCalls() {
+    GammaRampFilter filter;
+    Check(filter.initialize() && filter.enable() && SavePreferences({}), "existing active owner and saved preferences");
+    const auto reads = fake.gammaReads, writes = fake.gammaWrites, registryWrites = fake.registryWrites;
+    const auto statistics = filter.statistics();
+    fake.profileData = *SerializePreferences(ComparisonCandidate(63)); fake.instancePresent = true;
+    Check(SaveSettingsProfileFile(L"valid.profile") == 6 && fake.stdoutText.find("\"status\":\"instance-present\",\"saved\":false") != std::string::npos &&
+        fake.stdoutText.find("\"error_code\":183") != std::string::npos && fake.instanceReleases == 0 && fake.instanceCloses == 1 && !fake.instanceOpen &&
+        fake.registryWrites == registryWrites && LoadPreferences().preferences == AppPreferences{},
+        "an existing/starting guard is refused without releasing another owner or overwriting preferences");
+    Check(filter.isActive() && filter.needsRestore() && filter.statistics() == statistics && fake.gammaReads == reads && fake.gammaWrites == writes &&
+        fake.mutexOwned && fake.statusSends == 0, "save refusal does not request restoration or alter another active backend");
+    Check(filter.disable(), "original owner can still restore normally");
+}
+void ProfileSaveInputAndInvalidCandidateGates() {
+    fake.profileData = "[RedLightProfile]\nversion=999\n";
+    Check(SaveSettingsProfileFile(L"invalid.profile") == 4 && fake.instanceCreates == 0 && fake.registryWrites == 0 && fake.registryReads == 0,
+        "invalid file data cannot acquire a guard or access saved preferences");
+    Reset(); fake.profileOpen = false;
+    Check(SaveSettingsProfileFile(L"missing.profile") == 1 && fake.instanceCreates == 0 && fake.registryWrites == 0, "input I/O failure cannot begin a save");
+    Reset(); fake.profileData = *SerializePreferences({}); fake.profileClose = false;
+    Check(SaveSettingsProfileFile(L"close.profile") == 1 && fake.instanceCreates == 0 && fake.registryWrites == 0 && fake.profileCloses == 2,
+        "unconfirmed input cleanup blocks all settings/guard work");
+    Reset(); auto invalid = AppPreferences{}; invalid.sessionMinutes = 241;
+    Check(SaveSettingsProfileForNextStart(invalid) == 4 && fake.instanceCreates == 0 && fake.registryWrites == 0,
+        "direct defensive candidate validation precedes every mutating API");
+}
+void ProfileSaveGuardAndStorageFailures() {
+    fake.instanceCreate = false; fake.diagnosticsClobbersError = true;
+    Check(SaveSettingsProfileForNextStart({}) == 1 && fake.registryWrites == 0 && fake.instanceReleases == 0 && fake.instanceCloses == 0 &&
+        fake.stdoutText.find("\"stage\":\"guard-create\",\"error_code\":5") != std::string::npos,
+        "guard acquisition failure is cached before logging and blocks all preference writes");
+    Reset(); Check(SavePreferences({}), "seed prior storage before failed offline save");
+    const auto writes = fake.registryWrites;
+    fake.registryWrite = false;
+    Check(SaveSettingsProfileForNextStart(ComparisonCandidate(63)) == 1 && fake.registryWrites == writes + 1 &&
+        fake.stdoutText.find("\"status\":\"settings-error\",\"saved\":false") != std::string::npos && !fake.instanceOwned && !fake.instanceOpen &&
+        LoadPreferences().preferences == AppPreferences{}, "storage failure preserves the prior record and still releases the guard");
+}
+void ProfileSaveAllocationFailureUnwindsGuard() {
+    Check(SavePreferences({}), "seed storage before allocation fault");
+    const auto writes = fake.registryWrites;
+    const auto candidate = ComparisonCandidate(63);
+    {
+        TestMemory::FailNextAllocation fail;
+        Check(SaveSettingsProfileForNextStart(candidate) == 1 && fake.registryWrites == writes && !fake.instanceOwned && !fake.instanceOpen &&
+            fake.stdoutText.find("\"saved\":false") != std::string::npos, "serialization failure is contained before registry writes and guard ownership unwinds");
+    }
+    Check(LoadPreferences().preferences == AppPreferences{} && fake.instanceReleases == 1 && fake.instanceCloses == 1,
+        "allocation failure retains prior persisted settings and checked guard cleanup");
+}
+void ProfileSaveCleanupFailurePreservesSavedTruth() {
+    const auto candidate = ComparisonCandidate(63);
+    for (bool releaseFailure : {true, false}) {
+        Reset(); fake.diagnosticsClobbersError = true;
+        if (releaseFailure) fake.instanceReleaseResults = {false, true};
+        else fake.instanceCloseResults = {false, true};
+        Check(SaveSettingsProfileForNextStart(candidate) == 1 && fake.stdoutText.find("\"status\":\"cleanup-error\",\"saved\":true") != std::string::npos &&
+            fake.stdoutText.find(releaseFailure ? "\"stage\":\"guard-release\",\"error_code\":5" : "\"stage\":\"guard-close\",\"error_code\":5") != std::string::npos &&
+            LoadPreferences().preferences == candidate, "cleanup failure reports saved truth and the original error without pretending the preference write was undone");
+        Check(!fake.instanceOpen && !fake.instanceOwned && fake.instanceClosesWhileOwned == 0 && fake.stdoutWhileInstanceOpen == 0 &&
+            fake.instanceReleases == (releaseFailure ? 2u : 1u) && fake.instanceCloses == (releaseFailure ? 1u : 2u),
+            "retained cleanup retries before output without releasing twice after a close-only failure");
+    }
+}
+void ProfileSaveExistingGuardCloseFailure() {
+    fake.instancePresent = true; fake.instanceCloseResults = {false, true};
+    Check(SaveSettingsProfileForNextStart({}) == 1 && fake.registryWrites == 0 && fake.instanceReleases == 0 && fake.instanceCloses == 2 &&
+        !fake.instanceOpen && fake.stdoutText.find("\"status\":\"guard-error\",\"saved\":false") != std::string::npos,
+        "existing-object close failure is reported and retried without acquiring/releasing foreign ownership or writing settings");
+}
+void ProfileSaveOutputFailureDoesNotUndoSavedRecord() {
+    const auto candidate = ComparisonCandidate(63);
+    fake.stdoutChunk = 5; fake.stdoutFailOnCall = 2;
+    Check(SaveSettingsProfileForNextStart(candidate) == 1 && fake.stdoutText.size() == 5 && !fake.instanceOpen && !fake.instanceOwned &&
+        LoadPreferences().preferences == candidate && fake.registryWrites == 1, "failed result output cannot undo an already successful explicit save");
+    Reset(); fake.stdoutValid = false; fake.consoleAttach = false;
+    Check(SaveSettingsProfileForNextStart(candidate) == 1 && fake.stdoutText.empty() && LoadPreferences().preferences == candidate,
+        "unavailable output remains noninteractive and reports failure after any successful settings write");
+}
+void ProfileSaveOlderFormatAndOwnedPathArguments() {
+    fake.profileData = "[RedLightProfile]\nversion=1\nmode=strict\nluma=equal\nbackend=gamma\nsession_minutes=17\n";
+    Check(SaveSettingsProfileFile(L"old.profile") == 0 && LoadPreferences().preferences ==
+        AppPreferences{RedMode::StrictRed, LumaProfile::EqualDetail, BackendPreference::Gamma, 17}, "older files save defined defaults in the current complete format");
+    std::wstring option = L"--save-profile=C:\\profiles\\赤 光.txt";
+    const std::wstring_view args[] = {option};
+    const auto options = ParseStartupOptions(args); option.assign(L"changed native storage");
+    Check(options.action == StartupAction::SaveProfile && options.errorOutput == StartupErrorOutput::Json && options.profilePath == L"C:\\profiles\\赤 光.txt" &&
+        !options.backendOverride, "explicit save owns its Unicode path and has standalone JSON error policy");
+    for (const auto bad : {L"--save-profile", L"--save-profile=", L"--save-profile-extra"}) {
+        const std::wstring_view input[] = {bad};
+        Check(ParseStartupOptions(input).action == StartupAction::Invalid && ParseStartupOptions(input).errorOutput == StartupErrorOutput::Json,
+            "invalid save requests cannot fall through to tray mode or a help dialog");
+    }
+    const std::wstring_view combined[] = {L"--save-profile=file", L"--backend=gamma"};
+    Check(ParseStartupOptions(combined).action == StartupAction::Invalid, "save cannot combine with activation/backend options");
+    option = L"--save-profile=long enough for owned path allocation.profile"; fake.argumentsCount = 2; fake.arguments[1] = option.data();
+    {
+        TestMemory::FailNextAllocation fail(1);
+        Check(GetStartupOptions().action == StartupAction::Failed && !fake.argumentsOutstanding, "save-path allocation failure frees the native argument block");
+    }
+}
+void ProfileSaveExplicitlyReplacesCorruptStorage() {
+    fake.registry[L"SettingsProfile"] = {REG_BINARY, {'b','a','d'}};
+    PutLegacy(L"RedMode", 1);
+    const auto candidate = ComparisonCandidate(63);
+    Check(SaveSettingsProfileForNextStart(candidate) == 0 && fake.registryReads == 0 && fake.registryWrites == 1 && fake.registryWritesWithInstanceOwner == 1,
+        "an explicit complete validated save can repair corrupt storage without inheriting fallback or legacy values");
+    const auto loaded = LoadPreferences();
+    Check(!loaded.warning && loaded.source == PreferenceSource::VersionedRecord && loaded.preferences == candidate,
+        "the repaired record is a complete valid current profile and takes precedence over stale legacy values");
+}
 } // namespace
 
 DWORD GetLastError() { return fake.lastError; }
@@ -2766,6 +2902,14 @@ BOOL SetThreadErrorMode(DWORD mode, DWORD* previous) {
     return 1;
 }
 HANDLE CreateMutexW(void*, BOOL initialOwner, const wchar_t* name) {
+    if (name && std::wstring_view(name) == RedLightInstanceMutexName) {
+        ++fake.instanceCreates; fake.instanceName = name; fake.instanceInitialOwner = initialOwner;
+        if (fake.profileHandleOpen) ++fake.instanceCreatesWhileProfileOpen;
+        if (!fake.instanceCreate) { fake.lastError = ERROR_ACCESS_DENIED; return nullptr; }
+        fake.instanceOpen = true; fake.instanceOwned = !fake.instancePresent && initialOwner;
+        fake.lastError = fake.instancePresent ? ERROR_ALREADY_EXISTS : ERROR_SUCCESS;
+        return &fake.instanceOpen;
+    }
     ++fake.mutexCreates; fake.mutexName = name; fake.mutexInitialOwner = initialOwner;
     if (!fake.mutexCreate) return nullptr;
     fake.mutexOpen = true;
@@ -2776,13 +2920,30 @@ DWORD WaitForSingleObject(HANDLE, DWORD milliseconds) {
     if (fake.mutexWaitResult == WAIT_OBJECT_0 || fake.mutexWaitResult == WAIT_ABANDONED) fake.mutexOwned = true;
     return fake.mutexWaitResult;
 }
-BOOL ReleaseMutex(HANDLE) {
+BOOL ReleaseMutex(HANDLE handle) {
+    if (handle == &fake.instanceOpen) {
+        ++fake.instanceReleases;
+        bool success = fake.instanceRelease;
+        if (!fake.instanceReleaseResults.empty()) { success = fake.instanceReleaseResults.front(); fake.instanceReleaseResults.pop_front(); }
+        if (!success || !fake.instanceOwned) { fake.lastError = ERROR_ACCESS_DENIED; return FALSE; }
+        fake.instanceOwned = false;
+        return 1;
+    }
     ++fake.mutexReleases; fake.gammaWritesAtMutexRelease = fake.gammaWrites;
     if (!fake.mutexRelease || !fake.mutexOwned) return FALSE;
     fake.mutexOwned = false;
     return 1;
 }
 BOOL CloseHandle(HANDLE handle) {
+    if (handle == &fake.instanceOpen) {
+        ++fake.instanceCloses;
+        if (fake.instanceOwned) ++fake.instanceClosesWhileOwned;
+        bool success = fake.instanceClose;
+        if (!fake.instanceCloseResults.empty()) { success = fake.instanceCloseResults.front(); fake.instanceCloseResults.pop_front(); }
+        if (!success) { fake.lastError = ERROR_ACCESS_DENIED; return FALSE; }
+        fake.instanceOpen = false;
+        return 1;
+    }
     if (handle == &fake.profileHandleOpen) {
         ++fake.profileCloses;
         if (!fake.profileClose) { fake.lastError = ERROR_ACCESS_DENIED; return FALSE; }
@@ -2805,6 +2966,7 @@ BOOL FreeConsole() { ++fake.consoleFrees; return fake.consoleFree; }
 BOOL WriteFile(HANDLE, const void* data, DWORD size, DWORD* written, void*) {
     ++fake.stdoutWrites;
     if (fake.profileHandleOpen) ++fake.stdoutWhileProfileOpen;
+    if (fake.instanceOpen) ++fake.stdoutWhileInstanceOpen;
     fake.stdoutErrorMode = fake.errorMode;
     if (!fake.stdoutWrite || fake.stdoutFailOnCall == fake.stdoutWrites) { *written = 0; return FALSE; }
     if (fake.stdoutOverWrite) { *written = size + 1; return 1; }
@@ -2899,6 +3061,7 @@ LSTATUS RegGetValueW(HKEY, const wchar_t*, const wchar_t* name, DWORD flags, DWO
 }
 LSTATUS RegSetKeyValueW(HKEY, const wchar_t*, const wchar_t* name, DWORD type, const void* data, DWORD bytes) {
     ++fake.registryWrites;
+    if (fake.instanceOwned) ++fake.registryWritesWithInstanceOwner;
     if (!fake.registryWrite) return ERROR_ACCESS_DENIED;
     const auto* begin = static_cast<const char*>(data);
     fake.registry[name] = {type, std::vector<char>(begin, begin + bytes)};
@@ -3024,6 +3187,12 @@ int main() {
         {"Backend timing completed scopes/zero", BackendTimingCompletedScopesAndZero}, {"Backend timing nested exception/reset guard", BackendTimingNestedExceptionAndResetGuard},
         {"Backend timing wrap/saturation", BackendTimingWrapAndSaturation}, {"Mag timing includes rollback/read-back", MagnificationTimingIncludesRollbackAndReadback},
         {"Gamma timing includes read-back/recovery", GammaTimingIncludesReadbackAndRecovery}, {"Backend timing report/reset isolation", BackendTimingReportsAndResetAreReadOnly},
+        {"Profile save validated/guarded/inactive", ProfileSaveFileValidatedGuardedAndInactive}, {"Profile save refuses an existing instance", ProfileSaveRefusesExistingInstanceWithoutRecoveryCalls},
+        {"Profile save input/validation gates", ProfileSaveInputAndInvalidCandidateGates}, {"Profile save guard/storage failure", ProfileSaveGuardAndStorageFailures},
+        {"Profile save allocation failure cleanup", ProfileSaveAllocationFailureUnwindsGuard}, {"Profile save cleanup failure preserves saved truth", ProfileSaveCleanupFailurePreservesSavedTruth},
+        {"Profile save existing-guard close failure", ProfileSaveExistingGuardCloseFailure}, {"Profile save output failure after write", ProfileSaveOutputFailureDoesNotUndoSavedRecord},
+        {"Profile save old format/owned path", ProfileSaveOlderFormatAndOwnedPathArguments},
+        {"Explicit profile save repairs corrupt storage", ProfileSaveExplicitlyReplacesCorruptStorage},
         {"Command line", Arguments}
     };
     int failed = 0;

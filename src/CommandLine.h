@@ -5,7 +5,7 @@
 #include <string>
 #include <string_view>
 
-enum class StartupAction { Tray, Restore, Help, Version, BuildInfo, Status, ValidateProfile, NormalizeProfile, CompareProfile, ExportProfile, Invalid, Failed };
+enum class StartupAction { Tray, Restore, Help, Version, BuildInfo, Status, ValidateProfile, NormalizeProfile, CompareProfile, SaveProfile, ExportProfile, Invalid, Failed };
 enum class StartupErrorOutput { Dialog, Json, LogOnly };
 struct StartupOptions {
     StartupAction action = StartupAction::Tray;
@@ -16,7 +16,8 @@ struct StartupOptions {
 inline StartupOptions ParseStartupOptions(std::span<const std::wstring_view> args) {
     if (args.empty()) return {};
     const bool jsonErrors = std::any_of(args.begin(), args.end(), [](std::wstring_view arg) {
-        return arg.starts_with(L"--status") || arg.starts_with(L"--validate-profile") || arg.starts_with(L"--build-info") || arg.starts_with(L"--compare-profile");
+        return arg.starts_with(L"--status") || arg.starts_with(L"--validate-profile") || arg.starts_with(L"--build-info") ||
+            arg.starts_with(L"--compare-profile") || arg.starts_with(L"--save-profile");
     });
     const bool quietText = std::any_of(args.begin(), args.end(), [](std::wstring_view arg) {
         return arg.starts_with(L"--export-profile") || arg.starts_with(L"--normalize-profile");
@@ -31,13 +32,18 @@ inline StartupOptions ParseStartupOptions(std::span<const std::wstring_view> arg
     if (arg == L"--build-info") return {StartupAction::BuildInfo, std::nullopt, {}, StartupErrorOutput::Json};
     if (arg == L"--status") return {StartupAction::Status, std::nullopt, {}, StartupErrorOutput::Json};
     if (arg == L"--export-profile") return {StartupAction::ExportProfile, std::nullopt, {}, StartupErrorOutput::LogOnly};
-    constexpr std::wstring_view normalizePrefix = L"--normalize-profile=", validatePrefix = L"--validate-profile=", comparePrefix = L"--compare-profile=";
-    const bool normalize = arg.starts_with(normalizePrefix), compare = arg.starts_with(comparePrefix);
-    if (normalize || compare || arg.starts_with(validatePrefix)) {
-        const auto path = arg.substr(normalize ? normalizePrefix.size() : (compare ? comparePrefix.size() : validatePrefix.size()));
+    struct FileOption { std::wstring_view prefix; StartupAction action; StartupErrorOutput output; };
+    constexpr FileOption fileOptions[] = {
+        {L"--validate-profile=", StartupAction::ValidateProfile, StartupErrorOutput::Json},
+        {L"--normalize-profile=", StartupAction::NormalizeProfile, StartupErrorOutput::LogOnly},
+        {L"--compare-profile=", StartupAction::CompareProfile, StartupErrorOutput::Json},
+        {L"--save-profile=", StartupAction::SaveProfile, StartupErrorOutput::Json}
+    };
+    for (const auto& option : fileOptions) {
+        if (!arg.starts_with(option.prefix)) continue;
+        const auto path = arg.substr(option.prefix.size());
         if (!path.empty() && path.size() <= 32767 && path.find(L'\0') == std::wstring_view::npos)
-            return {normalize ? StartupAction::NormalizeProfile : (compare ? StartupAction::CompareProfile : StartupAction::ValidateProfile), std::nullopt, std::wstring(path),
-                normalize ? StartupErrorOutput::LogOnly : StartupErrorOutput::Json};
+            return {option.action, std::nullopt, std::wstring(path), option.output};
         return invalid();
     }
     if (arg.starts_with(L"--backend=")) {

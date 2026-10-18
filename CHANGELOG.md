@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Added explicit `--save-profile=<file>` JSON for next-start configuration, validating/closing bounded input before a shared same-session instance guard and one complete settings write, refusing existing owners, preserving saved truth through cleanup/output failures, and supporting corrupt-record repair without backend/tray initialization.
 - Added completed-sample, last/peak/cumulative elapsed milliseconds to selected-backend counters for both backends, including failures/no-ops/nested recovery, with monotonic wrap handling, saturating totals, reset protection, and explicit inclusive-overlap semantics in support reports.
 - Added cached native countdown-registration/cleanup health, current-countdown warning/restore attempt markers, and exact expiry retry eligibility delay to support reports, sharing the unchanged five-second scheduling policy and one report timestamp without native timer/display work.
 - Added exact changed-field summaries to bounded import/reset confirmation previews while retaining complete candidate choices, explicitly explaining restoration even for identical values, and rejecting incomplete previews before any settings/display mutation.
