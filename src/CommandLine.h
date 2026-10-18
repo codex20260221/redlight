@@ -5,7 +5,7 @@
 #include <string>
 #include <string_view>
 
-enum class StartupAction { Tray, Restore, Help, Version, BuildInfo, Status, ValidateProfile, ExportProfile, Invalid, Failed };
+enum class StartupAction { Tray, Restore, Help, Version, BuildInfo, Status, ValidateProfile, NormalizeProfile, ExportProfile, Invalid, Failed };
 enum class StartupErrorOutput { Dialog, Json, LogOnly };
 struct StartupOptions {
     StartupAction action = StartupAction::Tray;
@@ -18,8 +18,10 @@ inline StartupOptions ParseStartupOptions(std::span<const std::wstring_view> arg
     const bool jsonErrors = std::any_of(args.begin(), args.end(), [](std::wstring_view arg) {
         return arg.starts_with(L"--status") || arg.starts_with(L"--validate-profile") || arg.starts_with(L"--build-info");
     });
-    const bool quietExport = std::any_of(args.begin(), args.end(), [](std::wstring_view arg) { return arg.starts_with(L"--export-profile"); });
-    const auto errorOutput = jsonErrors ? StartupErrorOutput::Json : (quietExport ? StartupErrorOutput::LogOnly : StartupErrorOutput::Dialog);
+    const bool quietText = std::any_of(args.begin(), args.end(), [](std::wstring_view arg) {
+        return arg.starts_with(L"--export-profile") || arg.starts_with(L"--normalize-profile");
+    });
+    const auto errorOutput = jsonErrors ? StartupErrorOutput::Json : (quietText ? StartupErrorOutput::LogOnly : StartupErrorOutput::Dialog);
     const auto invalid = [&] { return StartupOptions{StartupAction::Invalid, std::nullopt, {}, errorOutput}; };
     if (args.size() != 1) return invalid();
     const auto arg = args[0];
@@ -29,10 +31,12 @@ inline StartupOptions ParseStartupOptions(std::span<const std::wstring_view> arg
     if (arg == L"--build-info") return {StartupAction::BuildInfo, std::nullopt, {}, StartupErrorOutput::Json};
     if (arg == L"--status") return {StartupAction::Status, std::nullopt, {}, StartupErrorOutput::Json};
     if (arg == L"--export-profile") return {StartupAction::ExportProfile, std::nullopt, {}, StartupErrorOutput::LogOnly};
-    if (arg.starts_with(L"--validate-profile=")) {
-        const auto path = arg.substr(19);
+    const bool normalize = arg.starts_with(L"--normalize-profile=");
+    if (normalize || arg.starts_with(L"--validate-profile=")) {
+        const auto path = arg.substr(normalize ? 20 : 19);
         if (!path.empty() && path.size() <= 32767 && path.find(L'\0') == std::wstring_view::npos)
-            return {StartupAction::ValidateProfile, std::nullopt, std::wstring(path), StartupErrorOutput::Json};
+            return {normalize ? StartupAction::NormalizeProfile : StartupAction::ValidateProfile, std::nullopt, std::wstring(path),
+                normalize ? StartupErrorOutput::LogOnly : StartupErrorOutput::Json};
         return invalid();
     }
     if (arg.starts_with(L"--backend=")) {

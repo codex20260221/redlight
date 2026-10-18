@@ -145,6 +145,16 @@ $json | ConvertFrom-Json
 
 Validation is read-only and runs before tray/backend/settings initialization. Exit codes are `0` for valid profile data, `4` for invalid data, `1` for file/output/internal failure, and `2` for invalid arguments. JSON uses protocol 1 with `status` and `valid` fields. Invalid data adds a parser `reason` and `line` (0 when no source line applies); file errors add `stage` and Windows `error_code`. Paths and file contents are not echoed. Profiles are limited to 4 KiB; the validator reads at most 4,097 bytes to detect oversize input and rejects pipes/character devices before reading. This is a byte limit; disk/network I/O follows Windows timing. Validation does not import or apply the profile.
 
+`--normalize-profile=<file>` reads the same bounded UTF-8 input and writes canonical current-format profile text. It upgrades valid version 1/2 profiles with their defined defaults, preserves all accepted settings, and removes comments, BOM, padding, and field-order differences. The output uses CRLF line endings and normalizes to identical bytes on repeated use. It closes the input before output and never edits the source file, loads/saves application preferences, or initializes a display backend.
+
+```powershell
+$profile = & .\RedLight.exe '--normalize-profile=C:\Profiles\old night.profile' | Out-String
+if ($LASTEXITCODE -ne 0) { throw 'RedLight profile normalization failed.' }
+$profile | Set-Content -LiteralPath .\night-v3.profile -Encoding utf8
+```
+
+Normalization returns `0` for complete output, `4` for invalid profile data, `1` for file/serialization/output failure, and `2` for invalid arguments. Errors go to diagnostics without a dialog or JSON mixed into profile text; invalid data and input-file failures produce no stdout. Discard partial output after any failure. This command prepares a file for comparison or later confirmed import; it does not apply settings.
+
 ## Scriptable status
 
 `RedLight.exe --status` writes JSON for the existing tray instance. It never starts a tray instance, activates a filter, or reads the display backend. In PowerShell, use a pipeline so the GUI executable completes before reading its output and exit code:
@@ -209,7 +219,7 @@ Do not run software you do not trust. RedLight is provided as-is and without war
   * `RedLight.exe --reset-display`
 * With a running instance, reset mode asks that instance to restore its saved state. A busy or unresponsive instance is not bypassed.
 * Without a running instance, reset mode applies an identity Magnification matrix. This clears Magnification color effects, including those from other tools; it cannot recover a lost gamma-ramp snapshot after a crash.
-* Exit codes: `0` for success (including an already-running instance), `1` for startup/recovery/query/file/output failure, `2` for invalid arguments, `3` when `--status` finds no tray instance, and `4` when offline validation finds invalid profile data. `--help` and `--version` display informational dialogs. Options are case-sensitive and exactly one option is accepted.
+* Exit codes: `0` for success (including an already-running instance), `1` for startup/recovery/query/file/output failure, `2` for invalid arguments, `3` when `--status` finds no tray instance, and `4` when offline validation or normalization finds invalid profile data. `--help` and `--version` display informational dialogs. Options are case-sensitive and exactly one option is accepted.
 * Logs support Unicode Windows profile paths. Rotation runs at startup and before a write would push the current log past a 1 MiB target, retaining up to three archives. Long records are truncated with a marker. About/support reports show file-logging health, missing/truncated record counts, and the last file error. If rotation or storage fails, affected disk writes are skipped and debugger output continues; **Expert controls → Retry file logging** can retry after the underlying problem is fixed. Earlier missing-record counts remain visible after recovery. Rotation and size checks are best effort when other processes or filesystem restrictions interfere.
 * To remove RedLight, exit it, delete its folder, and optionally delete `%LOCALAPPDATA%\RedLight` and the `HKCU\Software\RedLight` registry key. No service or startup entry is installed.
 

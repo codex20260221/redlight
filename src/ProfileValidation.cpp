@@ -17,7 +17,7 @@ struct File {
         if (handle == INVALID_HANDLE_VALUE) return true;
         if (!CloseHandle(handle)) {
             error = GetLastError();
-            Diagnostics::LogFormat("Profile validation file close failed (error %lu).", error);
+            Diagnostics::LogFormat("Profile file close failed (error %lu).", error);
             return false;
         }
         handle = INVALID_HANDLE_VALUE;
@@ -39,7 +39,7 @@ struct ErrorMode {
         if (!changed) return true;
         if (!SetThreadErrorMode(previous, nullptr)) {
             error = GetLastError();
-            Diagnostics::LogFormat("Profile validation thread error-mode restore failed (error %lu).", error);
+            Diagnostics::LogFormat("Profile file thread error-mode restore failed (error %lu).", error);
             return false;
         }
         changed = false;
@@ -89,23 +89,34 @@ ReadResult ReadProfile(const wchar_t* path) noexcept {
 }
 int WriteResult(std::string_view text, int exitCode) noexcept {
     if (WriteStandardOutput(text)) return exitCode;
-    Diagnostics::Log("Offline profile validation could not write standard output.");
+    Diagnostics::Log("Offline profile command could not write standard output; discard any partial output.");
     return 1;
 }
-int ValidateProfileCommand(const wchar_t* path) {
+int ProfileFileCommand(const wchar_t* path, bool normalize) {
     const auto read = ReadProfile(path);
     char output[1024];
     int length = 0;
     int exitCode = 0;
     if (read.stage) {
-        Diagnostics::LogFormat("Profile validation file error at %s (error %lu).", read.stage, read.error);
+        Diagnostics::LogFormat("Profile file error at %s (error %lu).", read.stage, read.error);
+        if (normalize) return 1;
         length = std::snprintf(output, sizeof(output),
             "{\"protocol\":1,\"status\":\"file-error\",\"valid\":false,\"stage\":\"%s\",\"error_code\":%lu}\n", read.stage, read.error);
         exitCode = 1;
     } else {
         const auto parsed = ParsePreferences(std::string_view(read.bytes.data(), read.length));
         if (parsed.preferences) {
+            if (normalize) {
+                const auto text = SerializePreferences(*parsed.preferences);
+                if (!text) { Diagnostics::Log("Offline profile normalization could not serialize the validated settings."); return 1; }
+                return WriteResult(*text, 0);
+            }
             return WriteResult("{\"protocol\":1,\"status\":\"valid-profile\",\"valid\":true}\n", 0);
+        }
+        if (normalize) {
+            Diagnostics::LogFormat("Offline profile normalization rejected invalid data at line %u: %s.",
+                parsed.line, parsed.error ? parsed.error : "Invalid profile");
+            return 4;
         }
         std::array<char, 512> reason{};
         const auto quoted = QuoteJsonString(parsed.error ? parsed.error : "Invalid profile", reason);
@@ -124,9 +135,17 @@ int ValidateProfileCommand(const wchar_t* path) {
 }
 
 int ValidateSettingsProfileFile(const wchar_t* path) noexcept {
-    try { return ValidateProfileCommand(path); }
+    try { return ProfileFileCommand(path, false); }
     catch (...) {
         Diagnostics::Log("Offline profile validation failed while constructing its result.");
+        return 1;
+    }
+}
+
+int NormalizeSettingsProfileFile(const wchar_t* path) noexcept {
+    try { return ProfileFileCommand(path, true); }
+    catch (...) {
+        Diagnostics::Log("Offline profile normalization failed before complete output; discard any partial output.");
         return 1;
     }
 }

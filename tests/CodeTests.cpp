@@ -1934,6 +1934,118 @@ void VerificationTimingUnknownAndZeroReports() {
         report.find("Verification error code: 123") != std::string::npos,
         "an immediate failed check retains genuine zero timing and its API error");
 }
+void ProfileNormalizationUpgradeAndCanonical() {
+    const std::string base = "[RedLightProfile]\nmode=strict\nluma=equal\nbackend=gamma\nsession_minutes=17\n";
+    for (unsigned version = 1; version <= PreferencesProfileVersion; ++version) {
+        Reset();
+        fake.profileData = std::string("\xef\xbb\xbf# caf\xc3\xa9\n") + base + "version = " + std::to_string(version) + "\n";
+        if (version >= 2) fake.profileData += "hotkeys = f10\n";
+        if (version >= 3) fake.profileData += "expiry_warning = 1m\n";
+        AppPreferences expected{RedMode::StrictRed, LumaProfile::EqualDetail, BackendPreference::Gamma, 17,
+            version >= 2 ? ShortcutProfile::F10 : ShortcutProfile::Default, version >= 3 ? ExpiryWarning::OneMinute : ExpiryWarning::Off};
+        const auto canonical = *SerializePreferences(expected);
+        Check(NormalizeSettingsProfileFile(L"old.profile") == 0 && fake.stdoutText == canonical && ParsePreferences(fake.stdoutText).preferences == expected,
+            "every accepted schema upgrades to complete canonical current-format output without changing settings");
+        const auto firstOutput = fake.stdoutText;
+        Reset(); fake.profileData = firstOutput;
+        Check(NormalizeSettingsProfileFile(L"current.profile") == 0 && fake.stdoutText == firstOutput, "normalization is byte-stable when applied again");
+    }
+}
+void ProfileNormalizationReadOnlyIsolation() {
+    GammaRampFilter filter;
+    Check(filter.initialize() && filter.enable(), "prepare active backend for offline normalization isolation");
+    const auto reads = fake.gammaReads, writes = fake.gammaWrites;
+    const auto statistics = filter.statistics();
+    const auto source = *SerializePreferences(AppPreferences{});
+    fake.profileData = source; fake.profileChunk = 3; fake.stdoutChunk = 5;
+    Check(NormalizeSettingsProfileFile(L"C:\\profiles\\赤 光.txt") == 0 && fake.stdoutText == source && fake.profileData == source,
+        "normalization handles partial reads/writes without modifying the input bytes");
+    Check(fake.profileAccess == GENERIC_READ && fake.profileShare == FILE_SHARE_READ && fake.profileDisposition == OPEN_EXISTING &&
+        !fake.profileHandleOpen && fake.profileCloses == 1 && fake.errorMode == 2 && fake.stdoutWhileProfileOpen == 0 && fake.stdoutErrorMode == 2,
+        "read-only file ownership and thread error-mode cleanup finish before any normalized output");
+    Check(filter.isActive() && filter.needsRestore() && fake.gammaReads == reads && fake.gammaWrites == writes && filter.statistics() == statistics &&
+        fake.magInitializes == 0 && fake.statusSends == 0 && fake.registryReads == 0 && fake.registryWrites == 0 && fake.clipOpens == 0 &&
+        fake.hotkeyRegisters == 0 && fake.sessionRegisters == 0, "normalization performs no backend, tray, preferences, clipboard, or registration operation");
+    Check(filter.disable(), "offline normalization preserves the active backend's restoration data");
+}
+void ProfileNormalizationBoundsAndRejections() {
+    const auto valid = *SerializePreferences(AppPreferences{});
+    fake.profileData = valid; fake.profileData.resize(4096, ' ');
+    Check(NormalizeSettingsProfileFile(L"boundary.profile") == 0 && fake.stdoutText == valid && fake.profilePosition == 4096,
+        "normalization accepts the complete 4096-byte boundary without preserving padding");
+    for (const auto& invalid : {std::string{}, std::string(20000, ' '), valid + std::string(1, '\0'), valid + "#\xff\n",
+        valid + "mode=strict\n", std::string("[RedLightProfile]\nversion=999\n")}) {
+        Reset(); fake.profileData = invalid;
+        Check(NormalizeSettingsProfileFile(L"invalid.profile") == 4 && fake.stdoutText.empty() && fake.stdoutLookups == 0 &&
+            fake.profilePosition <= 4097 && !fake.profileHandleOpen && fake.errorMode == 2,
+            "invalid, malformed, duplicate, future, NUL, and oversized input produce no profile or JSON output");
+    }
+}
+void ProfileNormalizationIoCleanupFailures() {
+    const auto valid = *SerializePreferences(AppPreferences{});
+    for (unsigned failure = 0; failure < 8; ++failure) {
+        Reset(); fake.profileData = valid;
+        switch (failure) {
+        case 0: fake.profileOpen = false; break;
+        case 1: fake.profileType = FILE_TYPE_PIPE; break;
+        case 2: fake.profileRead = false; break;
+        case 3: fake.profileOverRead = true; break;
+        case 4: fake.profileClose = false; break;
+        case 5: fake.errorModeSet = false; break;
+        case 6: fake.errorModeRestore = false; break;
+        case 7: break;
+        }
+        Check(NormalizeSettingsProfileFile(failure == 7 ? nullptr : L"file.profile") == 1 && fake.stdoutText.empty() && fake.stdoutLookups == 0,
+            "file, type, read, cleanup, mode, and null-path failures cannot emit a falsely successful normalized profile");
+        if (failure == 1) Check(fake.profileReads == 0, "normalization rejects pipes before reading");
+        if (failure == 4) Check(fake.profileCloses == 2, "failed close retains ownership for a destructor retry");
+        if (failure == 6) Check(fake.errorModeCalls == 3, "failed thread-mode restore is retried before return");
+    }
+}
+void ProfileNormalizationOutputAndAllocationFailures() {
+    const auto valid = *SerializePreferences(AppPreferences{});
+    fake.profileData = valid;
+    {
+        TestMemory::FailNextAllocation fail;
+        Check(NormalizeSettingsProfileFile(L"valid.profile") == 1 && fake.stdoutLookups == 0 && !fake.profileHandleOpen && fake.errorMode == 2,
+            "serialization allocation failure is contained after input cleanup and before output");
+    }
+    Reset(); fake.profileData = valid; fake.stdoutChunk = 4; fake.stdoutFailOnCall = 2;
+    Check(NormalizeSettingsProfileFile(L"valid.profile") == 1 && fake.stdoutText.size() == 4 && !fake.profileHandleOpen,
+        "interrupted normalized output reports failure instead of success with truncated data");
+    Reset(); fake.profileData = valid; fake.stdoutValid = false; fake.consoleAttach = false;
+    Check(NormalizeSettingsProfileFile(L"valid.profile") == 1 && fake.stdoutText.empty() && fake.errorMode == 2,
+        "unavailable output stays noninteractive and preserves input cleanup");
+}
+void ProfileNormalizationOwnedPathArguments() {
+    std::wstring option = L"--normalize-profile=C:\\profiles\\赤 光.txt";
+    const std::wstring_view args[] = {option};
+    const auto parsed = ParseStartupOptions(args);
+    option.assign(L"changed original option");
+    Check(parsed.action == StartupAction::NormalizeProfile && parsed.profilePath == L"C:\\profiles\\赤 光.txt" &&
+        parsed.errorOutput == StartupErrorOutput::LogOnly && !parsed.backendOverride, "normalization owns its Unicode path and keeps profile output free of JSON errors");
+    for (const auto bad : {L"--normalize-profile", L"--normalize-profile=", L"--normalize-profile-extra"}) {
+        const std::wstring_view input[] = {bad};
+        Check(ParseStartupOptions(input).action == StartupAction::Invalid && ParseStartupOptions(input).errorOutput == StartupErrorOutput::LogOnly,
+            "missing or malformed normalization paths use noninteractive text-output error policy");
+    }
+    const std::wstring longOption = L"--normalize-profile=" + std::wstring(32768, L'x');
+    const std::wstring_view longArgs[] = {longOption};
+    std::wstring nulOption = L"--normalize-profile=a"; nulOption.push_back(L'\0'); nulOption += L"extra";
+    const std::wstring_view nulArgs[] = {nulOption};
+    Check(ParseStartupOptions(longArgs).action == StartupAction::Invalid && ParseStartupOptions(nulArgs).action == StartupAction::Invalid,
+        "normalization paths share the existing size and embedded-NUL guards");
+    const std::wstring_view combined[] = {L"--normalize-profile=file", L"--backend=gamma"}, json[] = {L"--normalize-profile=file", L"--status"};
+    Check(ParseStartupOptions(combined).action == StartupAction::Invalid && ParseStartupOptions(combined).errorOutput == StartupErrorOutput::LogOnly &&
+        ParseStartupOptions(json).action == StartupAction::Invalid && ParseStartupOptions(json).errorOutput == StartupErrorOutput::Json,
+        "normalization is standalone with shared machine-readable error precedence");
+    option = L"--normalize-profile=long enough for path allocation.profile";
+    fake.argumentsCount = 2; fake.arguments[1] = option.data();
+    {
+        TestMemory::FailNextAllocation fail(1);
+        Check(GetStartupOptions().action == StartupAction::Failed && !fake.argumentsOutstanding, "normalization path allocation failure frees native argv");
+    }
+}
 } // namespace
 
 DWORD GetLastError() { return fake.lastError; }
@@ -2217,6 +2329,9 @@ int main() {
         {"Build metadata arguments", BuildInfoArguments},
         {"Verification timing outcomes and precision", VerificationTimingStatesAndPrecision}, {"Verification timing wrap/invalidation", VerificationTimingWrapAndInvalidation},
         {"Verification timing read-only reporting", VerificationTimingReportingPreservesBackend}, {"Verification timing missing/zero reports", VerificationTimingUnknownAndZeroReports},
+        {"Profile normalization schema upgrade/canonical output", ProfileNormalizationUpgradeAndCanonical}, {"Profile normalization read-only isolation", ProfileNormalizationReadOnlyIsolation},
+        {"Profile normalization bounds/invalid data", ProfileNormalizationBoundsAndRejections}, {"Profile normalization I/O cleanup failures", ProfileNormalizationIoCleanupFailures},
+        {"Profile normalization output/allocation failures", ProfileNormalizationOutputAndAllocationFailures}, {"Profile normalization owned path arguments", ProfileNormalizationOwnedPathArguments},
         {"Command line", Arguments}
     };
     int failed = 0;
