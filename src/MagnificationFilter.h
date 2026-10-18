@@ -27,6 +27,7 @@ public:
     bool supportsRedMode(RedMode mode) const override;
     bool shutdown() override;
     const char* name() const override;
+    const char* lifecycleDescription() const noexcept; // Cached flags only; no API, clock, or logging.
     BackendStatistics statistics() const noexcept override { return statistics_; }
     bool resetStatistics() noexcept override { return ResetBackendStatistics(statistics_); }
 

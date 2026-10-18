@@ -465,6 +465,49 @@ void MagnificationNativeFailureErrorProvenance() {
         Check(filter.shutdown(), "clean up native error fixture");
     }
 }
+void MagnificationCachedLifecycleTransitions() {
+    MagnificationFilter filter;
+    Check(std::string_view(filter.lifecycleDescription()) == "Released; backend not initialized", "fresh backend reports no acquired runtime");
+    fake.magGet = false; fake.magUninit = false;
+    Check(!filter.initialize() && std::string_view(filter.lifecycleDescription()) == "Runtime retained; initialization incomplete or cleanup pending",
+        "incomplete capture/cleanup cannot be labeled ready or restoration pending");
+    fake.magGet = fake.magUninit = true;
+    Check(filter.initialize() && std::string_view(filter.lifecycleDescription()) == "Ready; filter off" && filter.enable() &&
+        std::string_view(filter.lifecycleDescription()) == "Active; red output confirmed at last operation", "ready/off and last-confirmed output have distinct cached phases");
+    fake.magWriteResults = {Write::Fail};
+    Check(!filter.disable() && std::string_view(filter.lifecycleDescription()) == "Restoration pending; red output unconfirmed", "ambiguous restoration reports recovery instead of active output");
+    const auto reads = fake.magReads, writes = fake.magWrites, initializes = fake.magInitializes, uninitializes = fake.uninitializes;
+    const auto statistics = filter.statistics(); const auto clocks = fake.backendClockReads;
+    const auto error = std::string(filter.lastError());
+    bool unused = false, observed = false;
+    { TestMemory::FailNextAllocation fail; observed = std::string_view(filter.lifecycleDescription()).starts_with("Restoration pending"); unused = TestMemory::AllocationFailurePending(); }
+    Check(observed && unused && fake.magReads == reads && fake.magWrites == writes && fake.magInitializes == initializes && fake.uninitializes == uninitializes &&
+        filter.statistics() == statistics && fake.backendClockReads == clocks && error == filter.lastError(), "phase observation allocates nothing and makes no native/clock/logging or backend-state change");
+    Check(filter.disable() && std::string_view(filter.lifecycleDescription()) == "Ready; filter off", "confirmed original restoration returns to ready/off");
+    fake.magUninit = false;
+    Check(!filter.shutdown() && std::string_view(filter.lifecycleDescription()).starts_with("Runtime retained"), "cleanup-only failure is unready without a pending matrix restoration");
+    fake.magUninit = true;
+    Check(filter.shutdown() && std::string_view(filter.lifecycleDescription()).starts_with("Released"), "successful cleanup returns to released");
+}
+void MagnificationLifecycleReportUsesCachedSnapshot() {
+    MagnificationFilter filter;
+    Check(filter.initialize() && filter.enable(), "prepare lifecycle support snapshot");
+    fake.magWriteResults = {Write::Fail};
+    Check(!filter.disable(), "prepare recovery-only lifecycle");
+    SupportReportState state; state.backendLifecycle = filter.lifecycleDescription();
+    const auto statistics = filter.statistics(); const auto clocks = fake.backendClockReads;
+    const auto reads = fake.magReads, writes = fake.magWrites, uninitializes = fake.uninitializes;
+    const auto error = std::string(filter.lastError());
+    Check(BuildSupportReport(state).find("Backend lifecycle: Restoration pending; red output unconfirmed") != std::string::npos &&
+        filter.needsRestore() && !filter.isActive() && filter.statistics() == statistics && error == filter.lastError() &&
+        fake.magReads == reads && fake.magWrites == writes && fake.uninitializes == uninitializes && fake.backendClockReads == clocks,
+        "cached lifecycle reporting cannot inspect/reapply/restore or release pending matrix recovery");
+    Check(filter.shutdown() && state.backendLifecycle == "Restoration pending; red output unconfirmed" &&
+        BuildSupportReport(state).find("Backend lifecycle: Restoration pending") != std::string::npos,
+        "a copied lifecycle snapshot remains stable after later backend cleanup");
+    state.backendLifecycle = SupportReportState{}.backendLifecycle;
+    Check(BuildSupportReport(state).find("Backend lifecycle: Not reported") != std::string::npos, "unavailable lifecycle metadata is distinct from a released or healthy backend");
+}
 void InvalidModes() {
     MagnificationFilter m;
     GammaRampFilter g;
@@ -5388,6 +5431,7 @@ int main() {
         {"Magnification failed restoration recovery-only", MagnificationFailedRestorationIsRecoveryOnly}, {"Magnification explicit comparison purposes", MagnificationMatrixVerificationPurposes},
         {"Magnification confirmation tolerance/noops/allocation", MagnificationConfirmationToleranceNoopsAndAllocation}, {"Magnification native error provenance", MagnificationNativeFailureErrorProvenance},
         {"Magnification arbitrary original restoration", MagnificationArbitraryOriginalRestorationRegression}, {"Magnification external changes retain original", MagnificationExternalChangesNeverReplaceOwnedSnapshot},
+        {"Magnification cached lifecycle transitions", MagnificationCachedLifecycleTransitions}, {"Magnification cached lifecycle support snapshot", MagnificationLifecycleReportUsesCachedSnapshot},
         {"Gamma output and restoration", GammaOutputAndRestore}, {"Gamma silent rejection", GammaIgnoredWrite},
         {"Gamma low-byte leakage", GammaLowByteLeak}, {"Inactive shutdown", OffShutdownDoesNotWrite},
         {"Gamma partial-write recovery", GammaPartialFailureRecovery}, {"Gamma failed disable", GammaFailedDisable},

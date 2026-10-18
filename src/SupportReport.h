@@ -18,6 +18,7 @@ struct SupportReportState {
     std::string_view version, backend, startupPolicy, nextStartupPolicy, redMode, lumaProfile, lastError;
     std::string_view preferredRedMode = "Not reported", preferredLumaProfile = "Not reported";
     std::string_view buildRevision = "unversioned", sourceState = "unknown";
+    std::string_view backendLifecycle = "Not reported";
     BackendVerification verification = BackendVerification::NotChecked;
     std::optional<BackendReadbackDetails> readback;
     std::uint32_t verificationError = 0;
@@ -55,7 +56,7 @@ inline std::string BuildSupportReport(const SupportReportState& state) {
     report.exceptions(std::ios::badbit | std::ios::failbit);
     report << "RedLight support report\r\nVersion: " << state.version << " (Windows x64)\r\n"
         << "Build revision: " << state.buildRevision << " (" << state.sourceState << ")\r\n"
-        << "Backend: " << state.backend << "\r\nStartup policy: " << state.startupPolicy
+        << "Backend: " << state.backend << "\r\nBackend lifecycle: " << state.backendLifecycle << "\r\nStartup policy: " << state.startupPolicy
         << (state.commandLineOverride ? " (command-line override)" : "")
         << "\r\nNext-start preference: " << state.nextStartupPolicy << "\r\nMode: " << state.redMode
         << "\r\nLuma detail: " << state.lumaProfile

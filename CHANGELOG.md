@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Show cached Magnification lifecycle phases in support reports, distinguishing released, retained/unready API resources, ready/off, confirmed red output, and restoration pending without fresh API calls, allocation, or recovery-state changes.
 - Extend build-info JSON with the current-settings protocol, accepted profile schema list, and shared profile-byte/session-minute limits; keep discovery bounded/allocation-free and centralize profile read limits across parser/storage/file/clipboard entry points without initializing a tray or backend.
 - Identify the first mismatching matrix coefficient or gamma entry and the largest finite-difference location in cached support reports and explicit verification details, with validated zero-based coordinates, bounded formatting, deterministic ties, and unchanged comparison tolerances/restoration behavior.
 - Include signed virtual-desktop origins and overflow-safe exclusive right/bottom bounds in cached support diagnostics and origin-aware refresh logs, preserving negative multi-monitor coordinates, prior complete snapshots on refresh failure, and read-only reporting.

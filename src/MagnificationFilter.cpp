@@ -267,6 +267,13 @@ bool MagnificationFilter::shutdown() {
 const char* MagnificationFilter::name() const {
     return kFilterName;
 }
+const char* MagnificationFilter::lifecycleDescription() const noexcept {
+    if (restorePending_) return "Restoration pending; red output unconfirmed";
+    if (active_) return "Active; red output confirmed at last operation";
+    if (initialized_) return "Ready; filter off";
+    if (runtimeInitialized_) return "Runtime retained; initialization incomplete or cleanup pending";
+    return "Released; backend not initialized";
+}
 
 void MagnificationFilter::LogError(const char* action, DWORD error) {
     if (error == ERROR_SUCCESS) {
