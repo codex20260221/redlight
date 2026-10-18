@@ -14,6 +14,8 @@ public:
     static constexpr std::size_t capacity = 32, lineBytes = 2048;
     static constexpr std::size_t maximumTextBytes = capacity * (lineBytes - 1) * 4 + 512;
     void clear() noexcept { count_ = 0; next_ = 0; overwritten_ = 0; }
+    std::size_t size() const noexcept { return count_; }
+    std::uint64_t overwritten() const noexcept { return overwritten_; }
     bool append(std::string_view line) noexcept {
         if (line.empty() || line.size() >= lineBytes) return false;
         auto& record = records_[next_];

@@ -4,6 +4,7 @@
 #include "RestorationHistory.h"
 #include "SessionTimer.h"
 #include "DisplayContext.h"
+#include "Diagnostics.h"
 #include <cstdint>
 #include <optional>
 #include <sstream>
@@ -30,6 +31,7 @@ struct SupportReportState {
     std::string_view fileLogging = "Not reported";
     std::uint64_t droppedLogLines = 0, truncatedLogLines = 0;
     std::uint32_t lastFileError = 0;
+    std::optional<Diagnostics::RecentLogStatus> recentLog;
     bool active = false, needsRestore = false;
     bool restoreRequested = false;
     bool toggleHotkey = false, restoreHotkey = false, sessionNotifications = false;
@@ -146,8 +148,13 @@ inline std::string BuildSupportReport(const SupportReportState& state) {
     report << "\r\nOlder restoration records overwritten: " << state.restorationHistory.overwritten()
         << "\r\nRestoration request scopes in progress: " << state.restorationHistory.inProgress()
         << "\r\nRequest durations include control/UI work, dialog wait, and nested scopes; nested times overlap. Deferred attempts/replay are separate scopes."
-        << "\r\nHistory is in-memory control activity; it does not measure display output."
-        << "\r\nFile logging: " << state.fileLogging << "\r\nMissing file records: " << state.droppedLogLines
+        << "\r\nHistory is in-memory control activity; it does not measure display output.";
+    report << "\r\nRecent diagnostic memory: ";
+    if (state.recentLog && state.recentLog->capacity && state.recentLog->retainedRecords <= state.recentLog->capacity) {
+        const auto& recent = *state.recentLog;
+        report << recent.retainedRecords << " / " << recent.capacity << " records retained; " << recent.overwrittenRecords << " earlier records overwritten";
+    } else report << "not reported";
+    report << "\r\nFile logging: " << state.fileLogging << "\r\nMissing file records: " << state.droppedLogLines
         << "\r\nTruncated records: " << state.truncatedLogLines << "\r\nLast file error: " << state.lastFileError
         << "\r\nLast backend error: " << (state.lastError.empty() ? "none" : state.lastError)
         << "\r\nStatus reflects backend call results; no display output is measured.\r\n";

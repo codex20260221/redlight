@@ -11,6 +11,11 @@ struct Status {
     std::uint64_t truncatedLines = 0;
     std::uint32_t lastFileError = 0;
 };
+struct RecentLogStatus {
+    unsigned retainedRecords = 0, capacity = 0;
+    std::uint64_t overwrittenRecords = 0;
+    bool operator==(const RecentLogStatus&) const = default;
+};
 inline const char* FileStateName(FileState state) {
     switch (state) {
     case FileState::NotInitialized: return "Not initialized";
@@ -22,6 +27,7 @@ inline const char* FileStateName(FileState state) {
 }
 std::wstring LogDirectory();
 Status GetStatus() noexcept;
+RecentLogStatus GetRecentLogStatus() noexcept;
 std::optional<std::string> RecentLogText() noexcept;
 void ClearRecentLog() noexcept;
 bool RetryFileLogging() noexcept;

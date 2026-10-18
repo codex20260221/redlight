@@ -944,6 +944,7 @@ void CopySupportReport(HWND owner) {
     state.droppedLogLines = logging.droppedLines;
     state.truncatedLogLines = logging.truncatedLines;
     state.lastFileError = logging.lastFileError;
+    state.recentLog = Diagnostics::GetRecentLogStatus();
     state.verification = g_verification.result().state;
     state.readback = g_verification.result().readback;
     state.verificationError = g_verification.result().errorCode;

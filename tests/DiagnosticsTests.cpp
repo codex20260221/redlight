@@ -222,7 +222,10 @@ void RecentLogConcurrentSnapshots() {
     bool valid = true;
     for (unsigned sample = 0; sample < 50; ++sample) {
         const auto text = Diagnostics::RecentLogText();
-        valid = text && text->starts_with("RedLight recent diagnostics\r\n") && IsValidUtf8(*text) && valid;
+        const auto status = Diagnostics::GetRecentLogStatus();
+        valid = text && text->starts_with("RedLight recent diagnostics\r\n") && IsValidUtf8(*text) &&
+            status.capacity == 32 && status.retainedRecords <= status.capacity &&
+            (!status.overwrittenRecords || status.retainedRecords == status.capacity) && valid;
     }
     for (auto& worker : workers) worker.join();
     const auto text = Diagnostics::RecentLogText();
@@ -318,6 +321,47 @@ void RecentLogClearWhileFileWriteOwnsLock() {
     Check(Diagnostics::RecentLogText()->find("diagnostics write failed") != std::string::npos && Diagnostics::GetStatus().droppedLines == 1,
         "file-error paths can safely record fresh memory warnings with the separate lock");
 }
+void RecentLogStatusRetentionAndClear() {
+    Diagnostics::Initialize();
+    Check(Diagnostics::GetRecentLogStatus() == Diagnostics::RecentLogStatus{0, 32, 0}, "empty memory history has explicit capacity and zero counters");
+    for (unsigned index = 0; index < 40; ++index) Diagnostics::LogFormat("status-record-%u", index);
+    const auto snapshot = Diagnostics::GetRecentLogStatus();
+    Check(snapshot == Diagnostics::RecentLogStatus{32, 32, 8}, "retention status counts ring records and overwritten history exactly");
+    const auto writes = fake.writes;
+    const auto debug = fake.lastDebug;
+    bool unused = false;
+    Diagnostics::RecentLogStatus repeated;
+    {
+        TestMemory::FailNextAllocation fail;
+        repeated = Diagnostics::GetRecentLogStatus();
+        unused = TestMemory::AllocationFailurePending();
+    }
+    Check(unused && repeated == snapshot && fake.writes == writes && fake.lastDebug == debug,
+        "cached retention counts allocate nothing and perform no logging/file operation");
+    Diagnostics::ClearRecentLog();
+    Check(Diagnostics::GetRecentLogStatus() == Diagnostics::RecentLogStatus{0, 32, 0} && snapshot == Diagnostics::RecentLogStatus{32, 32, 8},
+        "clear resets current status while an earlier by-value snapshot stays stable");
+    Diagnostics::Log("fresh status record");
+    Diagnostics::Shutdown();
+    Check(Diagnostics::GetRecentLogStatus() == Diagnostics::RecentLogStatus{1, 32, 0}, "successful shutdown retains memory status until the next lifecycle");
+    Diagnostics::Initialize();
+    Check(Diagnostics::GetRecentLogStatus() == Diagnostics::RecentLogStatus{0, 32, 0}, "new initialization resets visible retention counts");
+}
+void RecentLogStatusIndependentOfFileHealth() {
+    fake.failOpen = true;
+    Diagnostics::Initialize(); Diagnostics::Log("memory still retains a skipped file record");
+    const auto file = Diagnostics::GetStatus();
+    Check(file.file == Diagnostics::FileState::Unavailable && file.droppedLines == 1 &&
+        Diagnostics::GetRecentLogStatus() == Diagnostics::RecentLogStatus{2, 32, 0}, "memory counts include the file warning and retained record independently of the one skipped file write");
+    const auto debug = fake.lastDebug;
+    const auto status = Diagnostics::GetRecentLogStatus();
+    const auto after = Diagnostics::GetStatus();
+    Check(status.retainedRecords == 2 && after.file == file.file && after.droppedLines == file.droppedLines && after.lastFileError == file.lastFileError &&
+        fake.files.empty() && fake.writes == 0 && fake.lastDebug == debug, "reading memory counters neither retries unavailable storage nor hides its diagnostics");
+    fake.failOpen = false;
+    Check(Diagnostics::RetryFileLogging() && Diagnostics::GetStatus().droppedLines == 1 &&
+        Diagnostics::GetRecentLogStatus() == Diagnostics::RecentLogStatus{3, 32, 0}, "file recovery preserves the earlier memory/file histories and adds its own ordinary record");
+}
 Handle* OpenHandle(HANDLE raw) {
     if (!raw || raw == INVALID_HANDLE_VALUE) { lastError = ERROR_INVALID_HANDLE; return nullptr; }
     auto* handle = static_cast<Handle*>(raw);
@@ -372,7 +416,9 @@ BOOL WriteFile(HANDLE raw, const void* bytes, DWORD length, DWORD* written, void
     auto* handle = OpenHandle(raw); if (!handle) return 0;
     if (fake.snapshotDuringWrite) {
         const auto text = Diagnostics::RecentLogText();
-        fake.snapshotDuringWriteSucceeded = text && text->find("snapshot inside pending file write") != std::string::npos;
+        const auto status = Diagnostics::GetRecentLogStatus();
+        fake.snapshotDuringWriteSucceeded = text && text->find("snapshot inside pending file write") != std::string::npos &&
+            status.capacity == 32 && status.retainedRecords > 0 && status.retainedRecords <= status.capacity;
     }
     if (fake.clearDuringWrite) {
         Diagnostics::ClearRecentLog();
@@ -404,7 +450,8 @@ int main() {
         {"Recent log clear preserves file/health", RecentLogClearPreservesFileAndHealth}, {"Recent log clear with unavailable storage", RecentLogClearPreservesUnavailableStorage},
         {"Recent log concurrent clear/snapshots", RecentLogConcurrentClearAndSnapshots},
         {"Recent log snapshot during locked file I/O", RecentLogSnapshotWhileFileWriteOwnsLock},
-        {"Recent log clear during locked file I/O", RecentLogClearWhileFileWriteOwnsLock}
+        {"Recent log clear during locked file I/O", RecentLogClearWhileFileWriteOwnsLock},
+        {"Recent log retention status/lifecycle", RecentLogStatusRetentionAndClear}, {"Recent log status independent of file health", RecentLogStatusIndependentOfFileHealth}
     };
     int failures = 0;
     for (const auto& [name, run] : tests) {

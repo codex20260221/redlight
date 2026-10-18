@@ -612,6 +612,32 @@ void SupportReportStates() {
     Check(report.find("Startup preference source: Defaults") != std::string::npos && report.find("Startup preference load warnings: yes") != std::string::npos,
         "startup load warnings remain reportable after the initial notification");
 }
+void SupportReportDiagnosticRetentionSnapshot() {
+    GammaRampFilter filter;
+    Check(filter.initialize() && filter.enable(), "prepare active gamma state for cached report isolation");
+    const auto statistics = filter.statistics();
+    const auto reads = fake.gammaReads, writes = fake.gammaWrites, releases = fake.mutexReleases;
+    const auto clocks = fake.backendClockReads;
+    SupportReportState state;
+    Check(BuildSupportReport(state).find("Recent diagnostic memory: not reported") != std::string::npos,
+        "absent retention metadata is distinguished from an empty memory history");
+    state.recentLog = Diagnostics::RecentLogStatus{0, 32, 0};
+    Check(BuildSupportReport(state).find("Recent diagnostic memory: 0 / 32 records retained; 0 earlier records overwritten") != std::string::npos,
+        "genuine empty history retains its known capacity and zero overwrite count");
+    state.recentLog = Diagnostics::RecentLogStatus{32, 32, (std::numeric_limits<std::uint64_t>::max)()};
+    state.fileLogging = "Unavailable"; state.droppedLogLines = 7;
+    const auto report = BuildSupportReport(state);
+    Check(report.find("32 / 32 records retained; 18446744073709551615 earlier records overwritten") != std::string::npos &&
+        report.find("Missing file records: 7") != std::string::npos && report.find("File logging: Unavailable") != std::string::npos,
+        "stored memory rollover and missing-file health remain separate and maximum counters format without truncation");
+    state.recentLog = Diagnostics::RecentLogStatus{33, 32, 0};
+    Check(BuildSupportReport(state).find("Recent diagnostic memory: not reported") != std::string::npos,
+        "inconsistent cached retention cannot produce an invented valid count");
+    Check(filter.statistics() == statistics && fake.gammaReads == reads && fake.gammaWrites == writes && fake.mutexReleases == releases &&
+        fake.backendClockReads == clocks && fake.registryReads == 0 && fake.clipOpens == 0 && filter.isActive() && fake.mutexOwned,
+        "formatting retention snapshots performs no native backend/clock/settings/clipboard operation and preserves active ownership");
+    Check(filter.disable(), "original calibration remains available after cached count reporting");
+}
 void ClipboardAllocationAndOpenFailures() {
     fake.clipAllocate = false;
     Check(!CopyUtf8TextToClipboard(nullptr, "report") && fake.clipEmpties == 0, "allocation failure leaves clipboard untouched");
@@ -4417,7 +4443,8 @@ int main() {
         {"Backend cleanup failure", BackendSelectionCleanupFailure}, {"Backend command line", BackendCommandLine},
         {"Luma preset output", LumaPresetOutput}, {"Luma preset failure/restoration", LumaPresetFailureAndRestore},
         {"Luma preset strict/gamma behavior", LumaPresetInStrictModeAndGamma},
-        {"Support report states", SupportReportStates}, {"Clipboard allocation/open failures", ClipboardAllocationAndOpenFailures},
+        {"Support report states", SupportReportStates}, {"Support report diagnostic retention snapshot", SupportReportDiagnosticRetentionSnapshot},
+        {"Clipboard allocation/open failures", ClipboardAllocationAndOpenFailures},
         {"Clipboard ownership transfer", ClipboardTransferOwnership}, {"Clipboard conversion failure", ClipboardConversionFailure},
         {"Preference profile round trip", PreferenceProfileRoundTrip}, {"Preference profile validation", PreferenceProfileStrictValidation},
         {"Preference profile text conventions", PreferenceProfileWhitespaceAndOrder},

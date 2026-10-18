@@ -154,6 +154,10 @@ void WriteLine(const char* message, bool formatTruncated = false) noexcept {
 namespace Diagnostics {
 std::wstring LogDirectory() { return BuildLogDirectory(); }
 Status GetStatus() noexcept { Guard guard; return g_status; }
+RecentLogStatus GetRecentLogStatus() noexcept {
+    Guard guard(g_recentLock);
+    return {static_cast<unsigned>(g_recent.size()), static_cast<unsigned>(RecentDiagnosticsBuffer::capacity), g_recent.overwritten()};
+}
 void ClearRecentLog() noexcept { Guard guard(g_recentLock); g_recent.clear(); }
 std::optional<std::string> RecentLogText() noexcept {
     try {
