@@ -28,15 +28,35 @@ inline bool ValidPreferences(const AppPreferences& value) {
         IsValidBackendPreference(static_cast<unsigned>(value.backend)) && value.sessionMinutes <= SessionTimer::maxMinutes &&
         IsValidShortcutProfile(static_cast<unsigned>(value.shortcuts)) && IsValidExpiryWarning(value.expiryWarning);
 }
+inline const char* PreferenceModeToken(RedMode value) noexcept {
+    switch (value) {
+    case RedMode::StrictRed: return "strict";
+    case RedMode::LumaRed: return "luma";
+    }
+    return "invalid";
+}
+inline const char* PreferenceLumaToken(LumaProfile value) noexcept {
+    switch (value) {
+    case LumaProfile::Classic: return "classic";
+    case LumaProfile::GreenDetail: return "green";
+    case LumaProfile::EqualDetail: return "equal";
+    }
+    return "invalid";
+}
+inline const char* PreferenceBackendToken(BackendPreference value) noexcept {
+    switch (value) {
+    case BackendPreference::Automatic: return "auto";
+    case BackendPreference::Magnification: return "magnification";
+    case BackendPreference::Gamma: return "gamma";
+    }
+    return "invalid";
+}
 inline std::optional<std::string> SerializePreferences(const AppPreferences& value) {
     if (!ValidPreferences(value)) return std::nullopt;
-    const char* luma = value.luma == LumaProfile::Classic ? "classic" : (value.luma == LumaProfile::GreenDetail ? "green" : "equal");
-    const char* backend = value.backend == BackendPreference::Automatic ? "auto" :
-        (value.backend == BackendPreference::Magnification ? "magnification" : "gamma");
     char text[256];
     const int length = std::snprintf(text, sizeof(text),
         "[RedLightProfile]\r\nversion=%u\r\nmode=%s\r\nluma=%s\r\nbackend=%s\r\nsession_minutes=%u\r\nhotkeys=%s\r\nexpiry_warning=%s\r\n",
-        PreferencesProfileVersion, value.mode == RedMode::LumaRed ? "luma" : "strict", luma, backend,
+        PreferencesProfileVersion, PreferenceModeToken(value.mode), PreferenceLumaToken(value.luma), PreferenceBackendToken(value.backend),
         value.sessionMinutes, ShortcutProfileToken(value.shortcuts), ExpiryWarningToken(value.expiryWarning));
     if (length < 0 || static_cast<std::size_t>(length) >= sizeof(text)) return std::nullopt;
     return std::string(text, static_cast<std::size_t>(length));

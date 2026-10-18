@@ -23,6 +23,7 @@
 #include "ProfileExport.h"
 #include "ProfileComparison.h"
 #include "ProfileSave.h"
+#include "SavedSettings.h"
 #include "InstanceName.h"
 #include "JsonString.h"
 #include "BackendComparison.h"
@@ -2918,6 +2919,92 @@ void DisplayContextUnavailableReportHasNoPhantomValues() {
         "initial refresh failure stays explicitly unavailable and makes no display-qualification claim");
     Check(fake.metricReads == 0 && fake.magWrites == 0 && fake.gammaWrites == 0, "formatting empty/failure context performs no native reads or writes");
 }
+void SavedSettingsDefaultsAndReadOnlyIsolation() {
+    fake.stdoutChunk = 7;
+    Check(QuerySavedSettings() == 0 && fake.stdoutText ==
+        "{\"protocol\":1,\"status\":\"saved-settings\",\"source\":\"defaults\",\"profile_schema\":3,\"preferences\":{\"mode\":\"luma\",\"luma\":\"classic\",\"backend\":\"auto\",\"session_minutes\":0,\"hotkeys\":\"default\",\"expiry_warning\":\"off\"}}\n",
+        "absent storage produces exact complete default JSON using canonical tokens and partial output writes");
+    Check(fake.registryWrites == 0 && fake.instanceCreates == 0 && fake.mutexCreates == 0 && fake.profileOpens == 0 && fake.metricReads == 0 &&
+        fake.magInitializes == 0 && fake.dcRequests == 0 && fake.magReads == 0 && fake.gammaReads == 0 && fake.magWrites == 0 && fake.gammaWrites == 0 &&
+        fake.statusSends == 0 && fake.clipOpens == 0 && fake.hotkeyRegisters == 0 && fake.sessionRegisters == 0,
+        "saved-settings query needs only preference reads/output, never instances, files, display context, backends, clipboard, or registrations");
+}
+void SavedSettingsCanonicalVariants() {
+    const AppPreferences variants[] = {
+        ComparisonCandidate(63),
+        {RedMode::LumaRed, LumaProfile::GreenDetail, BackendPreference::Magnification, 1, ShortcutProfile::F9, ExpiryWarning::Seconds30},
+        {RedMode::StrictRed, LumaProfile::GreenDetail, BackendPreference::Magnification, 17, ShortcutProfile::F10, ExpiryWarning::OneMinute}
+    };
+    const char* expected[] = {
+        "\"preferences\":{\"mode\":\"strict\",\"luma\":\"equal\",\"backend\":\"gamma\",\"session_minutes\":240,\"hotkeys\":\"disabled\",\"expiry_warning\":\"5m\"}}\n",
+        "\"preferences\":{\"mode\":\"luma\",\"luma\":\"green\",\"backend\":\"magnification\",\"session_minutes\":1,\"hotkeys\":\"f9\",\"expiry_warning\":\"30s\"}}\n",
+        "\"preferences\":{\"mode\":\"strict\",\"luma\":\"green\",\"backend\":\"magnification\",\"session_minutes\":17,\"hotkeys\":\"f10\",\"expiry_warning\":\"1m\"}}\n"
+    };
+    for (unsigned index = 0; index < std::size(variants); ++index) {
+        Reset();
+        Check(SavePreferences(variants[index]), "seed each canonical settings variant");
+        const auto writes = fake.registryWrites;
+        Check(QuerySavedSettings() == 0 && fake.stdoutText.find("\"source\":\"versioned-record\",\"profile_schema\":3") != std::string::npos &&
+            fake.stdoutText.ends_with(expected[index]) && fake.registryWrites == writes, "JSON preserves every supported mode/detail/backend/shortcut/warning token and configured minute value");
+    }
+}
+void SavedSettingsLegacyAndOlderSchema() {
+    PutLegacy(L"RedMode", 0); PutLegacy(L"LumaProfile", 2); PutLegacy(L"SessionLimitMinutes", 17);
+    Check(QuerySavedSettings() == 0 && fake.stdoutText.find("\"source\":\"legacy-values\"") != std::string::npos &&
+        fake.stdoutText.find("\"mode\":\"strict\",\"luma\":\"equal\",\"backend\":\"auto\",\"session_minutes\":17") != std::string::npos &&
+        fake.registryWrites == 0 && !fake.registry.contains(L"SettingsProfile"), "legacy preferences are reported without migration writes");
+    Reset();
+    const std::string old = "[RedLightProfile]\nversion=2\nmode=strict\nluma=green\nbackend=gamma\nsession_minutes=30\nhotkeys=f10\n";
+    fake.registry[L"SettingsProfile"] = {REG_BINARY, std::vector<char>(old.begin(), old.end())};
+    Check(QuerySavedSettings() == 0 && fake.stdoutText.find("\"source\":\"versioned-record\",\"profile_schema\":3") != std::string::npos &&
+        fake.stdoutText.find("\"hotkeys\":\"f10\",\"expiry_warning\":\"off\"") != std::string::npos && fake.registryWrites == 0,
+        "older stored schema reports defined defaults and current export schema without rewriting storage");
+}
+void SavedSettingsRefusesUnusableStorageWithActiveBackend() {
+    MagnificationFilter filter;
+    Check(filter.initialize() && filter.enable(), "active backend during saved-settings errors");
+    const auto reads = fake.magReads, writes = fake.magWrites;
+    const auto statistics = filter.statistics();
+    fake.registry[L"SettingsProfile"] = {REG_BINARY, {'b','a','d'}};
+    Check(QuerySavedSettings() == 1 && fake.stdoutText == "{\"protocol\":1,\"status\":\"settings-error\",\"preferences\":null}\n" && fake.registryWrites == 0,
+        "corrupt saved preferences cannot be presented as successful fallback defaults");
+    fake.stdoutText.clear(); fake.registryRead = false;
+    Check(QuerySavedSettings() == 1 && fake.stdoutText.find("\"preferences\":null") != std::string::npos && filter.isActive() && filter.needsRestore() &&
+        filter.statistics() == statistics && fake.magReads == reads && fake.magWrites == writes && fake.instanceCreates == 0,
+        "storage-access failure reports no preferences and leaves active filtering/ownership untouched");
+    Check(filter.disable(), "restore after read-only settings errors");
+}
+void SavedSettingsOutputAndInternalFailures() {
+    fake.stdoutChunk = 4; fake.stdoutFailOnCall = 2;
+    Check(QuerySavedSettings() == 1 && fake.stdoutText.size() == 4 && fake.registryWrites == 0, "partial settings JSON returns failure without writing preferences");
+    Reset(); fake.stdoutValid = false; fake.consoleAttach = false;
+    Check(QuerySavedSettings() == 1 && fake.stdoutText.empty(), "unavailable output remains noninteractive");
+    Reset();
+    {
+        TestMemory::FailNextAllocation fail; // The fake registry lookup owns a temporary key.
+        Check(QuerySavedSettings() == 1 && fake.stdoutText.empty() && fake.registryWrites == 0 && fake.magInitializes == 0,
+            "internal fake-storage allocation failure is contained before output or backend initialization");
+    }
+}
+void SavedSettingsStandaloneArgumentsAndInvalidTokens() {
+    const std::wstring_view args[] = {L"--settings"};
+    const auto options = ParseStartupOptions(args);
+    Check(options.action == StartupAction::Settings && options.errorOutput == StartupErrorOutput::Json && options.profilePath.empty() && !options.backendOverride,
+        "settings is a standalone read-only machine command");
+    for (const auto malformed : {L"--settings=extra", L"--settings-extra"}) {
+        const std::wstring_view input[] = {malformed};
+        Check(ParseStartupOptions(input).action == StartupAction::Invalid && ParseStartupOptions(input).errorOutput == StartupErrorOutput::Json,
+            "malformed settings requests retain JSON error handling");
+    }
+    const std::wstring_view combined[] = {L"--settings", L"--backend=gamma"};
+    Check(ParseStartupOptions(combined).action == StartupAction::Invalid, "settings cannot combine with a startup action");
+    fake.argumentsCount = 2; fake.arguments[1] = const_cast<LPWSTR>(L"--settings");
+    Check(GetStartupOptions().action == StartupAction::Settings && fake.argumentFrees == 1 && !fake.argumentsOutstanding,
+        "native settings arguments are released before returning");
+    Check(std::string_view(PreferenceModeToken(static_cast<RedMode>(99))) == "invalid" &&
+        std::string_view(PreferenceLumaToken(static_cast<LumaProfile>(99))) == "invalid" &&
+        std::string_view(PreferenceBackendToken(static_cast<BackendPreference>(99))) == "invalid", "shared tokens never silently map invalid enums to a real profile choice");
+}
 } // namespace
 
 DWORD GetLastError() { return fake.lastError; }
@@ -3285,6 +3372,9 @@ int main() {
         {"Display context logical metric capture", DisplayContextCapturesLogicalMetrics}, {"Display context invalid dimensions", DisplayContextRejectsUnusableDimensions},
         {"Display context retains stale values/age", DisplayContextCacheRetainsOriginalAgeOnFailure}, {"Display context wrap/allocation isolation", DisplayContextClockWrapAndNoCppAllocation},
         {"Display context read-only cached report", DisplayContextReportUsesCachedSnapshotOnly}, {"Display context unavailable reports", DisplayContextUnavailableReportHasNoPhantomValues},
+        {"Saved settings default JSON/isolation", SavedSettingsDefaultsAndReadOnlyIsolation}, {"Saved settings canonical token variants", SavedSettingsCanonicalVariants},
+        {"Saved settings legacy/older schema", SavedSettingsLegacyAndOlderSchema}, {"Saved settings unusable-storage/backend isolation", SavedSettingsRefusesUnusableStorageWithActiveBackend},
+        {"Saved settings output/internal failures", SavedSettingsOutputAndInternalFailures}, {"Saved settings arguments/invalid tokens", SavedSettingsStandaloneArgumentsAndInvalidTokens},
         {"Command line", Arguments}
     };
     int failed = 0;

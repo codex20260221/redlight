@@ -133,6 +133,16 @@ $profile | Set-Content -LiteralPath .\night.profile -Encoding utf8
 
 The explicit encoding works across Windows PowerShell and PowerShell; their default file encodings differ. See [PowerShell character encoding](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_character_encoding).
 
+`--settings` provides the persisted/default preferences as JSON for scripts. A successful protocol-1 result has `status: "saved-settings"`, `source` (`defaults`, `legacy-values`, or `versioned-record`), `profile_schema` (the current export schema, not necessarily the original stored schema), and a `preferences` object using the six profile field names/tokens. It reads legacy/older records without migration writes and reports their defined defaults. It describes saved choices, excluding unsaved tray edits, active countdowns, and one-start overrides.
+
+```powershell
+$json = & .\RedLight.exe --settings | Out-String
+if ($LASTEXITCODE -ne 0) { throw 'RedLight saved-settings query failed.' }
+($json | ConvertFrom-Json).preferences
+```
+
+Exit codes are `0` for complete settings JSON, `1` for storage/output/internal failure, and `2` for invalid arguments. Corrupt or unreadable storage produces `settings-error` with `preferences: null` when output is available; it cannot masquerade as a successful default configuration. The command opens no dialogs, starts no tray, initializes no backend, and writes no preferences. Discard partial output after failure. Mode/Luma/backend tokens are shared with canonical profile export so the two formats agree.
+
 **Expert controls → Import settings profile from clipboard** reads a copied profile, validates it, and previews all choices before applying. Cancel or invalid input changes nothing. On confirmation, RedLight first restores any active filter, saves one complete configuration, applies available mode/luma preferences, and leaves the filter off. Backend selection applies on the next start. A restoration failure aborts import with recovery data intact; a storage failure keeps prior preferences selected and leaves the already-restored display off. Clipboard reads are bounded to 4096 bytes of UTF-8 text and never clear or replace clipboard contents.
 
 **Expert controls → Reset preferences to defaults** previews the default Luma Red/Classic, Automatic backend, Unlimited session, warnings Off, and Ctrl+Alt+R shortcut choices. Confirmation uses the same restore-before-save path as import and leaves the display off. It does not delete logs or recovery information, change clipboard contents, or restart the app. Backend selection takes effect on the next start.
@@ -195,7 +205,7 @@ if ($result -eq 0) { $json | ConvertFrom-Json }
 
 Exit codes are `0` for a valid snapshot (including an off filter), `3` when no tray instance exists, and `1` for timeout, incompatible response, or output failure. A missing instance produces `status: "not-running"`; query failures produce `query-failed` or `invalid-response` when output is available. Responses use protocol 1. A request waits up to three seconds for the tray; it opens no dialogs and creates no console window. Redirected standard output is preserved; otherwise it uses an existing parent console if available.
 
-Malformed `--status`, `--validate-profile`, `--compare-profile`, `--save-profile`, or `--build-info` requests produce JSON with `status: "invalid-arguments"` and exit code `2`, keeping script errors noninteractive. Output failure returns `1`.
+Malformed `--status`, `--settings`, `--validate-profile`, `--compare-profile`, `--save-profile`, or `--build-info` requests produce JSON with `status: "invalid-arguments"` and exit code `2`, keeping script errors noninteractive. Output failure returns `1`.
 
 Snapshots report backend/mode/luma selection, configured session limit and remaining whole seconds, preferred/actual shortcuts, unsaved settings, session-notification registration, and logging health flags. `remaining_seconds` is null when the countdown is unarmed. `restore_pending` means restoration data or ownership cleanup is pending, including during a normal active session. `backend_active` is the last confirmed backend activation flag; `active` is true only when `status` is `on`, and becomes false for busy, recovery-needed, backend-changed, or verification-unavailable states. `verification` describes the last explicit check, which may be `not-checked`. A status query does not refresh verification or measure physical output. Full diagnostic counters and build identity remain available in the support report.
 

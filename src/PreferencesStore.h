@@ -10,6 +10,14 @@ inline const char* PreferenceSourceName(PreferenceSource source) noexcept {
     }
     return "Unknown";
 }
+inline const char* PreferenceSourceToken(PreferenceSource source) noexcept {
+    switch (source) {
+    case PreferenceSource::Defaults: return "defaults";
+    case PreferenceSource::VersionedRecord: return "versioned-record";
+    case PreferenceSource::LegacyValues: return "legacy-values";
+    }
+    return "unknown";
+}
 
 struct LoadedPreferences {
     AppPreferences preferences;
