@@ -31,14 +31,14 @@ BEGIN
  END
 END
 
-IDD_CUSTOM_SESSION_LIMIT DIALOGEX 0, 0, 240, 108
+IDD_CUSTOM_SESSION_LIMIT DIALOGEX 0, 0, 240, 120
 STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "Auto-restore time limit"
 FONT 9, "Segoe UI"
 BEGIN
- LTEXT "Minutes (0 = unlimited, maximum 240):", -1, 12, 12, 216, 12
+ LTEXT "&Minutes (0 = unlimited, maximum 240):", -1, 12, 12, 216, 12
  EDITTEXT IDC_SESSION_MINUTES, 12, 29, 64, 15, ES_NUMBER | ES_AUTOHSCROLL | WS_TABSTOP
- LTEXT "Applying restarts the countdown if the filter is on.", -1, 12, 54, 216, 22
- DEFPUSHBUTTON "Apply", IDOK, 116, 84, 52, 14
- PUSHBUTTON "Cancel", IDCANCEL, 176, 84, 52, 14
+ LTEXT "Changed nonzero limits start from now while on. The current value keeps its deadline.", -1, 12, 54, 216, 32
+ DEFPUSHBUTTON "&Apply", IDOK, 116, 96, 52, 14
+ PUSHBUTTON "&Cancel", IDCANCEL, 176, 96, 52, 14
 END

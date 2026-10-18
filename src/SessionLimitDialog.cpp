@@ -9,6 +9,19 @@ struct DialogState { unsigned minutes; };
 void EndSessionDialog(HWND dialog, INT_PTR result) {
     if (!EndDialog(dialog, result)) Diagnostics::LogFormat("EndDialog(session) failed (error %lu).", GetLastError());
 }
+void FocusSessionInput(HWND edit) {
+    if (!edit) { Diagnostics::Log("Custom session-limit input control is unavailable."); return; }
+    SetLastError(ERROR_SUCCESS);
+    const HWND previous = SetFocus(edit);
+    const DWORD error = previous ? ERROR_SUCCESS : GetLastError();
+    // SetFocus returns the prior window; confirm this thread's resulting focus.
+    if (GetFocus() != edit) {
+        Diagnostics::LogFormat("Custom session-limit input focus was not confirmed (error %lu).", error);
+        return;
+    }
+    // EM_SETSEL has no return value; 0/-1 selects the complete existing input.
+    SendMessageW(edit, EM_SETSEL, 0, -1);
+}
 INT_PTR CALLBACK SessionDialogProc(HWND dialog, UINT message, WPARAM wParam, LPARAM lParam) {
     if (message == WM_INITDIALOG) {
         auto* state = reinterpret_cast<DialogState*>(lParam);
@@ -38,6 +51,7 @@ INT_PTR CALLBACK SessionDialogProc(HWND dialog, UINT message, WPARAM wParam, LPA
                 if (!MessageBoxW(dialog, L"Enter a whole number from 0 to 240 using digits 0-9. Zero means unlimited.",
                     L"Auto-restore time limit", MB_OK | MB_ICONINFORMATION))
                     Diagnostics::LogFormat("MessageBox(session validation) failed (error %lu).", GetLastError());
+                FocusSessionInput(edit);
                 return TRUE;
             }
             state->minutes = *minutes;

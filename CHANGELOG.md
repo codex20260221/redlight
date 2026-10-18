@@ -76,6 +76,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Support Unicode diagnostics paths and report log-write failures to the debugger.
 
 ### Fixed
+- Correct custom time-limit deadline guidance for unchanged values, add Minutes/Apply/Cancel access keys and room for the explanation, and refocus/select invalid input with checked focus diagnostics for easier keyboard correction.
 - Defer native OS-version diagnostics until actual tray startup or display recovery, avoiding redundant module lookup for machine commands, help/invalid arguments, startup-parser failures, and duplicate launches while retaining command/build/error logging.
 - Separate diagnostic memory-history locking from serialized file logging so snapshots/clearing can finish during pending file I/O, retain incoming records before file-lock waits, and avoid lock-order cycles while preserving checked file/error handling.
 - Preserve Restore intent after a failed tray-command post by directly requesting normal guarded restoration, including busy deferral and retained requests after C++ failures; never use queue failure to enable filtering or execute unrelated actions, and preserve native posting error codes in diagnostics.
