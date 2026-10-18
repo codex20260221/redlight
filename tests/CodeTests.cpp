@@ -4,6 +4,7 @@
 #include "GammaRampFilter.h"
 #include "CommandLine.h"
 #include "SessionTimer.h"
+#include "SessionControl.h"
 #include "BackendSelection.h"
 #include "SupportReport.h"
 #include "Preferences.h"
@@ -1664,6 +1665,55 @@ void GammaPreferredLumaDuringRecoveryAndSaveFailure() {
     fake.registryWrite = true;
     Check(SavePreferences(preferences) && filter.disable(), "preference persistence and display restoration can retry independently");
 }
+void CountdownRestartResetsDeadlineAndWarning() {
+    SessionTimer timer;
+    Check(timer.configure(15, 1000, true) && timer.warningDue(841000, 60), "warning threshold on initial countdown");
+    timer.noteWarningAttempt();
+    Check(timer.restart(850000, true) && timer.minutes() == 15 && timer.remainingMilliseconds(850000) == 900000,
+        "explicit restart reuses configured duration from the supplied time");
+    Check(!timer.restoreDue(1749999) && timer.restoreDue(1750000) && timer.warningDue(1690000, 60), "new deadline is exact and one warning is rearmed");
+    Check(fake.registryWrites == 0 && fake.magWrites == 0 && fake.gammaWrites == 0, "restart policy has no persistence or display side effects");
+}
+void CountdownRestartRefusesExpiredInactiveAndUnlimited() {
+    SessionTimer timer;
+    Check(!timer.restart(0, true) && !timer.armed(), "unlimited default cannot restart");
+    Check(timer.configure(1, 1000, false) && !timer.restart(1000, false) && !timer.armed(), "inactive configuration cannot start a countdown through restart");
+    timer.start(1000);
+    Check(!timer.restart(2000, false) && timer.remainingMilliseconds(2000) == 59000, "inactive restart refusal preserves existing deadline");
+    Check(!timer.restart(61000, true) && timer.restoreDue(61000) && timer.remainingMilliseconds(61000) == 0, "deadline reached cannot be postponed by restart");
+    timer.noteRestoreAttempt(61000);
+    Check(!timer.restart(62000, true) && !timer.restoreDue(65999) && timer.restoreDue(66000), "failed-recovery retry cadence survives refused restarts");
+    const auto start = (std::numeric_limits<std::uint64_t>::max)() - 100;
+    Check(timer.configure(1, start, true) && timer.restart(start + 200, true) && timer.remainingMilliseconds(start + 200) == 60000, "restart tolerates monotonic clock wrap");
+}
+void CountdownControlBackendEligibility() {
+    MagnificationFilter filter;
+    Check(filter.initialize() && filter.enable(), "activate");
+    SessionTimer timer; Check(timer.configure(1, 0, true), "one-minute countdown");
+    const auto reads = fake.magReads, writes = fake.magWrites;
+    Check(CanChangeSessionLimit(timer, 1000, filter, BackendVerification::NotChecked, false) && CanRestartCountdown(timer, 1000, filter, BackendVerification::Matches, false), "healthy active countdown can change or restart");
+    for (const auto verification : {BackendVerification::Changed, BackendVerification::Unavailable, static_cast<BackendVerification>(99)}) {
+        Check(!CanChangeSessionLimit(timer, 1000, filter, verification, false) && !CanRestartCountdown(timer, 1000, filter, verification, false), "unconfirmed backend state cannot extend timing");
+    }
+    Check(!CanChangeSessionLimit(timer, 1000, filter, BackendVerification::Matches, true) && !CanRestartCountdown(timer, 1000, filter, BackendVerification::Matches, true), "queued restoration blocks deadline edits");
+    Check(!CanChangeSessionLimit(timer, 60000, filter, BackendVerification::Matches, false) && !CanRestartCountdown(timer, 60000, filter, BackendVerification::Matches, false), "due restoration wins over new duration or restart");
+    Check(fake.magReads == reads && fake.magWrites == writes, "eligibility checks read only cached backend getters");
+    fake.magSet = false;
+    Check(!filter.setLumaProfile(LumaProfile::GreenDetail) && !CanChangeSessionLimit(timer, 1000, filter, BackendVerification::NotChecked, false), "backend API errors block timing changes while active");
+    fake.magSet = true;
+    Check(filter.disable() && CanChangeSessionLimit(timer, 60000, filter, BackendVerification::NotChecked, false) && !CanRestartCountdown(timer, 60000, filter, BackendVerification::NotChecked, false), "off/restored state permits configuration but cannot restart");
+}
+void CountdownControlsPreservePartialRecovery() {
+    GammaRampFilter filter;
+    Check(filter.initialize(), "initialize");
+    fake.writes = {Write::FailAfterApply, Write::Fail};
+    Check(!filter.enable() && !filter.isActive() && filter.needsRestore(), "unconfirmed partial-write recovery");
+    SessionTimer timer; Check(timer.configure(1, 0, true), "existing timing policy");
+    const auto reads = fake.gammaReads, writes = fake.gammaWrites;
+    Check(!CanChangeSessionLimit(timer, 1000, filter, BackendVerification::NotChecked, false) && !CanRestartCountdown(timer, 1000, filter, BackendVerification::NotChecked, false) &&
+        filter.needsRestore() && fake.mutexOwned && fake.gammaReads == reads && fake.gammaWrites == writes, "timing controls cannot cancel or postpone pending partial recovery");
+    Check(filter.disable() && CanChangeSessionLimit(timer, 1000, filter, BackendVerification::Inactive, false), "configuration becomes available after recovery succeeds");
+}
 } // namespace
 
 DWORD GetLastError() { return fake.lastError; }
@@ -1934,6 +1984,8 @@ int main() {
         {"Read-only exception with queued restore", ReadOnlyFailureHonorsQueuedRestore}, {"Queued restore under outer busy scope", QueuedRestoreRetainsOuterBusyOwnership},
         {"Gamma preferred Luma without output changes", GammaPreferredLumaWithoutBackendChanges}, {"Live Luma preference commit rules", MagnificationLumaPreferenceCommitRules},
         {"Gamma preferred Luma during recovery", GammaPreferredLumaDuringRecoveryAndSaveFailure},
+        {"Countdown restart deadline/warning", CountdownRestartResetsDeadlineAndWarning}, {"Countdown restart refusal/clock", CountdownRestartRefusesExpiredInactiveAndUnlimited},
+        {"Countdown backend eligibility", CountdownControlBackendEligibility}, {"Countdown partial-recovery guard", CountdownControlsPreservePartialRecovery},
         {"Command line", Arguments}
     };
     int failed = 0;

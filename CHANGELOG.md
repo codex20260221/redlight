@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Added Restart current countdown for healthy, active, unexpired timed sessions, reusing the configured duration and rearming one warning without saving preferences or changing the display backend.
 - Allow preferred Luma-detail edits during gamma fallback without backend calls, output/error/snapshot changes, or verification invalidation; distinguish effective and preferred selections in About/support reports and add explicit Luma-profile scope to status JSON.
 - Added an Expert retry for Windows session-recovery notifications, checked registration ownership and cleanup, idempotent/reentrant-call protection, and cached last-error details in About/support reports; deferred restore requests remain honored.
 - Added an explicit Save current preferences command (labeled Retry after failed saves) with transaction guarding and unchanged filtering/countdowns, plus persistent startup preference-source/load-warning details in About and support reports.
@@ -36,6 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added command-line help/version dialogs and explicit rejection of unknown or conflicting options.
 
 ### Changed
+- Selecting an unchanged session limit leaves its deadline intact; timing changes/restarts are blocked after expiry or while recovery/backend confirmation needs attention, preserving restoration retry cadence.
 - Hold a nonblocking cross-session ownership guard around legacy gamma capture, activation, and restoration; conflicts/access failures stay off, detected abandoned ownership blocks activation until recovery/restart, and failed cleanup remains tracked without rewriting already-restored calibration.
 - Rotate logs during long sessions at the 1 MiB target with up to three archives; use fixed record buffers/cached paths and serialize writes, rotation, status reads, and shutdown. Logging failures fall back to debugger output without allowing failed rotation to grow the file indefinitely.
 - Grouped backend policy, verification, reports, and profile transfer under Expert controls while keeping toggle/restore/modes first; added distinct menu accelerators, visible shortcut-conflict labels, and explicit submenu ownership cleanup.

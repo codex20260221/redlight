@@ -17,6 +17,7 @@ struct TrayMenuState {
     const char* restoreShortcut;
     ExpiryWarning expiryWarning;
     bool preferencesUnsaved;
+    bool canChangeSessionLimit, canRestartCountdown;
 };
 // Ownership of the returned root menu transfers to the caller.
 HMENU BuildTrayMenu(const TrayMenuState& state);

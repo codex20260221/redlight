@@ -46,15 +46,16 @@ HMENU BuildTrayMenu(const TrayMenuState& state) {
         char label[48];
         if (minutes == 0) strcpy_s(label, "Unlimited");
         else sprintf_s(label, "%u minutes", minutes);
-        if (!session.add(ID_SESSION_LIMIT_BASE + minutes, label, Checked(state.sessionMinutes == minutes))) return NULL;
+        if (!session.add(ID_SESSION_LIMIT_BASE + minutes, label, Checked(state.sessionMinutes == minutes) | (state.canChangeSessionLimit ? MF_ENABLED : MF_GRAYED))) return NULL;
     }
     const bool customLimit = state.sessionMinutes != 0 && state.sessionMinutes != 15 && state.sessionMinutes != 30 &&
         state.sessionMinutes != 60 && state.sessionMinutes != 120 && state.sessionMinutes != 240;
     char customLabel[64];
     if (customLimit) sprintf_s(customLabel, "&Custom (%u minutes)...", state.sessionMinutes);
     else strcpy_s(customLabel, "&Custom...");
-    if (!session.add(0, NULL, MF_SEPARATOR) || !session.add(ID_TRAY_CUSTOM_SESSION, customLabel, Checked(customLimit)) ||
-        !session.add(0, NULL, MF_SEPARATOR) || !session.child(warning, "Expiry &warning")) return NULL;
+    if (!session.add(0, NULL, MF_SEPARATOR) || !session.add(ID_TRAY_CUSTOM_SESSION, customLabel, Checked(customLimit) | (state.canChangeSessionLimit ? MF_ENABLED : MF_GRAYED)) ||
+        !session.add(0, NULL, MF_SEPARATOR) || !session.child(warning, "Expiry &warning") ||
+        !session.add(0, NULL, MF_SEPARATOR) || !session.add(ID_TRAY_RESTART_COUNTDOWN, "&Restart current countdown", MF_STRING | (state.canRestartCountdown ? MF_ENABLED : MF_GRAYED))) return NULL;
     if (!luma.add(ID_LUMA_PROFILE_BASE, "&Classic (BT.601)", Checked(state.luma == LumaProfile::Classic)) ||
         !luma.add(ID_LUMA_PROFILE_BASE + 1, "&Green detail (BT.709)", Checked(state.luma == LumaProfile::GreenDetail)) ||
         !luma.add(ID_LUMA_PROFILE_BASE + 2, "&Equal color detail", Checked(state.luma == LumaProfile::EqualDetail))) return NULL;

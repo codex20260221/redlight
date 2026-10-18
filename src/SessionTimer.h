@@ -31,6 +31,14 @@ public:
         const auto duration = static_cast<std::uint64_t>(minutes_) * 60000;
         return elapsed >= duration ? 0 : duration - elapsed;
     }
+    bool canRestart(std::uint64_t now, bool filterActive) const {
+        return filterActive && armed_ && remainingMilliseconds(now) != 0;
+    }
+    bool restart(std::uint64_t now, bool filterActive) {
+        if (!canRestart(now, filterActive)) return false;
+        start(now);
+        return true;
+    }
     bool restoreDue(std::uint64_t now) const {
         return armed_ && remainingMilliseconds(now) == 0 &&
             (!attempted_ || now - lastAttempt_ >= retryMilliseconds);

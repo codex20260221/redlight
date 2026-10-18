@@ -6,6 +6,7 @@
 #include "Version.h"
 #include "BuildInfo.h"
 #include "SessionTimer.h"
+#include "SessionControl.h"
 #include "BackendSelection.h"
 #include "SupportReport.h"
 #include "Clipboard.h"
@@ -67,7 +68,8 @@ bool ApplyInactivePreferences(const AppPreferences& preferences);
 void SetBackendPreference(BackendPreference preference);
 bool RestoreFilter(bool showError, bool notifyFailure = true);
 void StopSessionTimer();
-bool StartSessionTimer();
+bool StartSessionTimer(bool restartOnly = false);
+void RestartCountdown();
 void SetSessionLimit(unsigned minutes);
 void SetExpiryWarning(ExpiryWarning warning);
 void SetShortcutProfile(ShortcutProfile profile);
@@ -507,8 +509,11 @@ void StopSessionTimer() {
     }
 }
 
-bool StartSessionTimer() {
-    g_sessionTimer.start(GetTickCount64());
+bool StartSessionTimer(bool restartOnly) {
+    const auto now = GetTickCount64();
+    if (restartOnly) {
+        if (!g_sessionTimer.restart(now, g_displayFilter->isActive())) return false;
+    } else g_sessionTimer.start(now);
     g_autoRestoreFailureNotified = false;
     if (!g_sessionTimer.armed()) return true;
     if (!SetTimer(nid.hWnd, ID_SESSION_TIMER, 1000, NULL)) {
@@ -524,8 +529,22 @@ bool StartSessionTimer() {
     return true;
 }
 
+void RestartCountdown() {
+    if (g_busy || g_preferencesApplying || !CanRestartCountdown(g_sessionTimer, GetTickCount64(), *g_displayFilter, g_verification.state, g_pendingRestore)) return;
+    if (StartSessionTimer(true)) {
+        Diagnostics::LogFormat("User restarted current countdown for %u minutes; preferences and display backend unchanged.", g_sessionTimer.minutes());
+        ShowTrayInfo("RedLight countdown restarted", "The configured time limit starts again now. Preferences were not changed.");
+    }
+    RefreshTrayIconTip();
+}
+
 void SetSessionLimit(unsigned minutes) {
     if (g_busy || g_preferencesApplying || minutes > SessionTimer::maxMinutes) return;
+    if (minutes == g_sessionTimer.minutes()) return;
+    if (!CanChangeSessionLimit(g_sessionTimer, GetTickCount64(), *g_displayFilter, g_verification.state, g_pendingRestore)) {
+        ReportError("Restore display before changing the time limit while expiry or recovery is pending.");
+        return;
+    }
     const bool active = g_displayFilter->isActive();
     const unsigned previous = g_sessionTimer.minutes();
     StopSessionTimer();
@@ -967,11 +986,14 @@ void ShowTrayMenu(HWND hwnd) {
         ReportError("Could not locate the tray menu.");
         return;
     }
+    const auto now = GetTickCount64();
     const TrayMenuState state{g_displayFilter->needsRestore(), g_displayFilter->redMode(),
         g_displayFilter->supportsRedMode(RedMode::LumaRed), g_preferences.luma,
         g_backendPreference, g_sessionTimer.minutes(), g_preferences.shortcuts,
         g_hotkeys.toggle() ? ShortcutBindingName(*g_hotkeys.toggle()) : NULL,
-        g_hotkeys.restore() ? ShortcutBindingName(*g_hotkeys.restore()) : NULL, g_preferences.expiryWarning, g_preferencesUnsaved};
+        g_hotkeys.restore() ? ShortcutBindingName(*g_hotkeys.restore()) : NULL, g_preferences.expiryWarning, g_preferencesUnsaved,
+        !g_busy && !g_preferencesApplying && CanChangeSessionLimit(g_sessionTimer, now, *g_displayFilter, g_verification.state, g_pendingRestore),
+        !g_busy && !g_preferencesApplying && CanRestartCountdown(g_sessionTimer, now, *g_displayFilter, g_verification.state, g_pendingRestore)};
     HMENU menu = BuildTrayMenu(state);
     if (!menu) { ReportError("Could not build the tray menu."); return; }
     if (!SetForegroundWindow(hwnd)) Diagnostics::Log("SetForegroundWindow failed for tray menu.");
@@ -1101,10 +1123,11 @@ LRESULT HandleWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         switch (LOWORD(wParam)) {
         case ID_TRAY_TOGGLE: ToggleRedlight(); break;
         case ID_TRAY_CUSTOM_SESSION:
-            if (!g_busy && !g_preferencesApplying) {
+            if (!g_busy && !g_preferencesApplying && CanChangeSessionLimit(g_sessionTimer, GetTickCount64(), *g_displayFilter, g_verification.state, g_pendingRestore)) {
                 if (const auto minutes = ShowSessionLimitDialog(hwnd, g_sessionTimer.minutes())) SetSessionLimit(*minutes);
             }
             break;
+        case ID_TRAY_RESTART_COUNTDOWN: RestartCountdown(); break;
         case ID_TRAY_RESTORE: RestoreFilter(true); break;
         case ID_TRAY_MODE_STRICT_RED: SetRedModeFromTray(RedMode::StrictRed); break;
         case ID_TRAY_MODE_LUMA_RED: SetRedModeFromTray(RedMode::LumaRed); break;
