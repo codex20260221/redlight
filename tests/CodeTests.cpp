@@ -3306,7 +3306,7 @@ void ExpertDiagnosticsMenuLayoutAndOwnership() {
     const auto diagnostics = FakeMenuChild(expert, "Dia&gnostics");
     Check(expert && diagnostics && FakeMenuCommand(expert, ID_TRAY_SAVE_PREFERENCES) && FakeMenuCommand(expert, ID_TRAY_IMPORT_PROFILE),
         "expert choices and preference transfer remain distinct from the diagnostic submenu");
-    for (const auto id : {ID_TRAY_VERIFY_BACKEND, ID_TRAY_COPY_REPORT, ID_TRAY_COPY_STATUS_JSON, ID_TRAY_RETRY_LOGGING, ID_TRAY_RETRY_SESSION,
+    for (const auto id : {ID_TRAY_VERIFY_BACKEND, ID_TRAY_COPY_REPORT, ID_TRAY_COPY_STATUS_JSON, ID_TRAY_REFRESH_DISPLAY_CONTEXT, ID_TRAY_RETRY_LOGGING, ID_TRAY_RETRY_SESSION,
         ID_TRAY_RETRY_SHORTCUTS, ID_TRAY_RESET_BACKEND_COUNTS, ID_TRAY_CLEAR_RESTORATION_HISTORY})
         Check(FakeMenuCommand(diagnostics, id) && !FakeMenuCommand(expert, id), "all diagnostic/retry/bookkeeping actions are grouped exactly once");
     for (const auto& menu : fake.menus) Check(UniqueMenuAccelerators(*menu), "assigned keyboard accelerators remain unique within each submenu");
@@ -3413,6 +3413,54 @@ void StatusClipboardRetainsPendingGammaRecovery() {
         fake.mutexOwned && fake.gammaReads == reads && fake.gammaWrites == writes && fake.mutexReleases == releases && filter.statistics() == statistics,
         "conservative JSON export preserves pending snapshot/ownership/error state and performs no recovery/backend call");
     Check(filter.disable(), "original gamma calibration remains recoverable after status export");
+}
+void ManualContextRefreshPreservesActiveBackend() {
+    GammaRampFilter filter;
+    Check(filter.initialize() && filter.enable(), "active gamma filter for manual logical-context refresh");
+    const auto reads = fake.gammaReads, writes = fake.gammaWrites, releases = fake.mutexReleases;
+    const auto statistics = filter.statistics();
+    const auto clocks = fake.backendClockReads;
+    fake.monotonicNow = 10000; fake.metricMonitors = 2; fake.metricWidth = 3840;
+    DisplayContextCache cache;
+    Check(RefreshDisplayContextCache(cache, DisplayContextReason::ManualRefresh) && cache.snapshot() == DisplayContextSnapshot{2, 3840, 1080, false} &&
+        cache.captureReason() == DisplayContextReason::ManualRefresh && cache.ageSeconds(11000) == 1 && fake.metricReads == 4 && fake.backendClockReads == clocks + 1,
+        "manual refresh reads four logical metrics and records the completed capture time");
+    Check(filter.isActive() && filter.needsRestore() && fake.mutexOwned && filter.statistics() == statistics && fake.gammaReads == reads &&
+        fake.gammaWrites == writes && fake.mutexReleases == releases && fake.registryReads == 0 && fake.registryWrites == 0 && fake.clipOpens == 0,
+        "manual context refresh performs no backend, ownership, preference, or clipboard operation");
+    Check(filter.disable(), "original calibration remains available after context refresh");
+}
+void ManualContextRefreshFailureRetainsVerificationAndAge() {
+    MagnificationFilter filter;
+    Check(filter.initialize() && filter.enable(), "active matrix backend during failed metadata refresh");
+    BackendVerificationCache verification;
+    verification.record(filter.inspectState(), 990, 1000);
+    DisplayContextCache cache;
+    const DisplayContextSnapshot original{1, 1920, 1080, false};
+    cache.record(original, DisplayContextReason::Startup, 500);
+    const auto statistics = filter.statistics();
+    const auto reads = fake.magReads, writes = fake.magWrites;
+    fake.monotonicNow = 5000; fake.metricWidth = 0;
+    Check(!RefreshDisplayContextCache(cache, DisplayContextReason::ManualRefresh) && cache.snapshot() == original && cache.ageSeconds(6500) == 6 &&
+        cache.lastFailed() && cache.lastReason() == DisplayContextReason::ManualRefresh && cache.captureReason() == DisplayContextReason::Startup,
+        "failed manual refresh retains prior valid values/capture age and marks the failed attempt separately");
+    Check(verification.result().state == BackendVerification::Matches && verification.ageSeconds(6500) == 5 && filter.statistics() == statistics &&
+        fake.magReads == reads && fake.magWrites == writes && filter.isActive() && filter.needsRestore(),
+        "metadata failure cannot clear verification, change counters, or alter active filtering/recovery");
+    Check(filter.disable(), "restore after failed manual metadata refresh");
+}
+void ManualContextRefreshNoAllocationAndReadOnlyPolicy() {
+    DisplayContextCache cache;
+    fake.monotonicNow = 123;
+    bool refreshed = false, allocationUnused = false;
+    {
+        TestMemory::FailNextAllocation fail;
+        refreshed = RefreshDisplayContextCache(cache, DisplayContextReason::ManualRefresh);
+        allocationUnused = TestMemory::AllocationFailurePending();
+    }
+    Check(refreshed && allocationUnused && cache.ageSeconds(1123) == 1 && !CommandMayChangeFilter(ID_TRAY_REFRESH_DISPLAY_CONTEXT) &&
+        fake.magInitializes == 0 && fake.dcRequests == 0 && fake.statusSends == 0,
+        "manual context refresh allocates no C++ storage and uses read-only display-failure policy without backend/tray work");
 }
 } // namespace
 
@@ -3833,6 +3881,8 @@ int main() {
         {"Status clipboard matches cached JSON", StatusClipboardMatchesCachedJson}, {"Status clipboard rejects inconsistent snapshots", StatusClipboardRejectsInconsistentSnapshotBeforeMutation},
         {"Status clipboard native failure propagation", StatusClipboardPropagatesNativeFailures}, {"Status clipboard allocation preparation failure", StatusClipboardPreparationAllocationFailure},
         {"Status clipboard retains pending gamma recovery", StatusClipboardRetainsPendingGammaRecovery},
+        {"Manual context refresh preserves active backend", ManualContextRefreshPreservesActiveBackend}, {"Manual context refresh failure preserves cache/verification", ManualContextRefreshFailureRetainsVerificationAndAge},
+        {"Manual context refresh allocation/policy", ManualContextRefreshNoAllocationAndReadOnlyPolicy},
         {"Command line", Arguments}
     };
     int failed = 0;

@@ -7,7 +7,7 @@ struct DisplayContextSnapshot {
     bool remoteSessionIndicated;
     bool operator==(const DisplayContextSnapshot&) const = default;
 };
-enum class DisplayContextReason { Startup, DisplayChange, PowerTransition, SessionTransition, ExplorerRestart, ExplicitVerification };
+enum class DisplayContextReason { Startup, DisplayChange, PowerTransition, SessionTransition, ExplorerRestart, ExplicitVerification, ManualRefresh };
 inline const char* DisplayContextReasonName(DisplayContextReason reason) noexcept {
     switch (reason) {
     case DisplayContextReason::Startup: return "Startup";
@@ -16,6 +16,7 @@ inline const char* DisplayContextReasonName(DisplayContextReason reason) noexcep
     case DisplayContextReason::SessionTransition: return "Session transition";
     case DisplayContextReason::ExplorerRestart: return "Explorer restart";
     case DisplayContextReason::ExplicitVerification: return "Explicit verification";
+    case DisplayContextReason::ManualRefresh: return "Manual refresh";
     }
     return "Unknown";
 }
@@ -48,3 +49,6 @@ private:
     bool attempted_ = false, lastFailed_ = false;
     DisplayContextReason lastReason_ = DisplayContextReason::Startup, captureReason_ = DisplayContextReason::Startup;
 };
+
+// Refresh logical metrics and timestamp after capture; never inspects a color backend.
+bool RefreshDisplayContextCache(DisplayContextCache& cache, DisplayContextReason reason) noexcept;

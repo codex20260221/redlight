@@ -14,3 +14,9 @@ std::optional<DisplayContextSnapshot> CaptureDisplayContext() noexcept {
     }
     return DisplayContextSnapshot{static_cast<unsigned>(monitors), static_cast<unsigned>(width), static_cast<unsigned>(height), remote};
 }
+
+bool RefreshDisplayContextCache(DisplayContextCache& cache, DisplayContextReason reason) noexcept {
+    const auto snapshot = CaptureDisplayContext();
+    cache.record(snapshot, reason, GetTickCount64());
+    return !cache.lastFailed();
+}

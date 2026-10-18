@@ -306,9 +306,9 @@ void CloseInstanceMutex(HANDLE handle) {
 }
 
 void RefreshDisplayContext(DisplayContextReason reason) {
-    const auto snapshot = CaptureDisplayContext();
-    g_displayContext.record(snapshot, reason, GetTickCount64());
-    if (snapshot) Diagnostics::LogFormat("Display context (%s): %u monitors, virtual %u x %u pixels, remote-session flag=%s.",
+    const bool refreshed = RefreshDisplayContextCache(g_displayContext, reason);
+    const auto& snapshot = g_displayContext.snapshot();
+    if (refreshed && snapshot) Diagnostics::LogFormat("Display context (%s): %u monitors, virtual %u x %u pixels, remote-session flag=%s.",
         DisplayContextReasonName(reason), snapshot->monitors, snapshot->virtualWidth, snapshot->virtualHeight,
         snapshot->remoteSessionIndicated ? "set" : "not set");
     else Diagnostics::LogFormat("Display context refresh (%s) unavailable; prior successful data retained.", DisplayContextReasonName(reason));
@@ -1278,6 +1278,11 @@ LRESULT HandleWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         case ID_TRAY_ABOUT: ShowAboutDialog(hwnd); break;
         case ID_TRAY_COPY_REPORT: CopySupportReport(hwnd); break;
         case ID_TRAY_COPY_STATUS_JSON: CopyStatusJson(hwnd); break;
+        case ID_TRAY_REFRESH_DISPLAY_CONTEXT:
+            RefreshDisplayContext(DisplayContextReason::ManualRefresh);
+            if (g_displayContext.lastFailed()) ReportError("Windows display metrics are unavailable. Prior cached context is retained; see the support report.", false);
+            else ShowTrayInfo("RedLight display context refreshed", "The support report now contains refreshed Windows display metrics.");
+            break;
         case ID_TRAY_SAVE_PREFERENCES: SaveCurrentPreferences(); break;
         case ID_TRAY_RETRY_SESSION: RetrySessionRecovery(); break;
         case ID_TRAY_RETRY_SHORTCUTS: RetrySelectedShortcuts(); break;

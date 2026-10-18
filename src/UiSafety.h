@@ -28,6 +28,7 @@ inline bool CommandMayChangeFilter(unsigned command, bool supportsLuma = true) n
     case ID_TRAY_RETRY_SHORTCUTS:
     case ID_TRAY_CLEAR_RESTORATION_HISTORY:
     case ID_TRAY_COPY_STATUS_JSON:
+    case ID_TRAY_REFRESH_DISPLAY_CONTEXT:
         return false;
     default:
         return true;
