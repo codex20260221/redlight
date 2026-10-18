@@ -153,6 +153,8 @@ Exit codes are `0` for complete settings JSON, `1` for storage/output/internal f
 
 Import and reset previews name the fields that differ from current in-session choices while retaining every candidate value for review. If values are identical, the preview says so and still explains that confirmation restores the display and leaves filtering off. An incomplete preview is rejected before confirmation or applying settings.
 
+Import previews also show the validated input version, current canonical export version, and fields supplied by older-schema defaults. Version 1 supplies Default shortcuts and warnings Off; version 2 supplies warnings Off; version 3 requires every field explicitly. These historical defaults are pinned by a shared parser/validation/preview policy. A candidate that contradicts its supplied schema provenance is rejected before confirmation. Default-reset previews have no imported-file provenance.
+
 The format uses a RedLightProfile section. Version 3 exports explicit mode/luma/backend/session_minutes/hotkeys/expiry_warning fields. The expiry_warning tokens are off, 30s, 1m, or 5m; hotkeys tokens are default, f9, f10, or disabled. Version 1/2 profiles are accepted with warnings Off; version 1 also uses default shortcuts. New fields require their corresponding profile version. Blank lines, whole-line comments, whitespace around fields, and UTF-8 BOMs are accepted by the parser; text must be valid UTF-8, including comments. Duplicates, unknown fields, missing fields, unsupported versions, and invalid ranges are rejected. Profiles are data and contain no commands to execute.
 
 Check a saved profile offline with `--validate-profile=<file>`. In PowerShell, quote the entire option when the path contains spaces:

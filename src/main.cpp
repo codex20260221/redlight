@@ -39,6 +39,7 @@
 #include "TrayCommand.h"
 #include "StandardOutput.h"
 #include <cstdio>
+#include <optional>
 
 #include "Diagnostics.h"
 #include "GammaRampFilter.h"
@@ -118,7 +119,7 @@ TrayStatus CaptureCachedTrayStatus();
 void CopyStatusJson(HWND owner);
 void CopySettingsProfile(HWND owner);
 void ImportSettingsProfile(HWND owner);
-void ConfirmPreferences(HWND owner, const AppPreferences& candidate, const char* title);
+void ConfirmPreferences(HWND owner, const AppPreferences& candidate, const char* title, std::optional<unsigned> inputSchema = std::nullopt);
 void VerifyBackendState(HWND owner);
 const char* FilterStatusText();
 void ShowTrayInfo(const char* title, const char* message);
@@ -1021,13 +1022,13 @@ void ImportSettingsProfile(HWND owner) {
         ReportError(error);
         return;
     }
-    ConfirmPreferences(owner, *parsed.preferences, "Import RedLight settings");
+    ConfirmPreferences(owner, *parsed.preferences, "Import RedLight settings", parsed.inputSchema);
 }
 
-void ConfirmPreferences(HWND owner, const AppPreferences& candidate, const char* title) {
+void ConfirmPreferences(HWND owner, const AppPreferences& candidate, const char* title, std::optional<unsigned> inputSchema) {
     if (g_busy || g_preferencesApplying || !ValidPreferences(candidate)) return;
     char preview[1024];
-    if (!FormatPreferencePreview(g_preferences, candidate, preview)) {
+    if (!FormatPreferencePreview(g_preferences, candidate, preview, inputSchema)) {
         Diagnostics::Log("Preference confirmation preview could not be prepared completely; no change applied.");
         ReportError("The complete preference preview could not be prepared. No settings were applied.");
         return;

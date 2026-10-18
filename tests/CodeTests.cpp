@@ -2920,6 +2920,81 @@ void PreferencePreviewPreservesCurrentBackendAndStorage() {
         "preparing a preview changes no live display, ownership, stored preferences, shortcut, or clipboard state");
     Check(filter.disable(), "preview leaves original restoration data intact");
 }
+void ProfileSchemaDefaultPolicyAndParsing() {
+    const auto first = DefaultsForProfileSchema(1), second = DefaultsForProfileSchema(2), current = DefaultsForProfileSchema(3);
+    Check(first && first->shortcuts && first->expiryWarning && second && !second->shortcuts && second->expiryWarning &&
+        current && !current->shortcuts && !current->expiryWarning && !DefaultsForProfileSchema(0) && !DefaultsForProfileSchema(4) &&
+        !DefaultsForProfileSchema((std::numeric_limits<unsigned>::max)()), "shared schema policy names exactly the defined historical defaults and refuses unknown versions");
+    const std::string older = "[RedLightProfile]\nversion=1\nmode=strict\nluma=equal\nbackend=gamma\nsession_minutes=17\n";
+    const auto parsed1 = ParsePreferences(older);
+    auto version2 = older; version2.replace(version2.find("version=1"), 9, "version=2"); version2 += "hotkeys=f10\n";
+    const auto parsed2 = ParsePreferences(version2);
+    Check(parsed1.preferences && parsed1.preferences->shortcuts == ShortcutProfile::Default && parsed1.preferences->expiryWarning == ExpiryWarning::Off &&
+        parsed2.preferences && parsed2.preferences->shortcuts == ShortcutProfile::F10 && parsed2.preferences->expiryWarning == ExpiryWarning::Off,
+        "historical parser defaults stay pinned while version-2 explicit shortcut choices are preserved");
+    Check(!ParsePreferences(older + "hotkeys=f9\n").preferences && !ParsePreferences(version2 + "expiry_warning=off\n").preferences,
+        "shared defaults never silently override fields forbidden by the source schema");
+}
+void PreferencePreviewSchemaProvenance() {
+    const std::string base = "[RedLightProfile]\nmode=luma\nluma=green\nbackend=magnification\nsession_minutes=31\n";
+    char text[1024];
+    constexpr const char* expected[] = {"Defaults supplied: Shortcuts = Default; Expiry warning = Off", "Defaults supplied: Expiry warning = Off", "Defaults supplied: None; all fields explicit"};
+    for (unsigned schema = 1; schema <= 3; ++schema) {
+        auto input = base + "version=" + std::to_string(schema) + "\n";
+        if (schema >= 2) input += "hotkeys=f10\n";
+        if (schema >= 3) input += "expiry_warning=1m\n";
+        const auto parsed = ParsePreferences(input);
+        Check(parsed.preferences.has_value(), "prepare a validated source profile");
+        const auto preview = FormatPreferencePreview(ComparisonCandidate(63), *parsed.preferences, text, parsed.inputSchema);
+        Check(preview && preview->find("Input profile version: " + std::to_string(schema) + "; canonical export version: 3") != std::string_view::npos &&
+            preview->find(expected[schema - 1]) != std::string_view::npos && preview->find("Mode: Luma Red") != std::string_view::npos &&
+            preview->find("Session limit: 31 minutes") != std::string_view::npos && preview->find("display will be restored and stay off") != std::string_view::npos,
+            "source schema/default disclosure supplements complete candidate choices and the existing restoration consent");
+    }
+    const auto reset = FormatPreferencePreview({}, {}, text);
+    Check(reset && reset->find("Input profile version") == std::string_view::npos && reset->find("Defaults supplied") == std::string_view::npos,
+        "a default-reset preview does not invent file provenance");
+}
+void PreferencePreviewSchemaValidationAndBounds() {
+    char text[1024];
+    auto candidate = ComparisonCandidate(63); candidate.backend = BackendPreference::Magnification;
+    const auto preview = FormatPreferencePreview({}, candidate, text, 3);
+    Check(preview && preview->size() < sizeof(text), "long current-schema choices and provenance fit the native confirmation buffer");
+    const auto length = preview->size();
+    Check(FormatPreferencePreview({}, candidate, std::span<char>(text, length + 1), 3)->size() == length && text[length] == '\0' &&
+        !FormatPreferencePreview({}, candidate, std::span<char>(text, length), 3), "provenance participates in exact output/terminator bounds without exposing truncated previews");
+    Check(!FormatPreferencePreview({}, {}, text, 0) && !FormatPreferencePreview({}, {}, text, 4) &&
+        !FormatPreferencePreview({}, candidate, text, 1) && !FormatPreferencePreview({}, candidate, text, 2),
+        "unknown schemas and candidates contradicting historical defaults cannot produce a trusted source preview");
+    candidate.expiryWarning = ExpiryWarning::Off;
+    Check(FormatPreferencePreview({}, candidate, text, 2).has_value() && !FormatPreferencePreview({}, candidate, text, 1),
+        "version 2 permits explicit shortcuts while version 1 still requires the defined shortcut default");
+}
+void PreferencePreviewSchemaNoAllocationAndRecoveryIsolation() {
+    GammaRampFilter filter;
+    Check(filter.initialize(), "prepare gamma recovery");
+    fake.writes = {Write::FailAfterApply, Write::Fail};
+    Check(!filter.enable() && filter.needsRestore() && SavePreferences(ComparisonCandidate(63)), "retain partial recovery and stored nondefault choices");
+    const auto reads = fake.gammaReads, writes = fake.gammaWrites, registryReads = fake.registryReads, registryWrites = fake.registryWrites;
+    const auto releases = fake.mutexReleases;
+    const auto clocks = fake.backendClockReads;
+    const auto statistics = filter.statistics();
+    const auto error = std::string(filter.lastError());
+    char text[1024];
+    bool unused = false;
+    std::optional<std::string_view> preview;
+    {
+        TestMemory::FailNextAllocation fail;
+        preview = FormatPreferencePreview(ComparisonCandidate(63), {}, text, 1);
+        unused = TestMemory::AllocationFailurePending();
+    }
+    Check(preview && unused && preview->find("Shortcuts = Default; Expiry warning = Off") != std::string_view::npos &&
+        fake.gammaReads == reads && fake.gammaWrites == writes && fake.registryReads == registryReads && fake.registryWrites == registryWrites &&
+        fake.mutexReleases == releases && fake.backendClockReads == clocks && filter.statistics() == statistics && error == filter.lastError() &&
+        !filter.isActive() && filter.needsRestore() && fake.mutexOwned && fake.clipOpens == 0,
+        "schema-aware confirmation preparation allocates nothing and preserves output/error/snapshot/ownership/storage/clock state");
+    Check(filter.disable(), "original calibration still restores after provenance preview preparation");
+}
 void MagLiveModeFailureRestoresConfirmedTransform() {
     MagnificationFilter filter;
     Check(filter.initialize() && filter.setLumaProfile(LumaProfile::GreenDetail), "prepare confirmed live mode");
@@ -4525,6 +4600,8 @@ int main() {
         {"Preference preview exact changed fields", PreferencePreviewChangedFields}, {"Preference preview identical/full choices", PreferencePreviewIdenticalAndFullValues},
         {"Preference preview bounds/validation", PreferencePreviewBoundsAndInvalidInput}, {"Preference preview without C++ allocation", PreferencePreviewNoCppAllocation},
         {"Preference preview backend/storage isolation", PreferencePreviewPreservesCurrentBackendAndStorage},
+        {"Profile schema default policy/parsing", ProfileSchemaDefaultPolicyAndParsing}, {"Preference preview source provenance", PreferencePreviewSchemaProvenance},
+        {"Preference preview provenance validation/bounds", PreferencePreviewSchemaValidationAndBounds}, {"Preference preview provenance allocation/recovery", PreferencePreviewSchemaNoAllocationAndRecoveryIsolation},
         {"Mag live-mode failure confirmed rollback", MagLiveModeFailureRestoresConfirmedTransform}, {"Mag live-Luma failure confirmed rollback", MagLiveLumaFailureRetainsPreferenceAndTransform},
         {"Mag live-mode failed rollback recovery", MagLiveModeRollbackFailureKeepsInactiveRecovery}, {"Mag live-Luma failed rollback preference gate", MagLiveLumaRollbackFailureBlocksPreferenceCommit},
         {"Mag unconfirmed live rollback/read-back", MagLiveUnconfirmedRollbackCannotClaimActive}, {"Mag live rollback without C++ allocation", MagLiveRollbackWithoutCppAllocation},

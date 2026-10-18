@@ -96,10 +96,11 @@ int WriteResult(std::string_view text, int exitCode) noexcept {
     return 1;
 }
 int WriteValidatedProfile(const PreferencesParseResult& parsed) noexcept {
-    if (!parsed.preferences || parsed.inputSchema == 0 || parsed.inputSchema > PreferencesProfileVersion) return 1;
+    const auto defaults = DefaultsForProfileSchema(parsed.inputSchema);
+    if (!parsed.preferences || !defaults) return 1;
     const auto& value = *parsed.preferences;
-    const char* defaulted = parsed.inputSchema == 1 ? "\"hotkeys\",\"expiry_warning\"" :
-        (parsed.inputSchema == 2 ? "\"expiry_warning\"" : "");
+    const char* defaulted = defaults->shortcuts ? "\"hotkeys\",\"expiry_warning\"" :
+        (defaults->expiryWarning ? "\"expiry_warning\"" : "");
     char output[1024];
     const int length = std::snprintf(output, sizeof(output),
         "{\"protocol\":1,\"status\":\"valid-profile\",\"valid\":true,\"input_schema\":%u,\"profile_schema\":%u,"

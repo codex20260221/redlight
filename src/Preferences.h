@@ -12,6 +12,15 @@
 #include <string_view>
 
 inline constexpr unsigned PreferencesProfileVersion = 3;
+struct ProfileSchemaDefaults { bool shortcuts, expiryWarning; };
+inline constexpr std::optional<ProfileSchemaDefaults> DefaultsForProfileSchema(unsigned schema) noexcept {
+    switch (schema) {
+    case 1: return ProfileSchemaDefaults{true, true};
+    case 2: return ProfileSchemaDefaults{false, true};
+    case 3: return ProfileSchemaDefaults{false, false};
+    default: return std::nullopt;
+    }
+}
 
 struct AppPreferences {
     RedMode mode = RedMode::LumaRed;
@@ -143,5 +152,10 @@ inline PreferencesParseResult ParsePreferences(std::string_view input) {
     if (version == 1 && (seen & 32)) return {std::nullopt, "Shortcut settings require profile version 2", lineNumber};
     if (version < 3 && (seen & 64)) return {std::nullopt, "Expiry warnings require profile version 3", lineNumber};
     if (!header || seen != (version == 3 ? 127u : (version == 2 ? 63u : 31u))) return {std::nullopt, "Profile section or required fields are missing", lineNumber};
+    const auto defaults = DefaultsForProfileSchema(version);
+    if (!defaults) return {std::nullopt, "Unsupported profile version", lineNumber};
+    // Older schema defaults are fixed by their contract, independent of future app defaults.
+    if (defaults->shortcuts) value.shortcuts = ShortcutProfile::Default;
+    if (defaults->expiryWarning) value.expiryWarning = ExpiryWarning::Off;
     return {value, nullptr, 0, version};
 }

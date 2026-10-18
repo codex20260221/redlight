@@ -8,9 +8,21 @@
 
 // Complete bounded preview, prepared before a native confirmation or any mutation.
 inline std::optional<std::string_view> FormatPreferencePreview(const AppPreferences& current,
-    const AppPreferences& candidate, std::span<char> output) noexcept {
+    const AppPreferences& candidate, std::span<char> output, std::optional<unsigned> inputSchema = std::nullopt) noexcept {
     const auto mask = ProfileDifferenceMask(candidate, current);
     if (!mask || output.empty()) return std::nullopt;
+    char provenance[192] = {};
+    if (inputSchema) {
+        const auto defaults = DefaultsForProfileSchema(*inputSchema);
+        if (!defaults || (defaults->shortcuts && candidate.shortcuts != ShortcutProfile::Default) ||
+            (defaults->expiryWarning && candidate.expiryWarning != ExpiryWarning::Off)) return std::nullopt;
+        const char* fields = defaults->shortcuts ? "Shortcuts = Default; Expiry warning = Off" :
+            (defaults->expiryWarning ? "Expiry warning = Off" : "None; all fields explicit");
+        const int length = std::snprintf(provenance, sizeof(provenance),
+            "Input profile version: %u; canonical export version: %u\nDefaults supplied: %s\n\n",
+            *inputSchema, PreferencesProfileVersion, fields);
+        if (length < 0 || static_cast<std::size_t>(length) >= sizeof(provenance)) return std::nullopt;
+    }
     constexpr std::array<const char*, 6> labels{"Red mode", "Luma detail", "Next-start backend", "Session limit", "Shortcuts", "Expiry warning"};
     static_assert(labels.size() == ProfileDifferenceFieldNames.size());
     char changed[192];
@@ -26,11 +38,11 @@ inline std::optional<std::string_view> FormatPreferencePreview(const AppPreferen
         if (length < 0 || static_cast<std::size_t>(length) >= sizeof(changed)) return std::nullopt;
     }
     const int length = std::snprintf(output.data(), output.size(),
-        "Apply these preferences?\n\nChanges from current choices: %s\n\nMode: %s\nLuma detail: %s\nBackend on next start: %s\n"
+        "Apply these preferences?\n\n%sChanges from current choices: %s\n\nMode: %s\nLuma detail: %s\nBackend on next start: %s\n"
         "Session limit: %u minutes (0 = unlimited)\nExpiry warning: %s\nShortcut profile: %s\n\n"
         "The display will be restored and stay off, even when preference values are identical. Backend selection applies on the next start.\n"
         "Luma preferences are retained for Magnification when the current backend is gamma.",
-        changed, RedModeDisplayName(candidate.mode), LumaProfileName(candidate.luma), BackendPreferenceName(candidate.backend),
+        provenance, changed, RedModeDisplayName(candidate.mode), LumaProfileName(candidate.luma), BackendPreferenceName(candidate.backend),
         candidate.sessionMinutes, ExpiryWarningName(candidate.expiryWarning), ShortcutProfileName(candidate.shortcuts));
     if (length < 0 || static_cast<std::size_t>(length) >= output.size()) return std::nullopt;
     return std::string_view(output.data(), static_cast<std::size_t>(length));
