@@ -6,6 +6,8 @@
 #include "Version.h"
 #include "SessionTimer.h"
 #include "BackendSelection.h"
+#include "SupportReport.h"
+#include "Clipboard.h"
 #include <cstdio>
 
 #include "Diagnostics.h"
@@ -22,6 +24,7 @@
 #define ID_TRAY_MODE_LUMA_RED 204
 #define ID_TRAY_RESTORE 205
 #define ID_TRAY_LOGS 206
+#define ID_TRAY_COPY_REPORT 207
 #define ID_HOTKEY_TOGGLE 1
 #define ID_HOTKEY_RESTORE 2
 #define ID_TRAY_RETRY_TIMER 1
@@ -81,6 +84,7 @@ void RefreshTrayIconTip();
 bool InitializeTrayIcon(HINSTANCE hInstance);
 void SetRedModeFromTray(RedMode mode);
 void ShowAboutDialog(HWND parent);
+void CopySupportReport(HWND owner);
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
 int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPSTR lpCmdLine, _In_ int nShowCmd) {
@@ -698,6 +702,37 @@ void SetRedModeFromTray(RedMode mode) {
     RefreshTrayIconTip();
 }
 
+void CopySupportReport(HWND owner) {
+    SupportReportState state;
+    state.version = REDLIGHT_VERSION;
+    state.backend = g_displayFilter->name();
+    state.startupPolicy = BackendPreferenceName(g_startupBackendPreference);
+    state.nextStartupPolicy = BackendPreferenceName(g_backendPreference);
+    state.commandLineOverride = g_backendOverride;
+    state.redMode = RedModeDisplayName(g_displayFilter->redMode());
+    state.lumaProfile = g_displayFilter->supportsRedMode(RedMode::LumaRed) ?
+        LumaProfileName(g_displayFilter->lumaProfile()) : "Unavailable on gamma";
+    state.lastError = g_displayFilter->lastError();
+    state.active = g_displayFilter->isActive();
+    state.needsRestore = g_displayFilter->needsRestore();
+    state.toggleHotkey = g_toggleHotkey;
+    state.restoreHotkey = g_restoreHotkey;
+    state.sessionNotifications = g_sessionNotifications;
+    state.sessionMinutes = g_sessionTimer.minutes();
+    if (g_sessionTimer.armed()) state.remainingSeconds = (g_sessionTimer.remainingMilliseconds(GetTickCount64()) + 999) / 1000;
+    if (!CopyUtf8TextToClipboard(owner, BuildSupportReport(state))) {
+        ReportError("The support report could not be copied. Another program may be using the clipboard. Please retry.");
+        return;
+    }
+    Diagnostics::Log("Support report copied to clipboard at user request.");
+    NOTIFYICONDATAA notification = nid;
+    notification.uFlags = NIF_INFO;
+    strcpy_s(notification.szInfoTitle, "RedLight support report copied");
+    strcpy_s(notification.szInfo, "Paste the report into a support request or save it in a text editor.");
+    notification.dwInfoFlags = NIIF_INFO;
+    if (!Shell_NotifyIconA(NIM_MODIFY, &notification)) Diagnostics::Log("Support report confirmation notification failed.");
+}
+
 void ShowAboutDialog(HWND parent) {
     char aboutText[1024];
     sprintf_s(aboutText, "RedLight " REDLIGHT_VERSION "\n\nBackend: %s\nStartup selection: %s%s\nNext start: %s\nMode: %s\nLuma detail: %s\nStatus: %s\n\n"
@@ -792,6 +827,7 @@ void ShowTrayMenu(HWND hwnd) {
         AppendMenuA(menu, lumaFlags, ID_TRAY_MODE_LUMA_RED, "&Luma Red") &&
         AppendMenuA(menu, MF_SEPARATOR, 0, NULL) &&
         AppendMenuA(menu, MF_STRING, ID_TRAY_LOGS, "Open &logs folder") &&
+        AppendMenuA(menu, MF_STRING, ID_TRAY_COPY_REPORT, "Copy support &report") &&
         AppendMenuA(menu, MF_STRING, ID_TRAY_ABOUT, "&About") &&
         AppendMenuA(menu, MF_STRING, ID_TRAY_EXIT, "E&xit");
     if (!built) {
@@ -856,6 +892,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         case ID_TRAY_MODE_STRICT_RED: SetRedModeFromTray(RedMode::StrictRed); break;
         case ID_TRAY_MODE_LUMA_RED: SetRedModeFromTray(RedMode::LumaRed); break;
         case ID_TRAY_ABOUT: ShowAboutDialog(hwnd); break;
+        case ID_TRAY_COPY_REPORT: CopySupportReport(hwnd); break;
         case ID_TRAY_EXIT:
             if (!PostMessageA(hwnd, WM_CLOSE, 0, 0)) ReportError("The exit request could not be queued. Please retry.");
             break;

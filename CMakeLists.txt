@@ -15,7 +15,7 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 configure_file(src/Version.h.in generated/Version.h @ONLY)
 
 add_executable(RedLight WIN32
-    src/Diagnostics.cpp src/main.cpp
+    src/Diagnostics.cpp src/Clipboard.cpp src/main.cpp
     src/GammaRampFilter.cpp src/MagnificationFilter.cpp
     resources/app.rc
 )
@@ -23,7 +23,7 @@ target_include_directories(RedLight PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generat
 target_compile_definitions(RedLight PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00)
 target_link_libraries(RedLight PRIVATE user32 gdi32 Shell32 Magnification Wtsapi32 Advapi32)
 if(MSVC)
-    target_compile_options(RedLight PRIVATE /W4 /permissive- /utf-8)
+    target_compile_options(RedLight PRIVATE /W4 /permissive- /utf-8 /EHsc)
     target_link_options(RedLight PRIVATE /MANIFEST:NO /DYNAMICBASE /NXCOMPAT)
 endif()
 
@@ -36,12 +36,12 @@ endif()
 include(CTest)
 if(BUILD_TESTING)
     add_executable(RedLightCodeTests
-        tests/CodeTests.cpp src/MagnificationFilter.cpp src/GammaRampFilter.cpp)
+        tests/CodeTests.cpp src/MagnificationFilter.cpp src/GammaRampFilter.cpp src/Clipboard.cpp)
     # Fake headers provide every display API: this target cannot call real display APIs.
     target_include_directories(RedLightCodeTests BEFORE PRIVATE tests/fake_win32 src)
     target_compile_definitions(RedLightCodeTests PRIVATE REDLIGHT_FAKE_WIN32=1)
     if(MSVC)
-        target_compile_options(RedLightCodeTests PRIVATE /W4 /WX /permissive- /utf-8)
+        target_compile_options(RedLightCodeTests PRIVATE /W4 /WX /permissive- /utf-8 /EHsc)
     endif()
     add_test(NAME RedLight.CodeTests COMMAND RedLightCodeTests)
     set_tests_properties(RedLight.CodeTests PROPERTIES LABELS "code-only;no-display")

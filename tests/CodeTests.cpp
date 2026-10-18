@@ -5,6 +5,8 @@
 #include "CommandLine.h"
 #include "SessionTimer.h"
 #include "BackendSelection.h"
+#include "SupportReport.h"
+#include "Clipboard.h"
 #include <limits>
 #include <array>
 #include <cmath>
@@ -24,6 +26,11 @@ struct Fake {
     MAGCOLOREFFECT effect = {};
     WORD ramp[3][256] = {};
     std::deque<Write> writes;
+    DWORD lastError = 123;
+    bool clipAllocate = true, clipLock = true, clipOpen = true, clipEmpty = true, clipSet = true, clipClose = true;
+    bool clipConvert = true, clipSecondConvert = true;
+    int clipAllocations = 0, clipFrees = 0, clipOpens = 0, clipEmpties = 0, clipSets = 0, clipCloses = 0, clipConversions = 0;
+    std::vector<wchar_t> clipMemory;
 } fake;
 
 void Reset() {
@@ -313,6 +320,58 @@ void LumaPresetInStrictModeAndGamma() {
     Check(f.setRedMode(RedMode::LumaRed) && fake.effect.transform[2][0] > 0.33f, "next luma mode uses stored profile");
     Check(!g.setLumaProfile(LumaProfile::EqualDetail) && g.redMode() == RedMode::StrictRed && fake.gammaWrites == 0, "gamma rejects cross-channel profile without display write");
 }
+void SupportReportStates() {
+    SupportReportState state;
+    state.version = "test-version";
+    state.backend = "MockBackend";
+    auto report = BuildSupportReport(state);
+    Check(report.find("State: off") != std::string::npos && report.find("Session limit: unlimited") != std::string::npos, "inactive/default report");
+    Check(report.find("Countdown: not armed") != std::string::npos && report.find("Last backend error: none") != std::string::npos, "no invented countdown or error");
+    state.active = true;
+    state.needsRestore = true;
+    state.commandLineOverride = true;
+    state.toggleHotkey = true;
+    state.sessionMinutes = 15;
+    state.remainingSeconds = 0;
+    report = BuildSupportReport(state);
+    Check(report.find("State: ON") != std::string::npos && report.find("0 seconds remaining") != std::string::npos, "expired timer distinct from absent timer");
+    Check(report.find("command-line override") != std::string::npos && report.find("Toggle shortcut: registered") != std::string::npos, "expert policy and hotkey detail");
+    state.lastError = "restore failed";
+    report = BuildSupportReport(state);
+    Check(report.find("State: Recovery needed") != std::string::npos && report.find("restore failed") != std::string::npos, "recovery status takes priority over prior active state");
+    Check(report.find("no display output is measured") != std::string::npos, "report describes evidence scope");
+}
+void ClipboardAllocationAndOpenFailures() {
+    fake.clipAllocate = false;
+    Check(!CopyUtf8TextToClipboard(nullptr, "report") && fake.clipEmpties == 0, "allocation failure leaves clipboard untouched");
+    fake.clipAllocate = true;
+    fake.clipLock = false;
+    Check(!CopyUtf8TextToClipboard(nullptr, "report") && fake.clipFrees == 1 && fake.clipOpens == 0, "lock failure frees prepared memory before opening clipboard");
+    fake.clipLock = true;
+    fake.clipOpen = false;
+    Check(!CopyUtf8TextToClipboard(nullptr, "report") && fake.clipFrees == 2 && fake.clipEmpties == 0, "busy clipboard preserves existing contents and frees memory");
+}
+void ClipboardTransferOwnership() {
+    fake.clipEmpty = false;
+    Check(!CopyUtf8TextToClipboard(nullptr, "report") && fake.clipFrees == 1 && fake.clipCloses == 1 && fake.clipSets == 0, "empty failure closes and frees memory");
+    fake.clipEmpty = true;
+    fake.clipSet = false;
+    Check(!CopyUtf8TextToClipboard(nullptr, "report") && fake.clipFrees == 2 && fake.clipCloses == 2, "transfer failure retains ownership for cleanup");
+    fake.clipSet = true;
+    Check(CopyUtf8TextToClipboard(nullptr, "report") && fake.clipFrees == 2 && fake.clipCloses == 3, "successful transfer relinquishes memory to Windows");
+    Check(std::wstring(fake.clipMemory.data()) == L"report", "clipboard buffer is terminated UTF-16 text");
+    fake.clipClose = false;
+    Check(!CopyUtf8TextToClipboard(nullptr, "report") && fake.clipFrees == 2, "close failure reported without freeing Windows-owned memory");
+}
+void ClipboardConversionFailure() {
+    fake.clipConvert = false;
+    Check(!CopyUtf8TextToClipboard(nullptr, "report") && fake.clipAllocations == 0 && fake.clipOpens == 0, "sizing/conversion failure touches no clipboard or allocation");
+    fake.clipConvert = true;
+    fake.clipConversions = 0;
+    fake.clipSecondConvert = false;
+    Check(!CopyUtf8TextToClipboard(nullptr, "report") && fake.clipFrees == 1 && fake.clipOpens == 0, "second conversion failure cleans up before clipboard mutation");
+    Check(!CopyUtf8TextToClipboard(nullptr, "") && fake.clipOpens == 0, "empty reports rejected without mutation");
+}
 void Arguments() {
     using S = StartupAction;
     Check(ParseArguments({}) == S::Tray, "no arguments");
@@ -327,7 +386,8 @@ void Arguments() {
 }
 } // namespace
 
-DWORD GetLastError() { return 123; }
+DWORD GetLastError() { return fake.lastError; }
+void SetLastError(DWORD value) { fake.lastError = value; }
 HDC GetDC(HWND) { ++fake.dcRequests; return fake.dc ? &fake : nullptr; }
 int ReleaseDC(HWND, HDC) { ++fake.releases; return fake.release ? 1 : 0; }
 BOOL GetDeviceGammaRamp(HDC, void* ramp) {
@@ -354,6 +414,25 @@ BOOL MagSetFullscreenColorEffect(MAGCOLOREFFECT* effect) {
     if (!fake.magSet) return 0;
     fake.effect = *effect; return 1;
 }
+int MultiByteToWideChar(unsigned, DWORD, const char* text, int length, wchar_t* output, int) {
+    ++fake.clipConversions;
+    if (!fake.clipConvert || (output && !fake.clipSecondConvert)) return 0;
+    if (output) for (int i = 0; i < length; ++i) output[i] = static_cast<unsigned char>(text[i]);
+    return length;
+}
+HGLOBAL GlobalAlloc(unsigned, std::size_t bytes) {
+    ++fake.clipAllocations;
+    if (!fake.clipAllocate) return nullptr;
+    fake.clipMemory.resize(bytes / sizeof(wchar_t));
+    return &fake.clipMemory;
+}
+void* GlobalLock(HGLOBAL) { return fake.clipLock ? fake.clipMemory.data() : nullptr; }
+BOOL GlobalUnlock(HGLOBAL) { return 0; }
+HGLOBAL GlobalFree(HGLOBAL) { ++fake.clipFrees; return nullptr; }
+BOOL OpenClipboard(HWND) { ++fake.clipOpens; return fake.clipOpen; }
+BOOL EmptyClipboard() { ++fake.clipEmpties; return fake.clipEmpty; }
+HANDLE SetClipboardData(unsigned, HANDLE handle) { ++fake.clipSets; return fake.clipSet ? handle : nullptr; }
+BOOL CloseClipboard() { ++fake.clipCloses; return fake.clipClose; }
 namespace Diagnostics {
 void Log(const char*) {}
 void LogFormat(const char*, ...) {}
@@ -374,6 +453,8 @@ int main() {
         {"Backend cleanup failure", BackendSelectionCleanupFailure}, {"Backend command line", BackendCommandLine},
         {"Luma preset output", LumaPresetOutput}, {"Luma preset failure/restoration", LumaPresetFailureAndRestore},
         {"Luma preset strict/gamma behavior", LumaPresetInStrictModeAndGamma},
+        {"Support report states", SupportReportStates}, {"Clipboard allocation/open failures", ClipboardAllocationAndOpenFailures},
+        {"Clipboard ownership transfer", ClipboardTransferOwnership}, {"Clipboard conversion failure", ClipboardConversionFailure},
         {"Command line", Arguments}
     };
     int failed = 0;

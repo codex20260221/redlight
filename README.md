@@ -113,6 +113,7 @@ This warning does not necessarily mean RedLight is malicious; it means Windows d
 Do not run software you do not trust. RedLight is provided as-is and without warranty.
 
 ## Troubleshooting
+* **Copy support report** in the tray menu copies the version, backend/startup policy, red mode, luma detail preset, session limit/countdown, shortcut/session registration, and last backend error. Paste it into a support request or text editor. It includes no screenshot, account name, or filesystem path, and it reports backend call results rather than measuring the display. Clipboard access happens only when you choose this command; a busy clipboard is reported without clearing its existing contents.
 * Log file: `%LOCALAPPDATA%\RedLight\redlight.log`
 * Reset commands:
   * `RedLight.exe --restore`

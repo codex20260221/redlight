@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Added a copyable support report with backend policy, red/luma selections, countdown/recovery status, and shortcut availability, without screenshots, account names, or file paths; clipboard failure and ownership handling is covered by fake-API code tests.
 - Added saved Luma Red color-detail presets: Classic (BT.601), Green detail (BT.709-style weights), and Equal color detail, with safe live switching on Magnification and unchanged Strict Red output.
 - Added saved next-start backend preferences (Automatic, Magnification only, and legacy gamma only) with one-start command-line overrides; explicit choices never silently fall back.
 - Added optional saved auto-restore session limits (15–240 minutes), a tray countdown, and throttled recovery retries after an expired session. Sessions start only after a confirmed enable and never automatically re-enable the filter.
