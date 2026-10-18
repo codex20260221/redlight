@@ -21,6 +21,11 @@ try {
     $stream.Position = $peOffset
     if ($reader.ReadUInt32() -ne 0x4550) { throw 'Invalid PE signature.' }
     if ($reader.ReadUInt16() -ne 0x8664) { throw 'Release must be native x64.' }
+    $stream.Position = $peOffset + 22
+    $characteristics = $reader.ReadUInt16()
+    if (($characteristics -band 0x0002) -eq 0 -or ($characteristics -band 0x2000) -ne 0) {
+        throw 'Release must be an executable image without the DLL flag.'
+    }
     $stream.Position = $peOffset + 24
     if ($reader.ReadUInt16() -ne 0x20B) { throw 'Release must be PE32+.' }
     $stream.Position = $peOffset + 24 + 68
@@ -53,4 +58,4 @@ if (-not $identity -or $identity.version -ne $numericVersion -or $identity.proce
 }
 $hash = Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256
 "$($hash.Hash.ToLowerInvariant())  $($item.Name)" | Set-Content -LiteralPath "$($item.FullName).sha256" -Encoding ascii
-Write-Output "Verified $ExpectedVersion, Windows x64, GUI, ASLR/DEP, embedded asInvoker manifest; SHA-256 written."
+Write-Output "Verified $ExpectedVersion, Windows x64 executable, GUI, ASLR/DEP, embedded asInvoker manifest; SHA-256 written."

@@ -17,6 +17,7 @@ cmake --build build --config Release
 ./tools/Test-CodeOnlyBinary.ps1
 ctest --test-dir build -C Release --output-on-failure
 ./tools/Verify-Release.ps1
+./tools/Test-ReleaseImageKind.ps1
 cpack --config build/CPackConfig.cmake -C Release -B build/packages
 ./tools/Verify-Package.ps1
 ```
@@ -54,6 +55,8 @@ Validation performed: Windows x64 build, isolated backend/command-line tests, st
 | Unicode Windows profile / clean PC | Diagnostics folder opens, log rotation works, portable app needs no VC++ redistributable | Pending |
 
 ## Expert-feature follow-up validation
+
+Executable-image qualification: the release checker now requires IMAGE_FILE_EXECUTABLE_IMAGE and rejects IMAGE_FILE_DLL using the [documented COFF characteristics](https://learn.microsoft.com/en-us/windows/win32/debug/pe-format). Two static regressions patch only those bits in unique temporary data copies, require the intended rejection reason, preserve the original SHA-256, and clean up without recursive deletion. Both pass in PowerShell 7 and Windows PowerShell 5.1; the original release passes metadata/import/manifest verification. Existing 293 C++ and 21 synthetic import-policy scenarios are unchanged by this small tooling edit. CI definitions include the negative data checks. Manual Windows startup/hardware qualification remains pending. No source/fixture image, application, or display test was executed.
 
 Static DLL policies: 21 additional synthetic PowerShell code scenarios cover ordinary/delayed lists, dependency/import-table disagreement, nonstandard/suffixless/path/space/Unicode names, ordinal case-insensitive duplicate handling, malformed/empty/truncated/multiple-image output, individual-symbol exclusion, and refusal of runtime/private DLLs or unknown policies. All pass in PowerShell 7.6.7 and Windows PowerShell 5.1.26100.9711. Native static checks confirm both isolated executables remain KERNEL32-only, the release has exactly the seven reviewed Windows libraries, and the successfully inspected release is rejected by code-test policy. All 293 isolated C++ scenarios pass under the revised gate. [Microsoft documents /IMPORTS as including ordinary and delay-loaded DLLs](https://learn.microsoft.com/en-us/cpp/build/reference/imports-dumpbin?view=msvc-170); unknown/mismatched tool formatting fails rather than proving a policy. Native discovery output is collected before reading exit status. CI definitions are updated locally; no remote run/publication is claimed. Manual notes (pending; not executed): qualify startup/filtering/recovery/Exit on a clean supported Windows machine, confirm no separate CRT installation is needed, and review any intentional dependency changes. These import checks do not cover runtime module loads or physical display behavior. No inspected executable, application, or display test ran.
 

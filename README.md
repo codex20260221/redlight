@@ -317,6 +317,7 @@ These commands do not start RedLight or the manual display probe:
 ./tools/Test-CodeOnlyBinary.ps1
 ctest --test-dir build -C Release --output-on-failure
 ./tools/Verify-Release.ps1
+./tools/Test-ReleaseImageKind.ps1
 cpack --config build/CPackConfig.cmake -C Release -B build/packages
 ./tools/Verify-Package.ps1
 ```
@@ -326,6 +327,8 @@ About and support reports include the local source revision and clean/modified s
 The code-test targets compile production backends and supporting helpers against fake Win32 functions. The import check permits only KERNEL32.dll for both executables. Tests cover transforms/recovery, preferences, timers, clipboard, shortcuts, and logging; display, registry, clipboard, and diagnostics-file operations use fakes. The diagnostics suite also checks concurrent records and runtime rotation in memory. Build the manual probe only when explicitly wanted with `-DREDLIGHT_BUILD_PROBE=ON`; it is excluded by default and is never a CTest test.
 
 Static import verification cross-checks DUMPBIN's dependency list against its [ordinary and delay-loaded import tables](https://learn.microsoft.com/en-us/cpp/build/reference/imports-dumpbin?view=msvc-170). Missing/mismatched/unrecognized output fails verification. Dependency names keep their complete spelling, including nonstandard names, before policy checks. Code-test policy permits only KERNEL32.dll. Release policy separately permits KERNEL32, USER32, GDI32, SHELL32, MAGNIFICATION, WTSAPI32, and ADVAPI32 DLLs; unexpected runtime/private libraries require review. These checks inspect file data, cover declared imports, and make no claim about runtime module loading or API/hardware compatibility. Test-BinaryImports runs 21 synthetic parser/policy code scenarios without invoking an inspected image; it also runs in CI. Native DUMPBIN discovery waits for complete output before checking its exit code.
+
+Release verification also requires the PE executable-image flag and a clear DLL flag. Test-ReleaseImageKind changes those bits in isolated temporary data copies, requires the specific metadata rejection, verifies the original binary's SHA-256 stays unchanged, and deletes its fixture files. It never runs the source or modified image. These two static regressions complement the positive release check.
 
 The ZIP includes the executable, SHA-256 checksum, license, README, changelog, and documentation. Verify a downloaded executable with `Get-FileHash .\RedLight.exe -Algorithm SHA256` against its published checksum. SHA-256 identifies the file; it does not establish publisher trust.
 

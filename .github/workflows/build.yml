@@ -31,6 +31,9 @@ jobs:
       - name: Verify release metadata and generate executable checksum
         shell: pwsh
         run: ./tools/Verify-Release.ps1
+      - name: Reject invalid release image kinds as static data
+        shell: pwsh
+        run: ./tools/Test-ReleaseImageKind.ps1
       - name: Package portable release
         shell: pwsh
         run: |
