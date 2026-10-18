@@ -879,7 +879,11 @@ void CopySupportReport(HWND owner) {
     state.sessionMinutes = g_sessionTimer.minutes();
     state.expiryWarning = ExpiryWarningName(g_preferences.expiryWarning);
     state.backendStatistics = g_displayFilter->statistics();
-    if (g_sessionTimer.armed()) state.remainingSeconds = (g_sessionTimer.remainingMilliseconds(GetTickCount64()) + 999) / 1000;
+    state.nativeCountdownTimer = CountdownTimerState(g_sessionTimer.armed(), g_sessionTimerInstalled);
+    state.expiryRestoreAttempted = g_sessionTimer.restoreAttempted();
+    state.expiryWarningAttempted = g_sessionTimer.warningAttempted();
+    state.expiryRetryMilliseconds = g_sessionTimer.restoreRetryMilliseconds(state.reportTick);
+    if (g_sessionTimer.armed()) state.remainingSeconds = (g_sessionTimer.remainingMilliseconds(state.reportTick) + 999) / 1000;
     if (!CopyUtf8TextToClipboard(owner, BuildSupportReport(state))) {
         ReportError("The support report could not be copied. Another program may be using the clipboard. Please retry.");
         return;

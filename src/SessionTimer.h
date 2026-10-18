@@ -39,11 +39,19 @@ public:
         start(now);
         return true;
     }
+    std::optional<std::uint64_t> restoreRetryMilliseconds(std::uint64_t now) const {
+        if (!armed_ || remainingMilliseconds(now) != 0) return std::nullopt;
+        if (!attempted_) return 0;
+        const auto elapsed = now - lastAttempt_;
+        return elapsed >= retryMilliseconds ? 0 : retryMilliseconds - elapsed;
+    }
     bool restoreDue(std::uint64_t now) const {
-        return armed_ && remainingMilliseconds(now) == 0 &&
-            (!attempted_ || now - lastAttempt_ >= retryMilliseconds);
+        const auto retry = restoreRetryMilliseconds(now);
+        return retry && *retry == 0;
     }
     void noteRestoreAttempt(std::uint64_t now) { lastAttempt_ = now; attempted_ = true; }
+    bool restoreAttempted() const { return armed_ && attempted_; }
+    bool warningAttempted() const { return armed_ && warningAttempted_; }
     bool warningDue(std::uint64_t now, unsigned leadSeconds) const {
         if (!armed_ || warningAttempted_ || leadSeconds == 0 || leadSeconds > 300) return false;
         const auto remaining = remainingMilliseconds(now);
@@ -59,6 +67,21 @@ private:
     std::uint64_t started_ = 0;
     std::uint64_t lastAttempt_ = 0;
 };
+
+enum class NativeCountdownTimerState { NotArmed, Armed, CleanupPending, Unavailable };
+inline NativeCountdownTimerState CountdownTimerState(bool armed, bool installed) noexcept {
+    if (armed) return installed ? NativeCountdownTimerState::Armed : NativeCountdownTimerState::Unavailable;
+    return installed ? NativeCountdownTimerState::CleanupPending : NativeCountdownTimerState::NotArmed;
+}
+inline const char* NativeCountdownTimerStateName(NativeCountdownTimerState state) noexcept {
+    switch (state) {
+    case NativeCountdownTimerState::NotArmed: return "Not armed";
+    case NativeCountdownTimerState::Armed: return "Armed (native registration confirmed)";
+    case NativeCountdownTimerState::CleanupPending: return "Cleanup pending (native removal unconfirmed)";
+    case NativeCountdownTimerState::Unavailable: return "Armed without confirmed native registration";
+    }
+    return "Unknown";
+}
 
 inline std::optional<unsigned> ParseSessionMinutes(std::wstring_view text) {
     while (!text.empty() && (text.front() == L' ' || text.front() == L'\t')) text.remove_prefix(1);

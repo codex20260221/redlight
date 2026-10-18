@@ -2548,6 +2548,74 @@ void MagLiveRollbackWithoutCppAllocation() {
         "live rollback and diagnostic preservation require no C++ heap allocation");
     Check(filter.disable(), "restore after allocation-pressure live rollback");
 }
+void CountdownRetryDiagnosticsBoundaries() {
+    SessionTimer timer;
+    Check(!timer.restoreRetryMilliseconds(0) && !timer.restoreDue(0), "unarmed countdown has no expiry retry schedule");
+    Check(timer.configure(1, 100, true) && !timer.restoreRetryMilliseconds(60099) && !timer.restoreDue(60099),
+        "unexpired countdown cannot show an eligible retry");
+    Check(timer.restoreRetryMilliseconds(60100) == 0 && timer.restoreDue(60100) && !timer.restoreAttempted(),
+        "exact expiry allows the first restore immediately without inventing an attempt");
+    timer.noteRestoreAttempt(60100);
+    Check(timer.restoreAttempted() && timer.restoreRetryMilliseconds(60100) == 5000 && timer.restoreRetryMilliseconds(65099) == 1 &&
+        !timer.restoreDue(65099) && timer.restoreRetryMilliseconds(65100) == 0 && timer.restoreDue(65100),
+        "diagnostic retry interval and actual scheduling share exact five-second boundaries");
+}
+void CountdownRetryDiagnosticsWrapAndReset() {
+    SessionTimer timer;
+    const auto maximum = (std::numeric_limits<std::uint64_t>::max)();
+    Check(timer.configure(1, maximum - 61000, true) && timer.restoreDue(maximum - 1000), "prepare an expired countdown before clock wrap");
+    timer.noteRestoreAttempt(maximum - 1000);
+    Check(timer.restoreRetryMilliseconds(2999) == 1000 && !timer.restoreDue(2999) && timer.restoreRetryMilliseconds(3999) == 0,
+        "retry diagnostics retain the correct remaining wait across unsigned clock wrap");
+    timer.cancel();
+    Check(!timer.restoreRetryMilliseconds(4000) && !timer.restoreAttempted(), "cancellation removes stale expiry retry diagnostics");
+    timer.start(5000);
+    Check(!timer.restoreRetryMilliseconds(5001) && !timer.restoreAttempted(), "a fresh countdown clears prior retry attempts and waits for its own deadline");
+}
+void CountdownAttemptDiagnosticsLifecycle() {
+    SessionTimer timer;
+    timer.noteRestoreAttempt(0); timer.noteWarningAttempt();
+    Check(!timer.restoreAttempted() && !timer.warningAttempted(), "attempt markers outside an armed countdown are not reported as a current session");
+    Check(timer.configure(1, 0, true), "arm warning/restore diagnostics");
+    timer.noteWarningAttempt();
+    Check(timer.warningAttempted() && !timer.restoreAttempted() && !timer.warningDue(30000, 30), "warning attempt is visible without implying restoration or notification delivery");
+    Check(timer.restart(30000, true) && !timer.warningAttempted() && !timer.restoreAttempted(), "explicit healthy restart resets per-countdown attempts");
+    timer.noteRestoreAttempt(90000); timer.noteWarningAttempt(); timer.cancel();
+    Check(!timer.warningAttempted() && !timer.restoreAttempted(), "manual restoration/cancellation clears both current-countdown markers");
+}
+void NativeCountdownDiagnosticsAndReports() {
+    Check(CountdownTimerState(false, false) == NativeCountdownTimerState::NotArmed && CountdownTimerState(true, true) == NativeCountdownTimerState::Armed &&
+        CountdownTimerState(false, true) == NativeCountdownTimerState::CleanupPending && CountdownTimerState(true, false) == NativeCountdownTimerState::Unavailable,
+        "all combinations distinguish native registration, missing confirmation, and retained cleanup obligation");
+    SupportReportState state;
+    state.nativeCountdownTimer = NativeCountdownTimerState::CleanupPending;
+    Check(BuildSupportReport(state).find("Native countdown timer: Cleanup pending (native removal unconfirmed)") != std::string::npos,
+        "reports do not hide a retained native timer after the pure countdown is cancelled");
+    state.expiryRestoreAttempted = true; state.expiryWarningAttempted = true; state.expiryRetryMilliseconds = 4999;
+    auto report = BuildSupportReport(state);
+    Check(report.find("Expiry warning attempted this countdown: yes") != std::string::npos && report.find("Expiry restoration attempted this countdown: yes") != std::string::npos &&
+        report.find("4999 milliseconds until retry allowed") != std::string::npos, "attempt markers and retry delay are explicitly reported");
+    state.expiryRetryMilliseconds = 0;
+    Check(BuildSupportReport(state).find("retry allowed now (message processing/busy state may delay)") != std::string::npos,
+        "zero wait means policy eligibility rather than a promised immediate display operation");
+}
+void CountdownDiagnosticsPreserveBackendAndPolicy() {
+    MagnificationFilter filter;
+    Check(filter.initialize() && filter.enable(), "active backend for timer-report isolation");
+    SessionTimer timer;
+    Check(timer.configure(1, 0, true), "arm supplied-timestamp countdown");
+    timer.noteWarningAttempt(); timer.noteRestoreAttempt(60000);
+    SupportReportState state;
+    state.remainingSeconds = 0; state.nativeCountdownTimer = CountdownTimerState(timer.armed(), true);
+    state.expiryRestoreAttempted = timer.restoreAttempted(); state.expiryWarningAttempted = timer.warningAttempted();
+    state.expiryRetryMilliseconds = timer.restoreRetryMilliseconds(61000);
+    const auto reads = fake.magReads, writes = fake.magWrites;
+    const auto statistics = filter.statistics();
+    Check(BuildSupportReport(state).find("4000 milliseconds until retry allowed") != std::string::npos && !timer.restoreDue(61000) && timer.restoreDue(65000) &&
+        filter.isActive() && filter.needsRestore() && filter.statistics() == statistics && fake.magReads == reads && fake.magWrites == writes && fake.registryWrites == 0,
+        "diagnostic reads preserve retry throttling, filtering, native operations, counters, and ownership");
+    Check(filter.disable(), "restore after timer diagnostics isolation");
+}
 } // namespace
 
 DWORD GetLastError() { return fake.lastError; }
@@ -2858,6 +2926,9 @@ int main() {
         {"Mag live-mode failure confirmed rollback", MagLiveModeFailureRestoresConfirmedTransform}, {"Mag live-Luma failure confirmed rollback", MagLiveLumaFailureRetainsPreferenceAndTransform},
         {"Mag live-mode failed rollback recovery", MagLiveModeRollbackFailureKeepsInactiveRecovery}, {"Mag live-Luma failed rollback preference gate", MagLiveLumaRollbackFailureBlocksPreferenceCommit},
         {"Mag unconfirmed live rollback/read-back", MagLiveUnconfirmedRollbackCannotClaimActive}, {"Mag live rollback without C++ allocation", MagLiveRollbackWithoutCppAllocation},
+        {"Countdown retry diagnostics exact boundaries", CountdownRetryDiagnosticsBoundaries}, {"Countdown retry diagnostics wrap/reset", CountdownRetryDiagnosticsWrapAndReset},
+        {"Countdown warning/restore attempt lifecycle", CountdownAttemptDiagnosticsLifecycle}, {"Native countdown diagnostics/reports", NativeCountdownDiagnosticsAndReports},
+        {"Countdown diagnostics preserve backend/policy", CountdownDiagnosticsPreserveBackendAndPolicy},
         {"Command line", Arguments}
     };
     int failed = 0;

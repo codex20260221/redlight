@@ -2,6 +2,7 @@
 #include "DisplayFilter.h"
 #include "ShortcutDiagnostics.h"
 #include "RestorationHistory.h"
+#include "SessionTimer.h"
 #include <cstdint>
 #include <optional>
 #include <sstream>
@@ -36,6 +37,9 @@ struct SupportReportState {
     std::string_view expiryWarning = "Off";
     BackendStatistics backendStatistics{};
     std::optional<std::uint64_t> remainingSeconds;
+    std::optional<NativeCountdownTimerState> nativeCountdownTimer;
+    bool expiryRestoreAttempted = false, expiryWarningAttempted = false;
+    std::optional<std::uint64_t> expiryRetryMilliseconds;
     RestorationHistory restorationHistory;
     std::uint64_t reportTick = 0;
 };
@@ -91,6 +95,13 @@ inline std::string BuildSupportReport(const SupportReportState& state) {
     report << "\r\nExpiry warning: " << state.expiryWarning << "\r\nCountdown: ";
     if (state.remainingSeconds) report << *state.remainingSeconds << " seconds remaining";
     else report << "not armed";
+    report << "\r\nNative countdown timer: " << (state.nativeCountdownTimer ? NativeCountdownTimerStateName(*state.nativeCountdownTimer) : "Not reported")
+        << "\r\nExpiry warning attempted this countdown: " << (state.expiryWarningAttempted ? "yes" : "no")
+        << "\r\nExpiry restoration attempted this countdown: " << (state.expiryRestoreAttempted ? "yes" : "no")
+        << "\r\nExpiry retry policy: ";
+    if (!state.expiryRetryMilliseconds) report << "not applicable (countdown off or unexpired)";
+    else if (*state.expiryRetryMilliseconds == 0) report << "retry allowed now (message processing/busy state may delay)";
+    else report << *state.expiryRetryMilliseconds << " milliseconds until retry allowed";
     report << "\r\nBackend counters since startup/last reset (requests / failures):";
     const auto counts = [&](const char* name, const BackendOperationStatistics& value) {
         report << "\r\n  " << name << ": " << value.requests << " / " << value.failures;
