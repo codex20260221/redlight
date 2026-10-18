@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Define the planned optional red-only activation fade-in, immediate restoration/cancellation rules, timing/ownership boundaries, and required isolated/manual validation before production integration.
 - Add a structured display/backend bug-report form requesting versions, selected mode/backend/brightness, monitor/GPU/color-tool details, recovery observations, and optional support reports/logs, with unavailable-data and redaction guidance.
 - Add optional, disabled-by-default per-user Start with Windows controls with explicit command/entry review, quoted portable executable paths, bounded Unicode Run entries, confirmed removal, refresh/retry, stale-review refusal, and checked read-back after failures. Keep startup consent separate from profiles/reset and preserve filter-off launches, current display state, and restoration ownership.
 - Add 1–100% red brightness on Magnification for Strict Red and every Luma preset, with tray presets/custom input, checked live changes and rollback, saved preferences, profile schema 4, and selected/preferred diagnostics. Existing schemas load at 100%; Gamma keeps its strict full-scale ramp and retains brightness only as a future Magnification preference. Failed application preserves the prior choice and original recovery ownership; failed saves remain retryable.

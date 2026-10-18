@@ -1,6 +1,6 @@
 # Issue-driven development checkpoint — 2026-10-18
 
-The user resumed the issue-driven goal from clean local commit `693d204`. Integrated brightness is committed as `7ced3fe`, optional per-user startup as `b12065a`; this data-only checkpoint adds the requested display/backend issue form (#16) on `release/0.6.0-rc1`. Runtime code is unchanged from `b12065a`. Continue autonomously through the roadmap until externally interrupted, keeping focused local commits and all restrictions below. No transition implementation is in progress at this checkpoint.
+The user resumed the issue-driven goal from clean local commit `693d204`. Integrated brightness is committed as `7ced3fe`, optional per-user startup as `b12065a`, and the local issue form as `0e24d03`. This data-only checkpoint defines initial transition semantics on `release/0.6.0-rc1`; runtime code is unchanged from `b12065a`. Continue autonomously through the roadmap until externally interrupted. No production transition implementation is in progress at this checkpoint.
 
 ## New issue-driven direction
 
@@ -52,7 +52,8 @@ The focused audit is committed as `4a1dd71`. The detailed state table, ownership
 | `693d204` | Issue #27 high-contrast tray symbols, fake resource/state regressions, and reviewed issue-driven roadmap |
 | `7ced3fe` | Issue #1 integrated 1–100% red brightness, schema-4 profiles, independent Gamma policy, and isolated failure regressions |
 | `b12065a` | Issue #17 consented per-user startup, portable path/entry review and verified removal, fake-registry failure coverage |
-| This checkpoint | Issue #16 local structured display/backend report form; static-only review, no publication |
+| `0e24d03` | Issue #16 local structured display/backend report form; static-only review, no publication |
+| This checkpoint | Initial issue #3 activation-only red fade-in contract defined before code; implementation pending |
 
 All commits are local. Each feature's evidence and unexecuted manual notes are recorded in [release validation](docs/release-validation.md#expert-feature-follow-up-validation).
 
@@ -63,7 +64,7 @@ All commits are local. Each feature's evidence and unexecuted manual notes are r
 - `tools/Test-TrayIcons.ps1` verifies four deterministic original monochrome resources at seven sizes, distinct shapes, transparency, bounded file layout, and Strict/Luma endpoint contrast. The off-screen asset contact sheet was inspected without launching RedLight.
 - Both test executables passed the KERNEL32-only import gate before execution. RedLight itself was never executed.
 - Static release checks passed: seven reviewed Windows DLLs, x64 GUI executable, ASLR/DEP, version/prerelease metadata, embedded `asInvoker` manifest, and SHA-256.
-- The portable ZIP contains 12 files matching the current binary/documentation, including the new issue roadmap. Release/package metadata is refreshed after checkpoint commits as part of closeout.
+- The portable ZIP contains 13 files matching the current binary/documentation, including the issue roadmap and transition design. Release/package metadata is refreshed after checkpoint commits as part of closeout.
 - Local artifact: `build/packages/RedLight-0.6.0-rc.1-windows-x64.zip`, with SHA-256 sidecars. Generated build artifacts are ignored by Git. This root handoff is internal and excluded by the existing package install rules.
 
 Use the existing build trees when resuming:
@@ -86,7 +87,7 @@ cpack --config build/CPackConfig.cmake -C Release -B build/packages
 
 Start with `git status --short` and this handoff. The worktree should be clean. There is no unfinished fix, active build, or required implementation follow-up from this checkpoint. Manual/native qualification remains unauthorized unless the user changes that restriction.
 
-Choose the next meaningful user-facing task from [issue roadmap](docs/issue-roadmap.md). Gradual transitions are next; no implementation is present. An asynchronous optional question asked whether ramps should apply only at activation (recommended) or also to later brightness edits; preserve any user answer before deciding scope. Define optional red-only brightness progression, cancellation/live target edits, timer failure/ownership and countdown interactions first; all Restore/Exit/environment recovery must remain immediate. Scheduling then needs manual overrides, sleep/resume, clock/DST/missed triggers, and countdown precedence defined. The old static backend-mode discovery candidate was not started and is superseded by the issue-driven priorities.
+Implement the defined [activation-only fade-in contract](docs/transition-design.md) next. An optional async question offered activation-only (recommended) versus also fading later brightness edits; after a reasonable unanswered interval, the agent stated it would proceed with activation-only. Incorporate any later user steering. No transition code or schema-5 changes exist at this checkpoint. Candidate implementation: supplied-time pure integer progress plus checked backend/cache coordination; extend the existing checked window timer helper with an explicit period while preserving the countdown's 1000-ms default, and ensure the fake timer models both IDs concurrently. Add schema-5 duration only with full production integration. All Restore/Exit/environment recovery stays immediate. Scheduling then needs manual overrides, sleep/resume, clock/DST/missed triggers, and countdown precedence defined. The old diagnostic capability candidate is superseded.
 
 Preserve these integration boundaries:
 
