@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Show mean elapsed milliseconds per completed timed backend scope in support reports, distinguish genuine zero from absent timing, and mark capped sample counts/totals with an unavailable mean; derive summaries from cached counters without new timing or recovery-state changes.
 - Advertise restoration-history and verification JSON schema versions in build discovery using the same constants as the clipboard exporters, preserving bounded read-only output and existing protocol fields.
 - Add read-only Copy verification details JSON with cached explicit-check state, age/duration, native read errors, numerical flags/units and zero-based mismatch locations; preserve finite numeric precision, reject inconsistent snapshots before clipboard preparation, and leave verification/recovery untouched without another backend read.
 - Include Gamma lifecycle in cached support diagnostics: distinguish retained initial-capture resources, ready/off, last-confirmed red output, pending ramp restoration, ownership release/handle cleanup, and the persistent abandoned-owner activation block without native calls or state changes.

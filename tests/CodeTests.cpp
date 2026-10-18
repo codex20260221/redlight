@@ -4221,6 +4221,62 @@ void BackendTimingReportsAndResetAreReadOnly() {
         filter.isActive() && filter.needsRestore(), "report/reset require no clock/native operation and preserve active ownership");
     Check(filter.disable() && filter.statistics().restoration.timing == BackendOperationTiming{1, 7, 7, 7}, "timing resumes after reset with confirmation reads and without losing restoration data");
 }
+void BackendTimingMeanPolicyAndAllocation() {
+    const auto maximum = (std::numeric_limits<std::uint64_t>::max)();
+    Check(!BackendMeanMilliseconds({}), "no completed timed sample has no mean rather than a fabricated zero");
+    for (const auto& [timing, expected] : std::array<std::pair<BackendOperationTiming, double>, 4>{
+        std::pair{BackendOperationTiming{1, 0, 0, 0}, 0.0}, {{2, 2, 2, 3}, 1.5}, {{3, 2, 2, 4}, 4.0 / 3}, {{maximum - 1, 1, 1, maximum - 1}, 1.0}}) {
+        const auto original = timing; std::optional<double> mean; bool unused = false;
+        { TestMemory::FailNextAllocation fail; mean = BackendMeanMilliseconds(timing); unused = TestMemory::AllocationFailurePending(); }
+        Check(mean == expected && unused && timing == original, "zero, fractional, and near-limit means use completed samples without allocation or stored-state changes");
+    }
+    Check(!BackendMeanMilliseconds({maximum, 0, 0, 0}) && !BackendMeanMilliseconds({1, maximum, maximum, maximum}) &&
+        !BackendMeanMilliseconds({maximum, 1, 1, maximum}) && fake.backendClockReads == 0,
+        "saturated sample count or total never yields a misleading derived mean or new clock work");
+}
+void BackendTimingMeanCompletedScopeSemantics() {
+    BackendStatistics statistics; fake.monotonicNow = 20;
+    {
+        RecordBackendOperation outer(statistics.activation, BackendMonotonicMilliseconds);
+        Check(!BackendMeanMilliseconds(statistics.activation.timing), "in-progress scope has no completed timing contribution");
+        fake.monotonicNow = 21;
+        { RecordBackendOperation inner(statistics.activation, BackendMonotonicMilliseconds); fake.monotonicNow = 25; inner.success(); }
+        const auto clocks = fake.backendClockReads;
+        Check(BackendMeanMilliseconds(statistics.activation.timing) == 4.0 && statistics.activation.inProgress == 1 && fake.backendClockReads == clocks,
+            "completed nested scope contributes while the unfinished outer scope remains excluded");
+    }
+    { RecordBackendOperation untimed(statistics.activation); untimed.success(); }
+    Check(statistics.activation.requests == 3 && statistics.activation.failures == 1 && statistics.activation.timing.completed == 2 &&
+        statistics.activation.timing.totalMilliseconds == 9 && BackendMeanMilliseconds(statistics.activation.timing) == 4.5,
+        "failed and nested timed scopes contribute inclusive durations; untimed requests do not enter the denominator");
+    Check(ResetBackendStatistics(statistics) && !BackendMeanMilliseconds(statistics.activation.timing), "reset removes the mean together with completed timing samples");
+}
+void BackendTimingMeanReportPreservesRecovery() {
+    GammaRampFilter filter;
+    Check(filter.initialize(), "prepare Gamma original for timing mean support report");
+    fake.writes = {Write::FailAfterApply, Write::Fail};
+    Check(!filter.enable() && filter.needsRestore(), "preserve partial activation and failed rollback");
+    SupportReportState state; state.backendStatistics = filter.statistics(); state.needsRestore = true;
+    const auto maximum = (std::numeric_limits<std::uint64_t>::max)();
+    state.backendStatistics.initialization.timing = {1, 0, 0, 0};
+    state.backendStatistics.activation.timing = {3, 2, 2, 4};
+    state.backendStatistics.restoration.timing = {2, maximum, maximum, maximum};
+    state.backendStatistics.verification.timing = {maximum, 0, 1, maximum - 1};
+    const auto statistics = filter.statistics(); const auto clocks = fake.backendClockReads;
+    const auto reads = fake.gammaReads, writes = fake.gammaWrites, releases = fake.mutexReleases; const auto error = std::string(filter.lastError());
+    const auto report = BuildSupportReport(state);
+    Check(report.find("last 0 ms, peak 0 ms, inclusive total 0 ms; mean 0.000 ms") != std::string::npos &&
+        report.find("last 2 ms, peak 2 ms, inclusive total 4 ms; mean 1.333 ms") != std::string::npos &&
+        report.find("inclusive total 18446744073709551615 ms (at limit); mean unavailable") != std::string::npos &&
+        report.find("timed 18446744073709551615 (at limit)") != std::string::npos &&
+        report.find("Shutdown: 0 / 0; timing not recorded") != std::string::npos && report.find("completed timed scopes only") != std::string::npos,
+        "support means distinguish genuine zero, rounded fractions, absent timing, and capped counts/totals with no invented mean");
+    Check(filter.needsRestore() && !filter.isActive() && fake.mutexOwned && filter.statistics() == statistics && error == filter.lastError() &&
+        fake.gammaReads == reads && fake.gammaWrites == writes && fake.mutexReleases == releases && fake.backendClockReads == clocks &&
+        filter.resetStatistics() && filter.statistics() == BackendStatistics{} && BuildSupportReport(state) == report,
+        "derived historical reports and a counter reset cannot inspect display output or discard the pending original, error, or ownership");
+    Check(filter.disable() && filter.shutdown(), "original Gamma calibration stays recoverable after mean reporting/reset");
+}
 void ProfileSaveFileValidatedGuardedAndInactive() {
     const auto candidate = ComparisonCandidate(63);
     fake.profileData = *SerializePreferences(candidate); fake.profileChunk = 3; fake.stdoutChunk = 5;
@@ -6170,6 +6226,8 @@ int main() {
         {"Backend timing completed scopes/zero", BackendTimingCompletedScopesAndZero}, {"Backend timing nested exception/reset guard", BackendTimingNestedExceptionAndResetGuard},
         {"Backend timing wrap/saturation", BackendTimingWrapAndSaturation}, {"Mag timing includes rollback/read-back", MagnificationTimingIncludesRollbackAndReadback},
         {"Gamma timing includes read-back/recovery", GammaTimingIncludesReadbackAndRecovery}, {"Backend timing report/reset isolation", BackendTimingReportsAndResetAreReadOnly},
+        {"Backend mean policy/allocation", BackendTimingMeanPolicyAndAllocation}, {"Backend mean completed scope semantics", BackendTimingMeanCompletedScopeSemantics},
+        {"Backend mean report preserves recovery", BackendTimingMeanReportPreservesRecovery},
         {"Profile save validated/guarded/inactive", ProfileSaveFileValidatedGuardedAndInactive}, {"Profile save refuses an existing instance", ProfileSaveRefusesExistingInstanceWithoutRecoveryCalls},
         {"Profile save input/validation gates", ProfileSaveInputAndInvalidCandidateGates}, {"Profile save guard/storage failure", ProfileSaveGuardAndStorageFailures},
         {"Profile save allocation failure cleanup", ProfileSaveAllocationFailureUnwindsGuard}, {"Profile save cleanup failure preserves saved truth", ProfileSaveCleanupFailurePreservesSavedTruth},

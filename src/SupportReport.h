@@ -11,6 +11,7 @@
 #include <optional>
 #include <sstream>
 #include <iomanip>
+#include <limits>
 #include <string>
 #include <string_view>
 
@@ -127,9 +128,18 @@ inline std::string BuildSupportReport(const SupportReportState& state) {
     const auto counts = [&](const char* name, const BackendOperationStatistics& value) {
         report << "\r\n  " << name << ": " << value.requests << " / " << value.failures;
         const auto& timing = value.timing;
-        if (timing.completed) report << "; timed " << timing.completed << ", last " << timing.lastMilliseconds
-            << " ms, peak " << timing.maximumMilliseconds << " ms, inclusive total " << timing.totalMilliseconds << " ms";
-        else report << "; timing not recorded";
+        if (timing.completed) {
+            const auto maximum = (std::numeric_limits<std::uint64_t>::max)();
+            report << "; timed " << timing.completed;
+            if (timing.completed == maximum) report << " (at limit)";
+            report << ", last " << timing.lastMilliseconds << " ms, peak " << timing.maximumMilliseconds << " ms, inclusive total " << timing.totalMilliseconds << " ms";
+            if (timing.totalMilliseconds == maximum) report << " (at limit)";
+            if (const auto mean = BackendMeanMilliseconds(timing)) {
+                const auto flags = report.flags(); const auto precision = report.precision();
+                report << "; mean " << std::fixed << std::setprecision(3) << *mean << " ms";
+                report.flags(flags); report.precision(precision);
+            } else report << "; mean unavailable (count or total at limit)";
+        } else report << "; timing not recorded";
     };
     counts("Initialize", state.backendStatistics.initialization);
     counts("Activate", state.backendStatistics.activation);
@@ -138,6 +148,7 @@ inline std::string BuildSupportReport(const SupportReportState& state) {
     counts("Shutdown", state.backendStatistics.shutdown);
     report << "\r\nCounters include idempotent requests and nested recovery calls."
         << "\r\nTiming uses elapsed tick milliseconds, includes failures/no-ops/nested calls, and overlaps across categories."
+        << "\r\nMeans use completed timed scopes only; count/total limits make the mean unavailable."
         << "\r\nCached Windows display context: ";
     if (!state.displayContext.attempted()) report << "not captured";
     else report << "last refresh " << DisplayContextReasonName(state.displayContext.lastReason()) << ", "

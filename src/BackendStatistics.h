@@ -1,11 +1,18 @@
 #pragma once
 #include <cstdint>
 #include <limits>
+#include <optional>
 
 struct BackendOperationTiming {
     std::uint64_t completed = 0, lastMilliseconds = 0, maximumMilliseconds = 0, totalMilliseconds = 0;
     bool operator==(const BackendOperationTiming&) const = default;
 };
+// Completed timed scopes only. Capped counters cannot provide a reliable mean.
+inline std::optional<double> BackendMeanMilliseconds(const BackendOperationTiming& timing) noexcept {
+    const auto maximum = (std::numeric_limits<std::uint64_t>::max)();
+    if (!timing.completed || timing.completed == maximum || timing.totalMilliseconds == maximum) return std::nullopt;
+    return static_cast<double>(timing.totalMilliseconds) / static_cast<double>(timing.completed);
+}
 struct BackendOperationStatistics {
     std::uint64_t requests = 0, failures = 0;
     unsigned inProgress = 0;
