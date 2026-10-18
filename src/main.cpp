@@ -9,6 +9,7 @@
 #include "VerificationCache.h"
 #include "RestorationHistory.h"
 #include "RestorationHistoryClipboard.h"
+#include "VerificationClipboard.h"
 #include "SessionTimer.h"
 #include "CountdownTimerRegistration.h"
 #include "SessionControl.h"
@@ -1330,6 +1331,16 @@ LRESULT HandleWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         case ID_TRAY_ABOUT: ShowAboutDialog(hwnd); break;
         case ID_TRAY_COPY_REPORT: CopySupportReport(hwnd); break;
         case ID_TRAY_COPY_STATUS_JSON: CopyStatusJson(hwnd); break;
+        case ID_TRAY_COPY_VERIFICATION_JSON: {
+            const auto now = GetTickCount64();
+            const auto snapshot = CaptureVerificationJsonSnapshot(g_verification, g_displayFilter == &g_gammaRampFilter, now);
+            if (!CopyVerificationJsonToClipboard(hwnd, snapshot)) ReportError("Cached verification JSON could not be copied. Please retry.");
+            else {
+                Diagnostics::Log("Cached verification JSON copied at user request; no backend check performed.");
+                ShowTrayInfo("RedLight verification details copied", "Paste the last explicit check's JSON for inspection. No new display check was performed.");
+            }
+            break;
+        }
         case ID_TRAY_COPY_RESTORATION_JSON: {
             const auto snapshot = g_restorationHistory;
             const auto now = GetTickCount64();

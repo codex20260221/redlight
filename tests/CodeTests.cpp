@@ -32,6 +32,7 @@
 #include "TrayMenu.h"
 #include "StatusClipboard.h"
 #include "RestorationHistoryClipboard.h"
+#include "VerificationClipboard.h"
 #include "RecentDiagnostics.h"
 #include "RecentDiagnosticsClipboard.h"
 #include "TrayCommand.h"
@@ -51,6 +52,7 @@
 #include <limits>
 #include <array>
 #include <cmath>
+#include <charconv>
 #include <cstdio>
 #include <cstdarg>
 #include <cstring>
@@ -4829,6 +4831,219 @@ void RestorationHistoryClearNoAllocationAndReadOnlyPolicy() {
     Check(cleared && allocationUnused && !CommandMayChangeFilter(ID_TRAY_CLEAR_RESTORATION_HISTORY) && fake.magWrites == 0 && fake.gammaWrites == 0,
         "clearing in-memory diagnostics allocates no C++ storage and has read-only display-failure policy");
 }
+VerificationJsonSnapshot VerificationSnapshotForDetails(const BackendReadbackDetails& details) {
+    return {details.gammaRamp, {details.mismatches ? BackendVerification::Changed : BackendVerification::Matches, details, 0}, 0, 0};
+}
+void VerificationJsonEmptyInactiveAndUnavailable() {
+    char output[VerificationJsonBufferSize];
+    const VerificationJsonSnapshot empty;
+    constexpr std::string_view expected = "{\"protocol\":1,\"status\":\"verification\",\"backend\":\"magnification\",\"scope\":\"last-explicit-check\",\"verification\":\"not-checked\",\"age_seconds\":null,\"duration_ms\":null,\"read_error\":0,\"readback\":null}\n";
+    Check(FormatVerificationJson(empty, output) == expected && output[expected.size()] == '\0', "no cached check has exact null timing/details and no invented success");
+    BackendReadbackDetails detail; detail.gammaRamp = true; detail.values = 768;
+    constexpr std::string_view matching = "{\"protocol\":1,\"status\":\"verification\",\"backend\":\"gamma\",\"scope\":\"last-explicit-check\",\"verification\":\"matches\",\"age_seconds\":0,\"duration_ms\":0,\"read_error\":0,\"readback\":{\"values\":768,\"mismatches\":0,\"maximum_difference\":0,\"difference_unit\":\"gamma-full-scale\",\"nonfinite_values\":false,\"unexpected_green_blue\":false,\"red_black_endpoint_mismatch\":false,\"red_white_endpoint_mismatch\":false,\"first_mismatch\":null,\"maximum_difference_at\":null}}\n";
+    Check(FormatVerificationJson(VerificationSnapshotForDetails(detail), output) == matching && output[matching.size()] == '\0',
+        "an exact matching read-back has a complete golden envelope/detail object with no invented locations");
+    for (bool gamma : {false, true}) for (bool unavailable : {false, true}) for (std::uint32_t error : {0u, 4321u}) {
+        BackendVerificationCache cache;
+        cache.record({unavailable ? BackendVerification::Unavailable : BackendVerification::Inactive, std::nullopt, unavailable ? error : 0}, 100, 100);
+        const auto snapshot = CaptureVerificationJsonSnapshot(cache, gamma, 5100);
+        const auto text = FormatVerificationJson(snapshot, output);
+        const auto ending = "\"read_error\":" + std::to_string(unavailable ? error : 0) + ",\"readback\":null}\n";
+        Check(text && text->find(gamma ? "\"backend\":\"gamma\"" : "\"backend\":\"magnification\"") != std::string_view::npos &&
+            text->find(unavailable ? "\"verification\":\"unavailable\"" : "\"verification\":\"inactive\"") != std::string_view::npos &&
+            text->find("\"age_seconds\":5,\"duration_ms\":0,") != std::string_view::npos && text->ends_with(ending),
+            "completed inactive/unavailable checks retain genuine zero timing and supplied/absent read errors for both backends");
+    }
+}
+void VerificationJsonMatrixCoordinatesAndNonfinite() {
+    float expected[5][5] = {}; expected[0][0] = expected[3][3] = expected[4][4] = 1;
+    char output[VerificationJsonBufferSize], location[64];
+    for (unsigned row = 0; row < 5; ++row) for (unsigned column = 0; column < 5; ++column) {
+        float actual[5][5]; std::memcpy(actual, expected, sizeof(actual)); actual[row][column] += 0.25f;
+        const auto snapshot = VerificationSnapshotForDetails(BackendComparison::Matrix(actual, expected, BackendComparison::MatrixPurpose::RedOnly));
+        const auto text = FormatVerificationJson(snapshot, output);
+        std::snprintf(location, sizeof(location), "{\"row\":%u,\"column\":%u}", row, column);
+        Check(text && text->find("\"values\":25,\"mismatches\":1,\"maximum_difference\":0.25,\"difference_unit\":\"matrix-coefficient\"") != std::string_view::npos &&
+            text->find(std::string("\"first_mismatch\":") + location) != std::string_view::npos &&
+            text->find(std::string("\"maximum_difference_at\":") + location) != std::string_view::npos,
+            "every matrix location exports validated zero-based row/column with exact numeric units");
+    }
+    float actual[5][5]; std::memcpy(actual, expected, sizeof(actual));
+    actual[0][0] = (std::numeric_limits<float>::quiet_NaN)();
+    auto snapshot = VerificationSnapshotForDetails(BackendComparison::Matrix(actual, expected, BackendComparison::MatrixPurpose::RedOnly));
+    auto text = FormatVerificationJson(snapshot, output);
+    Check(text && text->find("\"maximum_difference\":0,") != std::string_view::npos && text->find("\"nonfinite_values\":true") != std::string_view::npos &&
+        text->ends_with("\"first_mismatch\":{\"row\":0,\"column\":0},\"maximum_difference_at\":null}}\n") && text->find("nan") == std::string_view::npos,
+        "a nonfinite-only mismatch remains flagged without an invalid JSON number or invented finite-maximum location");
+    actual[4][4] += 0.5f;
+    snapshot = VerificationSnapshotForDetails(BackendComparison::Matrix(actual, expected, BackendComparison::MatrixPurpose::RedOnly));
+    text = FormatVerificationJson(snapshot, output);
+    Check(text && text->find("\"mismatches\":2,\"maximum_difference\":0.5,") != std::string_view::npos &&
+        text->ends_with("\"first_mismatch\":{\"row\":0,\"column\":0},\"maximum_difference_at\":{\"row\":4,\"column\":4}}}\n"),
+        "first nonfinite mismatch and largest finite difference retain distinct locations");
+}
+void VerificationJsonGammaCoordinatesAndTolerance() {
+    WORD expected[3][256] = {};
+    for (unsigned entry = 0; entry < 256; ++entry) expected[0][entry] = static_cast<WORD>(entry * 257);
+    char output[VerificationJsonBufferSize], location[64];
+    for (unsigned channel = 0; channel < 3; ++channel) for (unsigned entry = 0; entry < 256; ++entry) {
+        WORD actual[3][256]; std::memcpy(actual, expected, sizeof(actual)); actual[channel][entry] ^= 0x100;
+        const auto snapshot = VerificationSnapshotForDetails(BackendComparison::Gamma(actual, expected, true));
+        const auto text = FormatVerificationJson(snapshot, output);
+        std::snprintf(location, sizeof(location), "{\"channel\":%u,\"entry\":%u}", channel, entry);
+        Check(text && text->find("\"values\":768,\"mismatches\":1,") != std::string_view::npos && text->find("\"difference_unit\":\"gamma-full-scale\"") != std::string_view::npos &&
+            text->find(std::string("\"first_mismatch\":") + location) != std::string_view::npos && text->find(std::string("\"maximum_difference_at\":") + location) != std::string_view::npos,
+            "every gamma entry exports validated zero-based channel/entry with normalized units");
+    }
+    WORD actual[3][256]; std::memcpy(actual, expected, sizeof(actual)); actual[0][100] ^= 1;
+    auto snapshot = VerificationSnapshotForDetails(BackendComparison::Gamma(actual, expected, true));
+    auto text = FormatVerificationJson(snapshot, output);
+    Check(text && text->find("\"verification\":\"matches\"") != std::string_view::npos && text->find("\"mismatches\":0,") != std::string_view::npos &&
+        text->ends_with("\"first_mismatch\":null,\"maximum_difference_at\":{\"channel\":0,\"entry\":100}}}\n"),
+        "tolerated middle-red rounding has a finite maximum location without becoming a mismatch");
+    actual[0][0] = actual[1][0] = 1; actual[0][255] = 65534;
+    snapshot = VerificationSnapshotForDetails(BackendComparison::Gamma(actual, expected, true));
+    text = FormatVerificationJson(snapshot, output);
+    Check(text && text->find("\"mismatches\":3,") != std::string_view::npos &&
+        text->find("\"unexpected_green_blue\":true,\"red_black_endpoint_mismatch\":true,\"red_white_endpoint_mismatch\":true") != std::string_view::npos &&
+        text->ends_with("\"first_mismatch\":{\"channel\":0,\"entry\":0},\"maximum_difference_at\":{\"channel\":0,\"entry\":0}}}\n"),
+        "exact red endpoints and even low-byte green leakage retain flags and deterministic first ties");
+}
+void VerificationJsonPrecisionBoundsAndAllocation() {
+    BackendReadbackDetails detail; detail.values = 25; detail.mismatches = 1;
+    detail.firstMismatch = detail.maximumDifferenceAt = BackendValueLocation{4, 4};
+    char output[VerificationJsonBufferSize];
+    for (double value : {(std::numeric_limits<double>::denorm_min)(), 1.0 / 65535, 0.000001, (std::numeric_limits<double>::max)()}) {
+        detail.maximumDifference = value; auto snapshot = VerificationSnapshotForDetails(detail);
+        snapshot.ageSeconds = snapshot.durationMilliseconds = (std::numeric_limits<std::uint64_t>::max)();
+        const auto text = FormatVerificationJson(snapshot, output);
+        Check(text && text->size() < sizeof(output) && text->find("\"age_seconds\":18446744073709551615,\"duration_ms\":18446744073709551615") != std::string_view::npos,
+            "finite numeric and unsigned timing extremes fit the fixed JSON bound");
+        const auto start = text->find("\"maximum_difference\":") + std::string_view("\"maximum_difference\":").size();
+        const auto end = text->find(',', start); double parsed = 0;
+        const auto result = std::from_chars(text->data() + start, text->data() + end, parsed);
+        Check(result.ec == std::errc{} && result.ptr == text->data() + end && parsed == value, "difference numbers round-trip exactly using locale-independent JSON syntax");
+    }
+    const auto snapshot = VerificationSnapshotForDetails(detail);
+    const std::string expected(*FormatVerificationJson(snapshot, output));
+    Check(!FormatVerificationJson(snapshot, {}) && !FormatVerificationJson(snapshot, std::span<char>(output, 1)) &&
+        !FormatVerificationJson(snapshot, std::span<char>(output, expected.size())) &&
+        FormatVerificationJson(snapshot, std::span<char>(output, expected.size() + 1)) == expected && output[expected.size()] == '\0',
+        "empty/truncated output or a missing NUL never becomes a successful export");
+    bool formatted = false, unused = false;
+    { TestMemory::FailNextAllocation fail; formatted = FormatVerificationJson(snapshot, output) == expected; unused = TestMemory::AllocationFailurePending(); }
+    Check(formatted && unused && fake.backendClockReads == 0 && fake.magReads == 0 && fake.gammaReads == 0, "bounded JSON formatting allocates no C++ memory and samples no APIs or clock");
+    detail.mismatches = 0; detail.firstMismatch.reset(); detail.maximumDifferenceAt.reset(); detail.maximumDifference = -0.0;
+    const auto zero = FormatVerificationJson(VerificationSnapshotForDetails(detail), output);
+    Check(zero && zero->find("\"maximum_difference\":0,") != std::string_view::npos, "negative zero is canonicalized to the JSON number zero");
+}
+void VerificationJsonCacheTimingAndSnapshot() {
+    BackendVerificationCache cache; const auto maximum = (std::numeric_limits<std::uint64_t>::max)();
+    cache.record({BackendVerification::Unavailable, std::nullopt, 4321}, maximum - 3, 2);
+    VerificationJsonSnapshot snapshot; bool unused = false;
+    { TestMemory::FailNextAllocation fail; snapshot = CaptureVerificationJsonSnapshot(cache, true, 1002); unused = TestMemory::AllocationFailurePending(); }
+    Check(unused && snapshot.ageSeconds == 1 && snapshot.durationMilliseconds == 6 && snapshot.report.errorCode == 4321 && cache.result().state == BackendVerification::Unavailable,
+        "capture uses supplied time with unsigned wrap, samples no clock, and allocates no C++ memory");
+    char output[VerificationJsonBufferSize]; const std::string expected(*FormatVerificationJson(snapshot, output));
+    cache = {};
+    Check(FormatVerificationJson(snapshot, output) == expected && CaptureVerificationJsonSnapshot(cache, true, 1002).report.state == BackendVerification::NotChecked,
+        "a copied snapshot retains the earlier explicit result/timing when the live cache is cleared before output changes");
+    cache.record({BackendVerification::Inactive}, 1, 0);
+    const auto text = FormatVerificationJson(CaptureVerificationJsonSnapshot(cache, false, maximum), output);
+    Check(text && text->find("\"age_seconds\":18446744073709551,\"duration_ms\":18446744073709551615") != std::string_view::npos,
+        "completed-at-zero remains a real check with maximum wrapped duration rather than absent timing");
+}
+void VerificationJsonInvalidSnapshotsBeforeClipboard() {
+    for (bool gamma : {false, true}) for (unsigned failure = 0; failure < 23; ++failure) {
+        Reset(); BackendReadbackDetails detail; detail.gammaRamp = gamma; detail.values = gamma ? 768 : 25; detail.mismatches = 1; detail.maximumDifference = 0.25;
+        detail.firstMismatch = detail.maximumDifferenceAt = BackendValueLocation{0, 3};
+        auto snapshot = VerificationSnapshotForDetails(detail); auto& report = snapshot.report; auto& readback = *report.readback;
+        switch (failure) {
+        case 0: report.state = static_cast<BackendVerification>(-1); break;
+        case 1: snapshot.ageSeconds.reset(); break;
+        case 2: snapshot.durationMilliseconds.reset(); break;
+        case 3: report.errorCode = 7; break;
+        case 4: report.readback.reset(); break;
+        case 5: ++readback.values; break;
+        case 6: readback.mismatches = readback.values + 1; break;
+        case 7: readback.gammaRamp = !gamma; break;
+        case 8: readback.maximumDifference = -1; break;
+        case 9: readback.maximumDifference = (std::numeric_limits<double>::quiet_NaN)(); break;
+        case 10: readback.maximumDifference = (std::numeric_limits<double>::infinity)(); break;
+        case 11: readback.firstMismatch->row = gamma ? 3 : 5; break;
+        case 12: readback.maximumDifferenceAt->column = gamma ? 256 : 5; break;
+        case 13: readback.firstMismatch.reset(); break;
+        case 14: readback.maximumDifferenceAt.reset(); break;
+        case 15: readback.mismatches = 0; break;
+        case 16: report.state = BackendVerification::Matches; break;
+        case 17: if (gamma) readback.nonFiniteValues = true; else readback.redBlackEndpointMismatch = true; break;
+        case 18: readback.maximumDifference = 0; readback.maximumDifferenceAt.reset(); break;
+        case 19: report.state = BackendVerification::Inactive; break;
+        case 20: report.state = BackendVerification::Unavailable; break;
+        case 21: report.state = BackendVerification::NotChecked; break;
+        default:
+            if (gamma) readback.maximumDifference = 2;
+            else { report.state = BackendVerification::Matches; readback.mismatches = 0; readback.firstMismatch.reset(); readback.unexpectedGreenBlue = true; }
+            break;
+        }
+        fake.clipMemory = {L'k', L'e', L'e', L'p', L'\0'};
+        char output[VerificationJsonBufferSize];
+        Check(!FormatVerificationJson(snapshot, output) && !CopyVerificationJsonToClipboard(nullptr, snapshot) && fake.clipAllocations == 0 && fake.clipOpens == 0 &&
+            std::wstring_view(fake.clipMemory.data()) == L"keep", "invalid enums, timing, flags, numbers, counts, coordinates, or state/detail combinations are refused before clipboard preparation");
+    }
+    for (unsigned failure = 0; failure < 4; ++failure) {
+        Reset(); VerificationJsonSnapshot snapshot;
+        if (failure == 0) snapshot.ageSeconds = 0;
+        if (failure == 1) snapshot.durationMilliseconds = 0;
+        if (failure == 2) snapshot.report.errorCode = 1;
+        if (failure == 3) snapshot.report.readback = BackendReadbackDetails{};
+        char output[VerificationJsonBufferSize];
+        Check(!FormatVerificationJson(snapshot, output), "not-checked cannot expose stale timestamps, read errors, or numerical details");
+    }
+}
+void VerificationJsonClipboardFailures() {
+    VerificationJsonSnapshot snapshot;
+    for (unsigned failure = 0; failure < 8; ++failure) {
+        Reset();
+        switch (failure) {
+        case 0: fake.clipAllocate = false; break;
+        case 1: fake.clipLock = false; break;
+        case 2: fake.clipOpen = false; break;
+        case 3: fake.clipEmpty = false; break;
+        case 4: fake.clipSet = false; break;
+        case 5: fake.clipClose = false; break;
+        case 6: fake.clipConvert = false; break;
+        default: fake.clipSecondConvert = false; break;
+        }
+        Check(!CopyVerificationJsonToClipboard(nullptr, snapshot) && fake.clipFrees == (failure == 0 || failure == 5 || failure == 6 ? 0 : 1) &&
+            fake.magWrites == 0 && fake.gammaWrites == 0 && fake.registryWrites == 0, "clipboard failures free only untransferred memory without backend/preference changes");
+    }
+    Reset(); fake.clipMemory = {L'k', L'e', L'e', L'p', L'\0'}; bool copied = true;
+    { TestMemory::FailNextAllocation fail; copied = CopyVerificationJsonToClipboard(nullptr, snapshot); }
+    Check(!copied && fake.clipOpens == 0 && fake.clipEmpties == 0 && std::wstring_view(fake.clipMemory.data()) == L"keep",
+        "native fake allocation preparation exception is contained before clipboard mutation");
+}
+void VerificationJsonClipboardPreservesBackendRecovery() {
+    for (bool gamma : {false, true}) {
+        Reset(); MagnificationFilter magnification; GammaRampFilter gammaFilter;
+        DisplayFilter& filter = gamma ? static_cast<DisplayFilter&>(gammaFilter) : static_cast<DisplayFilter&>(magnification);
+        Check(filter.initialize(), "prepare owned display recovery before export");
+        if (gamma) fake.writes = {Write::FailAfterApply, Write::Fail};
+        else fake.magWriteResults = {Write::FailAfterApply, Write::Fail};
+        Check(!filter.enable() && filter.needsRestore() && !filter.isActive(), "failed partial activation/rollback retains original snapshot");
+        BackendVerificationCache cache; cache.record(filter.inspectState(), 1000, 1004);
+        const auto snapshot = CaptureVerificationJsonSnapshot(cache, gamma, 6004);
+        const auto reads = fake.gammaReads, writes = fake.gammaWrites, magReads = fake.magReads, magWrites = fake.magWrites, releases = fake.mutexReleases;
+        const auto statistics = filter.statistics(); const auto clocks = fake.backendClockReads; const auto error = std::string(filter.lastError());
+        Check(CopyVerificationJsonToClipboard(nullptr, snapshot) && std::wstring_view(fake.clipMemory.data()).find(L"\"age_seconds\":5,\"duration_ms\":4") != std::wstring_view::npos &&
+            !CommandMayChangeFilter(ID_TRAY_COPY_VERIFICATION_JSON) && cache.result().state == BackendVerification::Matches &&
+            filter.needsRestore() && !filter.isActive() && (!gamma || fake.mutexOwned) && filter.statistics() == statistics && error == filter.lastError() &&
+            fake.gammaReads == reads && fake.gammaWrites == writes && fake.magReads == magReads && fake.magWrites == magWrites &&
+            fake.mutexReleases == releases && fake.backendClockReads == clocks && fake.registryReads == 0 && fake.registryWrites == 0,
+            "copying a matching historical check cannot promote ambiguous output, release recovery ownership, reread display state, or change errors/counters/settings");
+        Check(filter.disable() && filter.shutdown(), "original remains recoverable after cached verification export");
+    }
+}
 void RestorationJsonEmptyGolden() {
     RestorationHistory history; char output[RestorationHistoryJsonBufferSize];
     constexpr std::string_view expected = "{\"protocol\":1,\"status\":\"restoration-history\",\"order\":\"newest-completed-first\",\"retained\":0,\"capacity\":8,\"overwritten\":0,\"requests_in_progress\":0,\"events\":[]}\n";
@@ -4962,7 +5177,7 @@ void ExpertDiagnosticsMenuLayoutAndOwnership() {
     Check(expert && diagnostics && FakeMenuCommand(expert, ID_TRAY_SAVE_PREFERENCES) && FakeMenuCommand(expert, ID_TRAY_IMPORT_PROFILE) &&
         FakeMenuCommand(expert, ID_TRAY_COPY_PREFERENCES_JSON) && !FakeMenuCommand(diagnostics, ID_TRAY_COPY_PREFERENCES_JSON),
         "expert choices and preference transfer remain distinct from the diagnostic submenu");
-    for (const auto id : {ID_TRAY_VERIFY_BACKEND, ID_TRAY_COPY_REPORT, ID_TRAY_COPY_STATUS_JSON, ID_TRAY_COPY_RESTORATION_JSON, ID_TRAY_COPY_RECENT_DIAGNOSTICS, ID_TRAY_CLEAR_RECENT_DIAGNOSTICS, ID_TRAY_REFRESH_DISPLAY_CONTEXT, ID_TRAY_RETRY_LOGGING, ID_TRAY_RETRY_SESSION,
+    for (const auto id : {ID_TRAY_VERIFY_BACKEND, ID_TRAY_COPY_REPORT, ID_TRAY_COPY_STATUS_JSON, ID_TRAY_COPY_RESTORATION_JSON, ID_TRAY_COPY_VERIFICATION_JSON, ID_TRAY_COPY_RECENT_DIAGNOSTICS, ID_TRAY_CLEAR_RECENT_DIAGNOSTICS, ID_TRAY_REFRESH_DISPLAY_CONTEXT, ID_TRAY_RETRY_LOGGING, ID_TRAY_RETRY_SESSION,
         ID_TRAY_RETRY_SHORTCUTS, ID_TRAY_RESET_BACKEND_COUNTS, ID_TRAY_CLEAR_RESTORATION_HISTORY})
         Check(FakeMenuCommand(diagnostics, id) && !FakeMenuCommand(expert, id), "all diagnostic/retry/bookkeeping actions are grouped exactly once");
     for (const auto& menu : fake.menus) Check(UniqueMenuAccelerators(*menu), "assigned keyboard accelerators remain unique within each submenu");
@@ -4984,6 +5199,7 @@ void ExpertDiagnosticsMenuStateFlags() {
     const auto clear = FakeMenuCommand(root, ID_TRAY_CLEAR_RESTORATION_HISTORY, true);
     const auto clearRecent = FakeMenuCommand(root, ID_TRAY_CLEAR_RECENT_DIAGNOSTICS, true);
     const auto copyHistory = FakeMenuCommand(root, ID_TRAY_COPY_RESTORATION_JSON, true);
+    const auto copyVerification = FakeMenuCommand(root, ID_TRAY_COPY_VERIFICATION_JSON, true);
     const auto custom = FakeMenuCommand(root, ID_TRAY_CUSTOM_SESSION, true);
     const auto restart = FakeMenuCommand(root, ID_TRAY_RESTART_COUNTDOWN, true);
     const auto save = FakeMenuCommand(root, ID_TRAY_SAVE_PREFERENCES, true);
@@ -4993,7 +5209,8 @@ void ExpertDiagnosticsMenuStateFlags() {
         "recovery-disabled timing/history and gamma-preferred Luma choices retain accurate checked/enabled states");
     Check(save && save->label.find("Retry saving") != std::string::npos && FakeMenuCommand(root, ID_TRAY_TOGGLE)->label.find("Disabled") != std::string::npos,
         "unsaved preference retry and disabled shortcut captions remain visible");
-    Check(copyHistory && !(copyHistory->flags & MF_GRAYED), "read-only history copying stays available when destructive clearing is disabled");
+    Check(copyHistory && !(copyHistory->flags & MF_GRAYED) && copyVerification && !(copyVerification->flags & MF_GRAYED),
+        "read-only history and verification copying stay available during recovery when destructive clearing is disabled");
     Check(DestroyMenu(root) && AliveFakeMenus() == 0 && fake.invalidMenuDestroys == 0, "state variants release the complete fake menu tree");
 }
 void ExpertMenuCreationFailureCleanupAtEveryBoundary() {
@@ -5908,6 +6125,10 @@ int main() {
         {"Restoration history clear preserves backend", RestorationHistoryClearPreservesActiveRecovery}, {"Restoration history clear blocks open scopes", RestorationHistoryClearGuardsUnfinishedScopes},
         {"Restoration history clear allocation/policy", RestorationHistoryClearNoAllocationAndReadOnlyPolicy}, {"Expert diagnostic menu layout/ownership", ExpertDiagnosticsMenuLayoutAndOwnership},
         {"Restoration JSON empty golden", RestorationJsonEmptyGolden}, {"Restoration JSON canonical tokens", RestorationJsonReasonOutcomeTokens},
+        {"Verification JSON empty/inactive/unavailable", VerificationJsonEmptyInactiveAndUnavailable}, {"Verification JSON matrix/nonfinite locations", VerificationJsonMatrixCoordinatesAndNonfinite},
+        {"Verification JSON gamma/tolerance locations", VerificationJsonGammaCoordinatesAndTolerance}, {"Verification JSON precision/bounds/allocation", VerificationJsonPrecisionBoundsAndAllocation},
+        {"Verification JSON cached timing/snapshot", VerificationJsonCacheTimingAndSnapshot}, {"Verification JSON invalid snapshot refusal", VerificationJsonInvalidSnapshotsBeforeClipboard},
+        {"Verification JSON clipboard failures", VerificationJsonClipboardFailures}, {"Verification JSON preserves backend recovery", VerificationJsonClipboardPreservesBackendRecovery},
         {"Restoration JSON ring/order/snapshot", RestorationJsonRingOrderAndSnapshot}, {"Restoration JSON open/nested/interrupted scopes", RestorationJsonOpenNestedAndInterruptedScopes},
         {"Restoration JSON bounds/extremes/allocation", RestorationJsonBoundsExtremesAndAllocation}, {"Restoration JSON invalid/preparation failure", RestorationJsonInvalidSnapshotsAndPreparationFailure},
         {"Restoration JSON native clipboard failures", RestorationJsonClipboardNativeFailures}, {"Restoration JSON preserves gamma recovery", RestorationJsonClipboardPreservesGammaRecovery},
