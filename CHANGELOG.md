@@ -38,6 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added command-line help/version dialogs and explicit rejection of unknown or conflicting options.
 
 ### Changed
+- Prepare canonical settings profiles in a checked fixed buffer before one owned-string allocation, reducing allocation pressure during preference saves and exports without changing the format.
 - Selecting an unchanged session limit leaves its deadline intact; timing changes/restarts are blocked after expiry or while recovery/backend confirmation needs attention, preserving restoration retry cadence.
 - Hold a nonblocking cross-session ownership guard around legacy gamma capture, activation, and restoration; conflicts/access failures stay off, detected abandoned ownership blocks activation until recovery/restart, and failed cleanup remains tracked without rewriting already-restored calibration.
 - Rotate logs during long sessions at the 1 MiB target with up to three archives; use fixed record buffers/cached paths and serialize writes, rotation, status reads, and shutdown. Logging failures fall back to debugger output without allowing failed rotation to grow the file indefinitely.

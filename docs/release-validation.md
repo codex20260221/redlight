@@ -54,6 +54,8 @@ Validation performed: Windows x64 build, isolated backend/command-line tests, st
 
 ## Expert-feature follow-up validation
 
+Profile serialization allocation bound: the production serializer now prepares a complete canonical profile in a checked fixed buffer before allocating its owned result. Fault-injected code coverage confirms only one C++ allocation is required for a profile with maximum-length choices; existing round-trip, invalid-input, save-failure, and import restore-before-save cases still pass. Manual notes (pending; not executed): compare clipboard/file exports and stored preferences before/after this change, and confirm failed saves remain visible and retryable. No app or real storage test ran.
+
 Auto-restore session limits: pure code tests cover disabled/default behavior, exact deadlines, invalid limits retaining prior state, clock wrap, cancellation, changing active limits, and five-second retry throttling. These run against supplied timestamps; no real timer wait or display operation is used. The earlier 17-scenario result above describes the RC checkpoint, not the growing follow-up suite.
 
 Manual notes (pending; not executed): choose each session limit while off/on, verify a confirmed enable starts the countdown, verify expiration restores on each backend, inject a restoration failure to check retry throttling and retained recovery data, cancel through manual restore/exit/power/session/display changes, and verify a failed Win32 timer registration attempts immediate restoration. Reconfirm red-only output on all monitors while a session is active. No automatic activation should occur.

@@ -1792,6 +1792,20 @@ void ShortcutRegistrationHealthReports() {
     Check(BuildSupportReport(state).find("Shortcut preference applied: yes") != std::string::npos, "support report carries selected-profile registration health");
     Check(fake.hotkeyRegisters == 0 && fake.hotkeyUnregisters == 0 && fake.magReads == 0 && fake.gammaReads == 0, "health reporting performs no native registration or display read");
 }
+void PreferenceSerializationSingleAllocation() {
+    const AppPreferences preferences{RedMode::StrictRed, LumaProfile::EqualDetail, BackendPreference::Magnification, 240, ShortcutProfile::Disabled, ExpiryWarning::FiveMinutes};
+    std::optional<std::string> text;
+    bool spareAllocation = false;
+    {
+        TestMemory::FailNextAllocation fail(1);
+        text = SerializePreferences(preferences);
+        spareAllocation = TestMemory::AllocationFailurePending();
+    }
+    Check(text && spareAllocation && text->size() < 256 && ParsePreferences(*text).preferences == preferences,
+        "complete maximum-field profile requires only its owned output allocation");
+    const auto versionLine = std::string("version=") + std::to_string(PreferencesProfileVersion) + "\r\n";
+    Check(text->find(versionLine) != std::string::npos && text->ends_with("expiry_warning=5m\r\n"), "schema metadata and canonical output remain consistent");
+}
 } // namespace
 
 DWORD GetLastError() { return fake.lastError; }
@@ -2068,6 +2082,7 @@ int main() {
         {"Nonfinite snapshot cleanup/fallback gate", NonFiniteCaptureCleanupBlocksFallback},
         {"Selected shortcut retry without persistence", SelectedShortcutRetryRecoversConflictWithoutSaving}, {"Selected shortcut retry failure/disabled", SelectedShortcutRetryFailureAndDisabledHealth},
         {"Shortcut registration health reports", ShortcutRegistrationHealthReports},
+        {"Single-allocation preference serialization", PreferenceSerializationSingleAllocation},
         {"Command line", Arguments}
     };
     int failed = 0;

@@ -6,9 +6,12 @@
 #include "ExpiryWarning.h"
 #include "Utf8.h"
 #include <charconv>
+#include <cstdio>
 #include <optional>
 #include <string>
 #include <string_view>
+
+inline constexpr unsigned PreferencesProfileVersion = 3;
 
 struct AppPreferences {
     RedMode mode = RedMode::LumaRed;
@@ -30,9 +33,13 @@ inline std::optional<std::string> SerializePreferences(const AppPreferences& val
     const char* luma = value.luma == LumaProfile::Classic ? "classic" : (value.luma == LumaProfile::GreenDetail ? "green" : "equal");
     const char* backend = value.backend == BackendPreference::Automatic ? "auto" :
         (value.backend == BackendPreference::Magnification ? "magnification" : "gamma");
-    return std::string("[RedLightProfile]\r\nversion=3\r\nmode=") + (value.mode == RedMode::LumaRed ? "luma" : "strict") +
-        "\r\nluma=" + luma + "\r\nbackend=" + backend + "\r\nsession_minutes=" + std::to_string(value.sessionMinutes) + "\r\nhotkeys=" + ShortcutProfileToken(value.shortcuts) +
-        "\r\nexpiry_warning=" + ExpiryWarningToken(value.expiryWarning) + "\r\n";
+    char text[256];
+    const int length = std::snprintf(text, sizeof(text),
+        "[RedLightProfile]\r\nversion=%u\r\nmode=%s\r\nluma=%s\r\nbackend=%s\r\nsession_minutes=%u\r\nhotkeys=%s\r\nexpiry_warning=%s\r\n",
+        PreferencesProfileVersion, value.mode == RedMode::LumaRed ? "luma" : "strict", luma, backend,
+        value.sessionMinutes, ShortcutProfileToken(value.shortcuts), ExpiryWarningToken(value.expiryWarning));
+    if (length < 0 || static_cast<std::size_t>(length) >= sizeof(text)) return std::nullopt;
+    return std::string(text, static_cast<std::size_t>(length));
 }
 struct PreferencesParseResult {
     std::optional<AppPreferences> preferences;
