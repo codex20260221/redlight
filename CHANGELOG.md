@@ -51,6 +51,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Support Unicode diagnostics paths and report log-write failures to the debugger.
 
 ### Fixed
+- Reject nonfinite Magnification restoration captures at initialization and immediately before activation, without color writes or false ownership; preserve cleanup/fallback gating and allow later usable captures to retry.
 - Honor already queued restore requests after read-only callback failures, defer them under outer busy scopes, retain requests after recovery exceptions, and report pending/inactive recovery conservatively; native callback rescue preserves the correct creation/session-ending failure return values.
 - Reject malformed UTF-8 throughout profiles (including comments) and JSON strings, and reject embedded NUL bytes before clipboard exports can appear silently truncated.
 - Free native command-line arguments during C++ allocation failures, contain option-construction exceptions before display initialization, and distinguish internal startup failures from invalid user arguments.

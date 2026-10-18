@@ -1481,6 +1481,7 @@ void ComparisonToleranceAndFiniteRange() {
     Check(matrix.mismatches == 1 && matrix.unexpectedGreenBlue, "every nonzero expected-zero coefficient is a mismatch, including subnormal leakage");
     actual[0][1] = -0.0f;
     expected[0][0] = -(std::numeric_limits<float>::max)(); actual[0][0] = (std::numeric_limits<float>::max)();
+    Check(BackendComparison::FiniteMatrix(actual) && BackendComparison::FiniteMatrix(expected), "finite snapshot validation does not reject large or signed-zero coefficients");
     matrix = BackendComparison::Matrix(actual, expected);
     Check(matrix.mismatches == 1 && std::isfinite(matrix.maximumDifference) && !matrix.nonFiniteValues && !matrix.unexpectedGreenBlue,
         "finite extreme values retain a finite double-precision maximum; signed zero stays zero");
@@ -1713,6 +1714,41 @@ void CountdownControlsPreservePartialRecovery() {
     Check(!CanChangeSessionLimit(timer, 1000, filter, BackendVerification::NotChecked, false) && !CanRestartCountdown(timer, 1000, filter, BackendVerification::NotChecked, false) &&
         filter.needsRestore() && fake.mutexOwned && fake.gammaReads == reads && fake.gammaWrites == writes, "timing controls cannot cancel or postpone pending partial recovery");
     Check(filter.disable() && CanChangeSessionLimit(timer, 1000, filter, BackendVerification::Inactive, false), "configuration becomes available after recovery succeeds");
+}
+void MagnificationRejectsNonFiniteInitialSnapshots() {
+    for (const float invalid : {(std::numeric_limits<float>::quiet_NaN)(), (std::numeric_limits<float>::infinity)(), -(std::numeric_limits<float>::infinity)()}) {
+        for (int row = 0; row < 5; ++row) for (int column = 0; column < 5; ++column) {
+            Reset(); fake.effect.transform[row][column] = invalid;
+            MagnificationFilter filter;
+            Check(!filter.initialize() && !filter.isActive() && !filter.needsRestore() && fake.magWrites == 0 && fake.uninitializes == 1,
+                "every nonfinite original coefficient is rejected with checked initialization cleanup and no color write");
+            Check(std::string_view(filter.lastError()).find("non-finite") != std::string_view::npos && filter.statistics().initialization.failures == 1,
+                "invalid successful API capture is an explicit diagnosed initialization failure");
+        }
+    }
+}
+void MagnificationRejectsNonFiniteActivationSnapshot() {
+    MagnificationFilter filter;
+    Check(filter.initialize(), "initialize with valid snapshot");
+    fake.effect.transform[4][0] = (std::numeric_limits<float>::quiet_NaN)();
+    Check(!filter.enable() && !filter.isActive() && !filter.needsRestore() && fake.magWrites == 0,
+        "invalid pre-activation capture refuses activation without changing current display state");
+    const auto reads = fake.magReads;
+    Check(filter.verifyState() == BackendVerification::Inactive && fake.magReads == reads && fake.magWrites == 0,
+        "rejected capture does not claim another tool's matrix as owned recovery data");
+    fake.effect.transform[4][0] = 0; fake.effect.transform[0][0] = 0.67f;
+    const auto valid = fake.effect;
+    Check(filter.enable() && filter.disable() && Same(fake.effect, valid), "later valid capture can activate and restores the latest usable original matrix");
+}
+void NonFiniteCaptureCleanupBlocksFallback() {
+    MagnificationFilter magnification;
+    GammaRampFilter gamma;
+    fake.effect.transform[3][3] = (std::numeric_limits<float>::infinity)(); fake.magUninit = false;
+    Check(InitializePreferredBackend(BackendPreference::Automatic, magnification, gamma) == nullptr && fake.dcRequests == 0 && fake.magWrites == 0 && fake.gammaWrites == 0,
+        "invalid capture with failed cleanup cannot fall through to another display backend");
+    Check(fake.uninitializes >= 2 && !magnification.isActive() && !magnification.needsRestore(), "backend resources remain available for cleanup without claiming display ownership");
+    fake.magUninit = true;
+    Check(magnification.shutdown(), "cleanup can retry after invalid capture");
 }
 } // namespace
 
@@ -1986,6 +2022,8 @@ int main() {
         {"Gamma preferred Luma during recovery", GammaPreferredLumaDuringRecoveryAndSaveFailure},
         {"Countdown restart deadline/warning", CountdownRestartResetsDeadlineAndWarning}, {"Countdown restart refusal/clock", CountdownRestartRefusesExpiredInactiveAndUnlimited},
         {"Countdown backend eligibility", CountdownControlBackendEligibility}, {"Countdown partial-recovery guard", CountdownControlsPreservePartialRecovery},
+        {"Nonfinite initial restoration snapshots", MagnificationRejectsNonFiniteInitialSnapshots}, {"Nonfinite activation restoration snapshot", MagnificationRejectsNonFiniteActivationSnapshot},
+        {"Nonfinite snapshot cleanup/fallback gate", NonFiniteCaptureCleanupBlocksFallback},
         {"Command line", Arguments}
     };
     int failed = 0;

@@ -3,6 +3,10 @@
 #include <cmath>
 
 namespace BackendComparison {
+inline bool FiniteMatrix(const float (&matrix)[5][5]) noexcept {
+    for (const auto& row : matrix) for (const float value : row) if (!std::isfinite(value)) return false;
+    return true;
+}
 inline BackendReadbackDetails Matrix(const float (&actual)[5][5], const float (&expected)[5][5]) noexcept {
     BackendReadbackDetails result;
     for (int row = 0; row < 5; ++row) for (int column = 0; column < 5; ++column) {

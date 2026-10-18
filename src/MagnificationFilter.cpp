@@ -59,6 +59,11 @@ bool MagnificationFilter::initialize() {
     initialized_ = true;
     MAGCOLOREFFECT capturedEffect = {};
     if (MagGetFullscreenColorEffect(&capturedEffect)) {
+        if (!BackendComparison::FiniteMatrix(capturedEffect.transform)) {
+            LogError("validate initial restore matrix (non-finite value)", ERROR_INVALID_DATA);
+            if (!shutdown()) Diagnostics::Log("MagnificationFilter: initialization cleanup remains pending after invalid matrix capture.");
+            return false;
+        }
         restoreEffect_ = capturedEffect;
     } else {
         LogError("MagGetFullscreenColorEffect", GetLastError());
@@ -89,6 +94,10 @@ bool MagnificationFilter::enable() {
     MAGCOLOREFFECT currentEffect = {};
     if (!MagGetFullscreenColorEffect(&currentEffect)) {
         LogError("capture before enable", GetLastError());
+        return false;
+    }
+    if (!BackendComparison::FiniteMatrix(currentEffect.transform)) {
+        LogError("validate restore matrix before enable (non-finite value)", ERROR_INVALID_DATA);
         return false;
     }
     restoreEffect_ = currentEffect;
