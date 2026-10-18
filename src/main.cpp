@@ -36,6 +36,7 @@
 #include "SessionNotifications.h"
 #include "LumaPreference.h"
 #include "RecentDiagnosticsClipboard.h"
+#include "TrayCommand.h"
 #include "StandardOutput.h"
 #include <cstdio>
 
@@ -318,7 +319,12 @@ void RefreshDisplayContext(DisplayContextReason reason) {
 }
 
 void PostTrayCommand(HWND hwnd, UINT command) {
-    if (!PostMessageA(hwnd, WM_COMMAND, command, 0)) ReportError("The tray command could not be queued. Please retry.");
+    const bool restoreIntent = TrayCommandHasRestoreIntent(command, g_displayFilter->isActive(), g_displayFilter->needsRestore(), g_pendingRestore);
+    const auto delivered = DeliverTrayCommand(hwnd, command, restoreIntent, g_pendingRestore, [] {
+        Diagnostics::Log("Tray command queue failed; requesting the captured restoration intent directly.");
+        RestoreFilter(RestoreReason::Manual, true);
+    });
+    if (delivered == TrayCommandDelivery::QueueFailed) ReportError("The tray command could not be queued. Please retry.");
 }
 
 void DestroyTrayWindow(HWND hwnd) {

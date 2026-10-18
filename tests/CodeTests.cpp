@@ -30,6 +30,7 @@
 #include "StatusClipboard.h"
 #include "RecentDiagnostics.h"
 #include "RecentDiagnosticsClipboard.h"
+#include "TrayCommand.h"
 #include "FilterControl.h"
 #include <memory>
 #include "InstanceName.h"
@@ -129,6 +130,13 @@ struct Fake {
     bool diagnosticsClobbersError = false;
     bool recentDiagnosticsAvailable = true;
     std::string recentDiagnosticsText;
+    bool commandPost = true;
+    bool commandPendingRestore = false;
+    DWORD commandPostError = 1816;
+    unsigned commandPosts = 0, commandMessage = 0;
+    HWND commandOwner = nullptr;
+    WPARAM commandWparam = 0;
+    LPARAM commandLparam = 0;
     int stdoutFailOnCall = 0;
     bool sessionRegister = true, sessionUnregister = true, sessionRegisterThrows = false;
     DWORD sessionError = 1702, sessionFlags = 999;
@@ -3829,6 +3837,106 @@ void MenuQueuedRecoveryRoutingAndOtherActions() {
     Check(CommandMayChangeFilter(ID_TRAY_ENABLE) && fake.magWrites == 0 && fake.gammaWrites == 0 && fake.registryWrites == 0,
         "explicit enable keeps mutating-action exception policy while routing itself performs no display/settings operation");
 }
+void TrayCommandNativePostDiagnostics() {
+    const auto owner = reinterpret_cast<HWND>(7);
+    auto posted = TryPostTrayCommand(owner, ID_TRAY_RESTORE);
+    Check(posted.queued && posted.errorCode == 0 && fake.commandPosts == 1 && fake.commandOwner == owner &&
+        fake.commandMessage == WM_COMMAND && fake.commandWparam == ID_TRAY_RESTORE && fake.commandLparam == 0,
+        "command posting uses the intended window and scalar WM_COMMAND parameters without treating stale last-error as failure");
+    fake.commandPost = false; fake.diagnosticsClobbersError = true;
+    posted = TryPostTrayCommand(owner, ID_TRAY_TOGGLE);
+    Check(!posted.queued && posted.errorCode == 1816 && fake.lastError == ERROR_DISK_FULL && fake.commandPosts == 2,
+        "posting failure captures its exact error before diagnostics can change thread last-error");
+    posted = TryPostTrayCommand(nullptr, ID_TRAY_RESTORE);
+    Check(!posted.queued && posted.errorCode == ERROR_INVALID_WINDOW_HANDLE && fake.commandPosts == 2,
+        "missing owner cannot become a successful thread-only message with no command target");
+}
+void TrayCommandRestoreIntentMatrix() {
+    Check(TrayCommandHasRestoreIntent(ID_TRAY_RESTORE, false, false, false), "explicit Restore retains intent even if the display was already restored");
+    Check(TrayCommandHasRestoreIntent(ID_TRAY_TOGGLE, true, true, false) && TrayCommandHasRestoreIntent(ID_TRAY_TOGGLE, false, true, false) &&
+        TrayCommandHasRestoreIntent(ID_TRAY_TOGGLE, false, false, true) && !TrayCommandHasRestoreIntent(ID_TRAY_TOGGLE, false, false, false),
+        "toggle restore intent follows active, partial-recovery, and independently queued restoration without turning an off-state toggle into activation");
+    Check(TrayCommandHasRestoreIntent(ID_TRAY_ENABLE, false, true, false) && TrayCommandHasRestoreIntent(ID_TRAY_ENABLE, false, false, true) &&
+        !TrayCommandHasRestoreIntent(ID_TRAY_ENABLE, true, true, false) && !TrayCommandHasRestoreIntent(ID_TRAY_ENABLE, false, false, false),
+        "explicit enable shares recovery priority but cannot disable a healthy active session or activate after failed posting");
+    for (const auto command : {ID_TRAY_ABOUT, ID_TRAY_EXIT, ID_TRAY_MODE_STRICT_RED, ID_TRAY_COPY_RECENT_DIAGNOSTICS, ID_TRAY_COPY_STATUS_JSON, ID_TRAY_SAVE_PREFERENCES})
+        Check(!TrayCommandHasRestoreIntent(command, true, true, true), "unrelated commands retain their own delivery failure behavior");
+}
+void TrayCommandQueuedDeliveryHasNoFallback() {
+    unsigned restores = 0;
+    for (const auto command : {ID_TRAY_RESTORE, ID_TRAY_TOGGLE, ID_TRAY_ENABLE, ID_TRAY_COPY_REPORT}) {
+        Check(DeliverTrayCommand(reinterpret_cast<HWND>(7), command, true, fake.commandPendingRestore, [&] { ++restores; }) == TrayCommandDelivery::Queued,
+            "successful asynchronous posting never also executes a synchronous restoration");
+    }
+    Check(restores == 0 && fake.commandPosts == 4 && fake.magWrites == 0 && fake.gammaWrites == 0 && fake.registryWrites == 0,
+        "ordinary delivery remains one queued command with no immediate backend/settings effect");
+}
+void TrayCommandFailedDeliveryRestoresWithoutEnabling() {
+    GammaRampFilter filter;
+    Check(filter.initialize() && filter.enable(), "prepare active gamma output");
+    const auto activations = filter.statistics().activation.requests;
+    fake.commandPost = false;
+    bool restored = false;
+    const auto delivery = DeliverTrayCommand(reinterpret_cast<HWND>(7), ID_TRAY_RESTORE,
+        TrayCommandHasRestoreIntent(ID_TRAY_RESTORE, filter.isActive(), filter.needsRestore(), false), fake.commandPendingRestore, [&] { restored = filter.disable(); });
+    Check(delivery == TrayCommandDelivery::RestoreRequested && restored && !filter.isActive() && !filter.needsRestore() && !fake.mutexOwned &&
+        filter.statistics().activation.requests == activations && fake.ramp[0][100] == 100 * 257 && fake.ramp[1][100] == 100 * 257,
+        "failed restore posting invokes normal restoration and releases original calibration ownership without any activation");
+    const auto writes = fake.gammaWrites;
+    unsigned unexpected = 0;
+    Check(DeliverTrayCommand(reinterpret_cast<HWND>(7), ID_TRAY_TOGGLE,
+        TrayCommandHasRestoreIntent(ID_TRAY_TOGGLE, false, false, false), fake.commandPendingRestore, [&] { ++unexpected; }) == TrayCommandDelivery::QueueFailed &&
+        unexpected == 0 && fake.gammaWrites == writes, "failed off-state toggle cannot fall through to a synchronous enable or restore");
+}
+void TrayCommandFailedDeliveryPreservesBusyAndFailure() {
+    MagnificationFilter filter;
+    Check(filter.initialize() && filter.enable(), "prepare active matrix output");
+    fake.commandPost = false;
+    bool busy = false, pending = false;
+    const auto writes = fake.magWrites;
+    {
+        ScopedFlag scope(busy);
+        Check(DeliverTrayCommand(reinterpret_cast<HWND>(7), ID_TRAY_TOGGLE,
+            TrayCommandHasRestoreIntent(ID_TRAY_TOGGLE, filter.isActive(), filter.needsRestore(), pending), pending, [&] {
+                if (busy) pending = true;
+            }) == TrayCommandDelivery::RestoreRequested && busy && pending && fake.magWrites == writes,
+            "fallback invokes the restoration coordinator while preserving its busy deferral and current output");
+    }
+    Check(!busy && pending && filter.disable(), "deferred restoration remains actionable when the operation finishes");
+    Check(filter.enable(), "prepare another active session");
+    fake.magWriteResults = {Write::Fail};
+    bool restored = true;
+    Check(DeliverTrayCommand(reinterpret_cast<HWND>(7), ID_TRAY_RESTORE, true, pending, [&] { restored = filter.disable(); }) == TrayCommandDelivery::RestoreRequested &&
+        !restored && filter.isActive() && filter.needsRestore(), "delivery outcome reports only a requested restore, retaining backend ownership after an actual restore failure");
+    Check(filter.disable(), "failed fallback restoration keeps the original snapshot for retry");
+}
+void TrayCommandFailedUnrelatedDeliveryPreservesSession() {
+    MagnificationFilter filter;
+    Check(filter.initialize() && filter.enable(), "prepare active session");
+    SessionTimer timer;
+    Check(timer.configure(15, 1000, true), "prepare existing deadline");
+    const auto statistics = filter.statistics();
+    const auto reads = fake.magReads, writes = fake.magWrites;
+    fake.commandPost = false;
+    unsigned restores = 0;
+    for (const auto command : {ID_TRAY_ENABLE, ID_TRAY_MODE_STRICT_RED, ID_TRAY_COPY_REPORT, ID_TRAY_EXIT}) {
+        Check(DeliverTrayCommand(reinterpret_cast<HWND>(7), command,
+            TrayCommandHasRestoreIntent(command, filter.isActive(), filter.needsRestore(), false), fake.commandPendingRestore, [&] { ++restores; }) == TrayCommandDelivery::QueueFailed,
+            "failed enable/mode/read-only/exit posting does not execute a different action");
+    }
+    Check(restores == 0 && filter.isActive() && filter.statistics() == statistics && fake.magReads == reads && fake.magWrites == writes &&
+        timer.remainingMilliseconds(2000) == 899000 && fake.registryWrites == 0, "unrelated delivery failures preserve current transform, counters, countdown deadline, and preferences");
+}
+void TrayCommandFallbackExceptionRetainsRecoveryRequest() {
+    fake.commandPost = false;
+    bool pending = false, threw = false;
+    try {
+        DeliverTrayCommand(reinterpret_cast<HWND>(7), ID_TRAY_RESTORE, true, pending, [] { throw 7; });
+    } catch (int) { threw = true; }
+    Check(threw && pending && RecoveryAfterUiFailure(false, pending, false) == UiFailureRecovery::Restore &&
+        RecoveryAfterUiFailure(false, pending, true) == UiFailureRecovery::Defer,
+        "fallback exceptions propagate to the native callback guard with a retained request even for a tray notification");
+}
 } // namespace
 
 HMENU CreatePopupMenu() {
@@ -3862,6 +3970,12 @@ BOOL DestroyMenu(HMENU handle) {
     return succeeded ? TRUE : FALSE;
 }
 DWORD GetLastError() { return fake.lastError; }
+BOOL PostMessageA(HWND owner, unsigned message, WPARAM wparam, LPARAM lparam) {
+    ++fake.commandPosts; fake.commandOwner = owner; fake.commandMessage = message;
+    fake.commandWparam = wparam; fake.commandLparam = lparam;
+    if (!fake.commandPost) { fake.lastError = fake.commandPostError; return FALSE; }
+    return TRUE;
+}
 std::uint64_t GetTickCount64() { ++fake.backendClockReads; return fake.monotonicNow; }
 int GetSystemMetrics(int metric) {
     ++fake.metricReads;
@@ -4266,6 +4380,10 @@ int main() {
         {"Filter control recovery/busy priority", FilterControlRecoveryPriorityAndBusyScopes}, {"Explicit enable preserves active countdown", ExplicitEnableIntentIsIdempotentForActiveSession},
         {"Recovery menu captions/busy availability", RecoveryMenuCaptionsAndBusyAvailability}, {"Stale off-menu cannot activate", StaleTurnOffMenuCannotEnableAfterExternalRestore},
         {"Stale on-menu cannot deactivate", StaleTurnOnMenuCannotDisableNewlyActiveSession}, {"Queued recovery menu routing", MenuQueuedRecoveryRoutingAndOtherActions},
+        {"Tray command native post diagnostics", TrayCommandNativePostDiagnostics}, {"Tray command restore-intent matrix", TrayCommandRestoreIntentMatrix},
+        {"Tray command queued delivery", TrayCommandQueuedDeliveryHasNoFallback}, {"Tray command failed delivery restores", TrayCommandFailedDeliveryRestoresWithoutEnabling},
+        {"Tray command busy/failed fallback", TrayCommandFailedDeliveryPreservesBusyAndFailure}, {"Tray command unrelated delivery failure", TrayCommandFailedUnrelatedDeliveryPreservesSession},
+        {"Tray command fallback exception recovery", TrayCommandFallbackExceptionRetainsRecoveryRequest},
         {"Command line", Arguments}
     };
     int failed = 0;
