@@ -749,6 +749,7 @@ void CopySupportReport(HWND owner) {
     state.sessionNotifications = g_sessionNotifications;
     state.sessionMinutes = g_sessionTimer.minutes();
     state.expiryWarning = ExpiryWarningName(g_preferences.expiryWarning);
+    state.backendStatistics = g_displayFilter->statistics();
     if (g_sessionTimer.armed()) state.remainingSeconds = (g_sessionTimer.remainingMilliseconds(GetTickCount64()) + 999) / 1000;
     if (!CopyUtf8TextToClipboard(owner, BuildSupportReport(state))) {
         ReportError("The support report could not be copied. Another program may be using the clipboard. Please retry.");
@@ -1033,6 +1034,14 @@ LRESULT HandleWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         case ID_TRAY_MODE_LUMA_RED: SetRedModeFromTray(RedMode::LumaRed); break;
         case ID_TRAY_ABOUT: ShowAboutDialog(hwnd); break;
         case ID_TRAY_COPY_REPORT: CopySupportReport(hwnd); break;
+        case ID_TRAY_RESET_BACKEND_COUNTS:
+            if (!g_busy && !g_preferencesApplying) {
+                if (g_displayFilter->resetStatistics()) {
+                    Diagnostics::LogFormat("%s operation counters reset; filtering and recovery ownership unchanged.", g_displayFilter->name());
+                    ShowTrayInfo("RedLight backend counters reset", "The support report now counts from zero. Filtering, recovery data, preferences, and logs are unchanged.");
+                } else Diagnostics::Log("Backend counter reset skipped: an operation is still in progress; retry when idle.");
+            }
+            break;
         case ID_TRAY_RETRY_LOGGING:
             if (Diagnostics::RetryFileLogging()) {
                 ShowTrayInfo("RedLight file logging available", "File logging recovered. Earlier missing-record counts remain in the support report.");

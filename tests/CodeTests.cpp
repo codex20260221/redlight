@@ -1075,6 +1075,87 @@ void ExpiryWarningSchemaMigrationAndValidation() {
     SupportReportState state; state.expiryWarning = ExpiryWarningName(ExpiryWarning::OneMinute);
     Check(BuildSupportReport(state).find("Expiry warning: 1 minute") != std::string::npos, "support report includes selected warning");
 }
+void MagnificationStatisticsAndSafeReset() {
+    MagnificationFilter filter;
+    Check(filter.statistics() == BackendStatistics{}, "new backend counters start at zero");
+    Check(!filter.enable() && !filter.disable() && filter.verifyState() == BackendVerification::Unavailable, "invalid lifecycle requests are visible failures");
+    Check(filter.initialize() && filter.initialize() && filter.enable() && filter.enable(), "successful and idempotent requests");
+    Check(filter.verifyState() == BackendVerification::Matches, "matching verification");
+    fake.effect.transform[0][1] = 0.1f;
+    Check(filter.verifyState() == BackendVerification::Changed, "mismatch verification");
+    fake.magGet = false;
+    Check(filter.verifyState() == BackendVerification::Unavailable, "unavailable verification");
+    fake.magSet = false;
+    Check(!filter.disable() && !filter.shutdown(), "failed restore and nested shutdown recovery");
+    const auto statistics = filter.statistics();
+    Check(statistics.initialization == BackendOperationStatistics{2, 0} && statistics.activation == BackendOperationStatistics{3, 1} &&
+        statistics.restoration == BackendOperationStatistics{3, 3} && statistics.verification == BackendOperationStatistics{4, 3} &&
+        statistics.shutdown == BackendOperationStatistics{1, 1}, "counters include idempotent requests, mismatch/unavailable checks and nested recovery");
+    const auto error = std::string(filter.lastError());
+    const auto reads = fake.magReads, writes = fake.magWrites, uninitializes = fake.uninitializes;
+    Check(filter.resetStatistics() && filter.statistics() == BackendStatistics{} && filter.isActive() && filter.needsRestore() &&
+        error == filter.lastError() && fake.magReads == reads && fake.magWrites == writes && fake.uninitializes == uninitializes,
+        "counter reset preserves active state, recovery snapshot, last error, and all native operations");
+    fake.magSet = true; fake.magGet = true;
+    Check(filter.disable() && fake.effect.transform[0][0] == 1 && fake.effect.transform[0][1] == 0 && filter.shutdown(), "original restore matrix remains intact after reset");
+    Check(filter.statistics().restoration == BackendOperationStatistics{1, 0} && filter.statistics().shutdown == BackendOperationStatistics{1, 0}, "counting resumes from reset");
+}
+void GammaStatisticsAndCleanupReset() {
+    GammaRampFilter filter;
+    Check(filter.initialize(), "initialize");
+    fake.mutexWaitResult = WAIT_TIMEOUT;
+    Check(!filter.enable() && filter.statistics().activation == BackendOperationStatistics{1, 1}, "ownership conflict counts as unsuccessful activation");
+    fake.mutexWaitResult = WAIT_OBJECT_0;
+    fake.writes = {Write::FailAfterApply, Write::Fail};
+    Check(!filter.enable() && filter.needsRestore() && fake.mutexOwned && filter.statistics().activation == BackendOperationStatistics{2, 2} &&
+        filter.statistics().restoration == BackendOperationStatistics{1, 1}, "failed activation and rollback are counted separately");
+    const auto reads = fake.gammaReads, writes = fake.gammaWrites, releases = fake.mutexReleases;
+    Check(filter.resetStatistics() && !filter.isActive() && filter.needsRestore() && fake.mutexOwned &&
+        fake.gammaReads == reads && fake.gammaWrites == writes && fake.mutexReleases == releases, "reset cannot discard a partial-write snapshot or gamma ownership");
+    fake.mutexRelease = false;
+    Check(!filter.disable() && !filter.isActive() && filter.needsRestore() && filter.statistics().restoration == BackendOperationStatistics{1, 1},
+        "display-restored but cleanup-failed result counts as unsuccessful recovery");
+    const auto restoredWrites = fake.gammaWrites;
+    fake.mutexRelease = true;
+    Check(filter.disable() && fake.gammaWrites == restoredWrites && filter.statistics().restoration == BackendOperationStatistics{2, 1}, "cleanup-only retry counts without repeating a ramp write");
+    Check(filter.verifyState() == BackendVerification::Inactive && filter.statistics().verification == BackendOperationStatistics{1, 0}, "inactive no-read verification is successful bookkeeping");
+    Check(filter.shutdown() && filter.shutdown() && filter.statistics().shutdown == BackendOperationStatistics{2, 0}, "idempotent shutdown requests remain visible");
+}
+void BackendStatisticsSaturationAndInProgress() {
+    BackendStatistics statistics;
+    {
+        RecordBackendOperation outer(statistics.activation);
+        Check(!ResetBackendStatistics(statistics) && statistics.activation.requests == 1 && statistics.activation.inProgress == 1, "reset refuses in-progress work without changing counters");
+        {
+            RecordBackendOperation inner(statistics.activation);
+            Check(statistics.activation.inProgress == 2, "nested calls are tracked separately");
+            inner.success();
+        }
+        outer.success();
+    }
+    Check(statistics.activation == BackendOperationStatistics{2, 0} && ResetBackendStatistics(statistics) && statistics == BackendStatistics{}, "idle reset succeeds after nested operations finish");
+    GuardUiCall<int>([&]() -> int { RecordBackendOperation operation(statistics.shutdown); throw 7; }, [](const char*) { return 1; });
+    Check(statistics.shutdown == BackendOperationStatistics{1, 1}, "unwinding counts failure and clears in-progress ownership");
+    statistics.activation.requests = statistics.activation.failures = (std::numeric_limits<std::uint64_t>::max)() - 1;
+    { RecordBackendOperation operation(statistics.activation); }
+    { RecordBackendOperation operation(statistics.activation); }
+    Check(statistics.activation.requests == (std::numeric_limits<std::uint64_t>::max)() && statistics.activation.failures == statistics.activation.requests && statistics.activation.inProgress == 0,
+        "long-session counters saturate instead of wrapping");
+}
+void BackendStatisticsSupportReport() {
+    SupportReportState state;
+    state.backendStatistics.initialization = {3, 1};
+    state.backendStatistics.activation = {9, 2};
+    state.backendStatistics.restoration = {12, 4};
+    state.backendStatistics.verification = {7, 3};
+    state.backendStatistics.shutdown = {2, 1};
+    const auto report = BuildSupportReport(state);
+    Check(report.find("Initialize: 3 / 1") != std::string::npos && report.find("Activate: 9 / 2") != std::string::npos &&
+        report.find("Restore/ownership cleanup: 12 / 4") != std::string::npos && report.find("Shutdown: 2 / 1") != std::string::npos &&
+        report.find("Verify (mismatch/unavailable counted as failures): 7 / 3") != std::string::npos, "report labels counts and failure meanings explicitly");
+    Check(!CommandMayChangeFilter(ID_TRAY_RESET_BACKEND_COUNTS) && fake.magReads == 0 && fake.gammaReads == 0 && fake.magWrites == 0 && fake.gammaWrites == 0,
+        "report/reset diagnostic paths have no display effect");
+}
 } // namespace
 
 DWORD GetLastError() { return fake.lastError; }
@@ -1264,6 +1345,8 @@ int main() {
         {"Status query failures", StatusQueryFailures},
         {"Expiry warning deadline policy", ExpiryWarningBoundariesAndDeadline}, {"Expiry warning short sessions/clock", ExpiryWarningShortSessionsAndClockWrap},
         {"Expiry warning schema migration", ExpiryWarningSchemaMigrationAndValidation},
+        {"Magnification operation counters", MagnificationStatisticsAndSafeReset}, {"Gamma operation counters", GammaStatisticsAndCleanupReset},
+        {"Backend counters saturation/reset guard", BackendStatisticsSaturationAndInProgress}, {"Backend counters support report", BackendStatisticsSupportReport},
         {"Command line", Arguments}
     };
     int failed = 0;

@@ -1,5 +1,6 @@
 #pragma once
 #include "LumaProfile.h"
+#include "BackendStatistics.h"
 
 enum class RedMode {
     StrictRed,
@@ -56,4 +57,6 @@ public:
     // Keep resources and restore data available when recovery fails.
     virtual bool shutdown() = 0;
     virtual const char* name() const = 0;
+    virtual BackendStatistics statistics() const noexcept = 0;
+    virtual bool resetStatistics() noexcept = 0;
 };

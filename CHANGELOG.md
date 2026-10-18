@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Added selected-backend request/failure counters to support reports for initialization, activation, restoration/ownership cleanup, verification, and shutdown, with an Expert reset that preserves display/recovery state and refuses in-progress operations.
 - Added optional saved expiry warnings (Off, 30 seconds, 1 minute, or 5 minutes) with one notification attempt per countdown and unchanged restoration deadlines; settings profiles export version 3 and accept version 1/2 with warnings off.
 - Added read-only `--status` JSON for scripts, querying only cached state from an existing tray instance with a bounded, versioned response; reports countdowns, actual shortcuts, recovery/verification state, and logging health without initializing or reading display backends.
 - Added path-free build revision/source-state identity to About, startup diagnostics, and support reports, refreshed on each build; source archives and opt-out builds remain supported.

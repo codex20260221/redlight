@@ -27,8 +27,9 @@ GammaRampFilter::~GammaRampFilter() {
 }
 
 bool GammaRampFilter::initialize() {
+    RecordBackendOperation operation(statistics_.initialization);
     if (initialized_) {
-        return true;
+        return operation.success();
     }
 
     if ((hdc_ || ownershipMutex_) && !shutdown()) return false;
@@ -55,17 +56,18 @@ bool GammaRampFilter::initialize() {
     active_ = false;
     lastError_[0] = '\0';
     Diagnostics::LogFormat("%s initialization succeeded.", kFilterName);
-    return true;
+    return operation.success();
 }
 
 bool GammaRampFilter::enable() {
+    RecordBackendOperation operation(statistics_.activation);
     if (!initialized_) {
         SetError("enable before initialize", ERROR_INVALID_HANDLE);
         return false;
     }
 
     if (active_) {
-        return true;
+        return operation.success();
     }
 
     if (needsRestore()) {
@@ -97,10 +99,11 @@ bool GammaRampFilter::enable() {
 
     active_ = true;
     Diagnostics::LogFormat("%s enable succeeded.", kFilterName);
-    return true;
+    return operation.success();
 }
 
 bool GammaRampFilter::disable() {
+    RecordBackendOperation operation(statistics_.restoration);
     if (!initialized_) {
         SetError("disable before initialize", ERROR_INVALID_HANDLE);
         return false;
@@ -114,7 +117,7 @@ bool GammaRampFilter::disable() {
     }
     if (!ReleaseOwnership()) return false;
     lastError_[0] = '\0';
-    return true;
+    return operation.success();
 }
 
 bool GammaRampFilter::isActive() const {
@@ -126,8 +129,9 @@ bool GammaRampFilter::needsRestore() const { return active_ || restorePending_ |
 const char* GammaRampFilter::lastError() const { return lastError_; }
 
 BackendVerification GammaRampFilter::verifyState() const {
+    RecordBackendOperation operation(statistics_.verification);
     if (!initialized_) return BackendVerification::Unavailable;
-    if (!active_ && !restorePending_) return BackendVerification::Inactive;
+    if (!active_ && !restorePending_) { operation.success(); return BackendVerification::Inactive; }
     WORD actual[3][256] = {};
     if (!hdc_ || !GetDeviceGammaRamp(hdc_, actual)) {
         Diagnostics::LogFormat("Gamma verification read failed (error %lu).", GetLastError());
@@ -136,6 +140,7 @@ BackendVerification GammaRampFilter::verifyState() const {
     const bool matches = RampMatches(actual, redGammaRamp_, true);
     Diagnostics::Log(matches ? "Gamma read-back matches requested ramp." :
         "Gamma read-back differs from requested ramp; no filter was reapplied.");
+    if (matches) operation.success();
     return matches ? BackendVerification::Matches : BackendVerification::Changed;
 }
 
@@ -164,6 +169,7 @@ bool GammaRampFilter::supportsRedMode(RedMode mode) const {
 }
 
 bool GammaRampFilter::shutdown() {
+    RecordBackendOperation operation(statistics_.shutdown);
     if (needsRestore() && !disable()) {
         Diagnostics::Log("GammaRampFilter: recovery/ownership cleanup failed; retaining resources for retry.");
         return false;
@@ -174,7 +180,7 @@ bool GammaRampFilter::shutdown() {
     }
     hdc_ = NULL;
     initialized_ = false;
-    return true;
+    return operation.success();
 }
 
 const char* GammaRampFilter::name() const {

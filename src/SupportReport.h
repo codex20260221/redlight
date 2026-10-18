@@ -20,6 +20,7 @@ struct SupportReportState {
     bool toggleHotkey = false, restoreHotkey = false, sessionNotifications = false;
     unsigned sessionMinutes = 0;
     std::string_view expiryWarning = "Off";
+    BackendStatistics backendStatistics{};
     std::optional<std::uint64_t> remainingSeconds;
 };
 inline std::string BuildSupportReport(const SupportReportState& state) {
@@ -45,7 +46,17 @@ inline std::string BuildSupportReport(const SupportReportState& state) {
     report << "\r\nExpiry warning: " << state.expiryWarning << "\r\nCountdown: ";
     if (state.remainingSeconds) report << *state.remainingSeconds << " seconds remaining";
     else report << "not armed";
-    report << "\r\nFile logging: " << state.fileLogging << "\r\nMissing file records: " << state.droppedLogLines
+    report << "\r\nBackend counters since startup/last reset (requests / failures):";
+    const auto counts = [&](const char* name, const BackendOperationStatistics& value) {
+        report << "\r\n  " << name << ": " << value.requests << " / " << value.failures;
+    };
+    counts("Initialize", state.backendStatistics.initialization);
+    counts("Activate", state.backendStatistics.activation);
+    counts("Restore/ownership cleanup", state.backendStatistics.restoration);
+    counts("Verify (mismatch/unavailable counted as failures)", state.backendStatistics.verification);
+    counts("Shutdown", state.backendStatistics.shutdown);
+    report << "\r\nCounters include idempotent requests and nested recovery calls."
+        << "\r\nFile logging: " << state.fileLogging << "\r\nMissing file records: " << state.droppedLogLines
         << "\r\nTruncated records: " << state.truncatedLogLines << "\r\nLast file error: " << state.lastFileError
         << "\r\nLast backend error: " << (state.lastError.empty() ? "none" : state.lastError)
         << "\r\nStatus reflects backend call results; no display output is measured.\r\n";

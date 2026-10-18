@@ -9,6 +9,8 @@ class MagnificationFilter final : public DisplayFilter {
 public:
     MagnificationFilter();
     ~MagnificationFilter() override;
+    MagnificationFilter(const MagnificationFilter&) = delete;
+    MagnificationFilter& operator=(const MagnificationFilter&) = delete;
 
     bool initialize() override;
     bool enable() override;
@@ -24,6 +26,8 @@ public:
     bool supportsRedMode(RedMode mode) const override;
     bool shutdown() override;
     const char* name() const override;
+    BackendStatistics statistics() const noexcept override { return statistics_; }
+    bool resetStatistics() noexcept override { return ResetBackendStatistics(statistics_); }
 
 private:
     void LogError(const char* action, DWORD error);
@@ -35,4 +39,5 @@ private:
     LumaProfile lumaProfile_;
     MAGCOLOREFFECT restoreEffect_;
     char lastError_[256];
+    mutable BackendStatistics statistics_{};
 };

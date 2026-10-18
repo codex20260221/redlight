@@ -45,8 +45,9 @@ MagnificationFilter::~MagnificationFilter() {
 }
 
 bool MagnificationFilter::initialize() {
+    RecordBackendOperation operation(statistics_.initialization);
     if (initialized_) {
-        return true;
+        return operation.success();
     }
 
     if (!MagInitialize()) {
@@ -70,17 +71,18 @@ bool MagnificationFilter::initialize() {
     active_ = false;
     lastError_[0] = '\0';
     Diagnostics::LogFormat("%s initialization succeeded.", kFilterName);
-    return true;
+    return operation.success();
 }
 
 bool MagnificationFilter::enable() {
+    RecordBackendOperation operation(statistics_.activation);
     if (!initialized_) {
         LogError("enable before initialize", ERROR_INVALID_HANDLE);
         return false;
     }
 
     if (active_) {
-        return true;
+        return operation.success();
     }
 
     // Capture immediately before each activation, not just at application startup.
@@ -99,17 +101,18 @@ bool MagnificationFilter::enable() {
 
     active_ = true;
     Diagnostics::LogFormat("%s enable succeeded using %s.", kFilterName, RedModeDisplayName(redMode_));
-    return true;
+    return operation.success();
 }
 
 bool MagnificationFilter::disable() {
+    RecordBackendOperation operation(statistics_.restoration);
     if (!initialized_) {
         LogError("disable before initialize", ERROR_INVALID_HANDLE);
         return false;
     }
 
     if (!active_) {
-        return true;
+        return operation.success();
     }
 
     if (!SetColorEffect(restoreEffect_, "MagSetFullscreenColorEffect(restore)")) {
@@ -118,7 +121,7 @@ bool MagnificationFilter::disable() {
 
     active_ = false;
     Diagnostics::LogFormat("%s disable succeeded.", kFilterName);
-    return true;
+    return operation.success();
 }
 
 bool MagnificationFilter::isActive() const {
@@ -130,8 +133,9 @@ bool MagnificationFilter::needsRestore() const { return active_; }
 const char* MagnificationFilter::lastError() const { return lastError_; }
 
 BackendVerification MagnificationFilter::verifyState() const {
+    RecordBackendOperation operation(statistics_.verification);
     if (!initialized_) return BackendVerification::Unavailable;
-    if (!needsRestore()) return BackendVerification::Inactive;
+    if (!needsRestore()) { operation.success(); return BackendVerification::Inactive; }
     MAGCOLOREFFECT actual = {};
     if (!MagGetFullscreenColorEffect(&actual)) {
         Diagnostics::LogFormat("Magnification verification read failed (error %lu).", GetLastError());
@@ -147,6 +151,7 @@ BackendVerification MagnificationFilter::verifyState() const {
         }
     }
     Diagnostics::Log("Magnification read-back matches requested transform.");
+    operation.success();
     return BackendVerification::Matches;
 }
 
@@ -196,8 +201,9 @@ bool MagnificationFilter::supportsRedMode(RedMode mode) const {
 }
 
 bool MagnificationFilter::shutdown() {
+    RecordBackendOperation operation(statistics_.shutdown);
     if (!initialized_) {
-        return true;
+        return operation.success();
     }
     if (active_ && !disable()) {
         Diagnostics::Log("MagnificationFilter: restore failed; retaining recovery state.");
@@ -209,7 +215,7 @@ bool MagnificationFilter::shutdown() {
     }
     initialized_ = false;
     Diagnostics::LogFormat("%s shutdown completed.", kFilterName);
-    return true;
+    return operation.success();
 }
 
 const char* MagnificationFilter::name() const {

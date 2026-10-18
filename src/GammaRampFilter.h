@@ -25,6 +25,8 @@ public:
     bool supportsRedMode(RedMode mode) const override;
     bool shutdown() override;
     const char* name() const override;
+    BackendStatistics statistics() const noexcept override { return statistics_; }
+    bool resetStatistics() noexcept override { return ResetBackendStatistics(statistics_); }
 
 private:
     bool AcquireOwnership();
@@ -45,4 +47,5 @@ private:
     WORD originalGammaRamp_[3][256];
     WORD redGammaRamp_[3][256];
     char lastError_[256];
+    mutable BackendStatistics statistics_{};
 };
