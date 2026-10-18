@@ -43,6 +43,7 @@ enum class Write { Apply, Fail, Ignore, FailAfterApply, LowByteLeak };
 struct RegistryValue { DWORD type; std::vector<char> bytes; };
 struct Fake {
     bool magInit = true, magGet = true, magSet = true, magUninit = true;
+    std::deque<Write> magWriteResults;
     bool dc = true, gammaGet = true, release = true;
     int magWrites = 0, gammaWrites = 0, releases = 0, uninitializes = 0;
     int magInitializes = 0, dcRequests = 0, magReads = 0, gammaReads = 0;
@@ -168,8 +169,9 @@ void MagWriteFailure() {
     MagnificationFilter f;
     Check(f.initialize(), "initialize");
     fake.magSet = false;
-    Check(!f.enable() && !f.isActive(), "failed enable never reports active");
+    Check(!f.enable() && !f.isActive() && f.needsRestore(), "failed enable and rollback retain recovery without reporting active");
     fake.magSet = true;
+    Check(!f.enable() && f.disable(), "pending activation recovery must complete before recapture or enable retry");
     Check(f.enable(), "enable retry");
     const auto oldMode = f.redMode();
     fake.magSet = false;
@@ -2208,6 +2210,87 @@ void RestorationHistorySupportReportBound() {
     Check(fake.magWrites == 0 && fake.gammaWrites == 0 && fake.clipOpens == 0 && fake.registryReads == 0,
         "formatting restoration history has no native output, clipboard, or settings effects");
 }
+void MagFailedActivationRollbackRestoresLatestCapture() {
+    MagnificationFilter filter;
+    Check(filter.initialize(), "initialize failed-activation rollback test");
+    fake.effect.transform[0][0] = 0.37f; fake.effect.transform[2][2] = 0.81f;
+    const auto captured = fake.effect;
+    fake.magWriteResults = {Write::FailAfterApply, Write::Apply};
+    Check(!filter.enable() && !filter.isActive() && !filter.needsRestore() && Same(fake.effect, captured) && fake.magWrites == 2 && filter.lastError()[0],
+        "a failed-after-write activation restores the latest captured matrix and remains visibly failed/off");
+    Check(filter.statistics().activation == BackendOperationStatistics{1, 1} && filter.statistics().restoration == BackendOperationStatistics{1, 0},
+        "activation failure and successful nested rollback are counted independently");
+    fake.effect.transform[0][0] = 0.62f;
+    const auto later = fake.effect;
+    Check(filter.enable() && filter.disable() && Same(fake.effect, later), "after confirmed rollback a later activation recaptures current state");
+}
+void MagFailedActivationKeepsSnapshotUntilRecovery() {
+    MagnificationFilter filter;
+    Check(filter.initialize(), "initialize pending activation recovery test");
+    fake.effect.transform[1][1] = 0.74f;
+    const auto captured = fake.effect;
+    fake.magWriteResults = {Write::FailAfterApply, Write::Fail};
+    Check(!filter.enable() && !filter.isActive() && filter.needsRestore() && !Same(fake.effect, captured),
+        "failed activation/rollback retain an inactive recovery obligation and original matrix");
+    const auto reads = fake.magReads, writes = fake.magWrites;
+    Check(!filter.enable() && fake.magReads == reads && fake.magWrites == writes && filter.needsRestore(),
+        "enable cannot recapture its own unconfirmed transform over the original snapshot");
+    SupportReportState state; state.active = filter.isActive(); state.needsRestore = filter.needsRestore(); state.lastError = filter.lastError();
+    Check(BuildSupportReport(state).find("State: Recovery needed") != std::string::npos, "inactive partial activation cannot be reported simply off or active");
+    Check(filter.disable() && Same(fake.effect, captured) && !filter.needsRestore() && !filter.isActive(),
+        "explicit recovery uses the retained original snapshot and clears ownership only after success");
+}
+void MagUnconfirmedRollbackAndShutdownRetainOwnership() {
+    MagnificationFilter filter;
+    Check(filter.initialize(), "initialize unconfirmed rollback test");
+    fake.effect.transform[0][0] = 0.21f;
+    const auto captured = fake.effect;
+    fake.magWriteResults = {Write::FailAfterApply, Write::FailAfterApply};
+    Check(!filter.enable() && Same(fake.effect, captured) && !filter.isActive() && filter.needsRestore(),
+        "even a rollback that wrote the original matrix remains pending if its API result failed");
+    fake.magWriteResults = {Write::Fail};
+    Check(!filter.shutdown() && filter.needsRestore() && fake.uninitializes == 0,
+        "failed shutdown recovery retains the Magnification API and saved matrix");
+    Check(filter.shutdown() && !filter.needsRestore() && Same(fake.effect, captured) && fake.uninitializes == 1,
+        "later shutdown restores before uninitializing resources");
+}
+void MagFailedActivationWithoutMutationStillChecksRollback() {
+    MagnificationFilter filter;
+    Check(filter.initialize(), "initialize ordinary failure rollback test");
+    const auto captured = fake.effect;
+    fake.magWriteResults = {Write::Fail, Write::Apply}; fake.diagnosticsClobbersError = true;
+    Check(!filter.enable() && Same(fake.effect, captured) && fake.magWrites == 2 && !filter.isActive() && !filter.needsRestore() &&
+        std::string_view(filter.lastError()).find("GetLastError=5") != std::string_view::npos,
+        "ordinary failed activation also requires checked rollback and preserves its original error after successful cleanup/logging");
+}
+void MagFailedActivationVerificationDoesNotClaimActive() {
+    MagnificationFilter filter;
+    Check(filter.initialize(), "initialize partial-activation verification test");
+    fake.magWriteResults = {Write::FailAfterApply, Write::Fail};
+    Check(!filter.enable(), "prepare inactive pending matrix restoration");
+    const auto writes = fake.magWrites;
+    Check(filter.inspectState().state == BackendVerification::Matches && fake.magWrites == writes && !filter.isActive() && filter.needsRestore(),
+        "explicit read-back can match an unconfirmed target without changing activation or recovery ownership");
+    TrayStatus status; status.restorePending = true; status.backendError = true; status.verification = BackendVerification::Matches;
+    const auto json = TrayStatusJson(status);
+    Check(json && json->find("\"status\":\"recovery-needed\"") != std::string::npos && json->find("\"active\":false") != std::string::npos,
+        "even matching verification cannot override inactive recovery in machine-readable status");
+    Check(filter.disable(), "recover after read-only verification");
+}
+void MagFailedActivationRecoveryWithoutCppAllocation() {
+    MagnificationFilter filter;
+    Check(filter.initialize(), "initialize low-allocation activation recovery");
+    const auto captured = fake.effect;
+    fake.magWriteResults = {Write::FailAfterApply, Write::Apply};
+    bool result = true, allocationUnused = false;
+    {
+        TestMemory::FailNextAllocation fail;
+        result = filter.enable();
+        allocationUnused = TestMemory::AllocationFailurePending();
+    }
+    Check(!result && allocationUnused && Same(fake.effect, captured) && !filter.isActive() && !filter.needsRestore(),
+        "failed activation and immediate rollback require no C++ heap allocation");
+}
 } // namespace
 
 DWORD GetLastError() { return fake.lastError; }
@@ -2348,8 +2431,13 @@ BOOL MagGetFullscreenColorEffect(MAGCOLOREFFECT* effect) {
 }
 BOOL MagSetFullscreenColorEffect(MAGCOLOREFFECT* effect) {
     ++fake.magWrites;
-    if (!fake.magSet) return 0;
-    fake.effect = *effect; return 1;
+    auto result = fake.magSet ? Write::Apply : Write::Fail;
+    if (!fake.magWriteResults.empty()) { result = fake.magWriteResults.front(); fake.magWriteResults.pop_front(); }
+    if (result == Write::Fail) { fake.lastError = ERROR_ACCESS_DENIED; return 0; }
+    if (result == Write::Ignore) return 1;
+    fake.effect = *effect;
+    if (result == Write::FailAfterApply) { fake.lastError = ERROR_ACCESS_DENIED; return 0; }
+    return 1;
 }
 int MultiByteToWideChar(unsigned, DWORD, const char* text, int length, wchar_t* output, int) {
     ++fake.clipConversions;
@@ -2500,6 +2588,9 @@ int main() {
         {"Restoration history bound/snapshots", RestorationHistoryBoundAndSnapshots}, {"Restoration history nested/interrupted scopes", RestorationHistoryNestedAndInterruptedScopes},
         {"Restoration history retains backend recovery", RestorationHistoryRetainsBackendRecovery}, {"Restoration history without C++ allocation", RestorationHistoryNoCppAllocation},
         {"Restoration history wrap/names", RestorationHistoryClockWrapAndNames}, {"Restoration history bounded support report", RestorationHistorySupportReportBound},
+        {"Mag failed activation rollback/latest capture", MagFailedActivationRollbackRestoresLatestCapture}, {"Mag failed activation preserves snapshot", MagFailedActivationKeepsSnapshotUntilRecovery},
+        {"Mag unconfirmed rollback/shutdown ownership", MagUnconfirmedRollbackAndShutdownRetainOwnership}, {"Mag ordinary activation failure rollback/error", MagFailedActivationWithoutMutationStillChecksRollback},
+        {"Mag partial activation verification/status", MagFailedActivationVerificationDoesNotClaimActive}, {"Mag activation recovery without C++ allocation", MagFailedActivationRecoveryWithoutCppAllocation},
         {"Command line", Arguments}
     };
     int failed = 0;

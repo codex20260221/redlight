@@ -3,6 +3,7 @@
 #include "BackendComparison.h"
 
 #include <cstdio>
+#include <cstring>
 
 namespace {
 
@@ -35,6 +36,7 @@ MAGCOLOREFFECT ColorEffectForMode(RedMode mode, LumaProfile profile) {
 MagnificationFilter::MagnificationFilter()
     : initialized_(false),
       active_(false),
+      restorePending_(false),
       redMode_(RedMode::LumaRed),
       lumaProfile_(LumaProfile::Classic),
       restoreEffect_(kIdentityEffect),
@@ -89,6 +91,10 @@ bool MagnificationFilter::enable() {
     if (active_) {
         return operation.success();
     }
+    if (restorePending_) {
+        LogError("enable while restoration is pending; restore the saved matrix first", ERROR_INVALID_STATE);
+        return false;
+    }
 
     // Capture immediately before each activation, not just at application startup.
     MAGCOLOREFFECT currentEffect = {};
@@ -104,11 +110,20 @@ bool MagnificationFilter::enable() {
 
     char action[128];
     sprintf_s(action, sizeof(action), "MagSetFullscreenColorEffect(%s)", RedModeDisplayName(redMode_));
+    // A failed write is unconfirmed, rather than proof that display state was unchanged.
+    restorePending_ = true;
     if (!SetColorEffect(ColorEffectForMode(redMode_, lumaProfile_), action)) {
+        char applyError[sizeof(lastError_)];
+        std::memcpy(applyError, lastError_, sizeof(applyError));
+        if (disable()) {
+            std::memcpy(lastError_, applyError, sizeof(lastError_));
+            Diagnostics::Log("MagnificationFilter: failed activation rolled back to the captured matrix; filter remains off.");
+        } else Diagnostics::Log("MagnificationFilter: activation and rollback failed; saved matrix and API resources retained for restoration retry.");
         return false;
     }
 
     active_ = true;
+    restorePending_ = false;
     Diagnostics::LogFormat("%s enable succeeded using %s.", kFilterName, RedModeDisplayName(redMode_));
     return operation.success();
 }
@@ -120,7 +135,7 @@ bool MagnificationFilter::disable() {
         return false;
     }
 
-    if (!active_) {
+    if (!needsRestore()) {
         return operation.success();
     }
 
@@ -129,6 +144,7 @@ bool MagnificationFilter::disable() {
     }
 
     active_ = false;
+    restorePending_ = false;
     Diagnostics::LogFormat("%s disable succeeded.", kFilterName);
     return operation.success();
 }
@@ -137,7 +153,7 @@ bool MagnificationFilter::isActive() const {
     return active_;
 }
 
-bool MagnificationFilter::needsRestore() const { return active_; }
+bool MagnificationFilter::needsRestore() const { return active_ || restorePending_; }
 
 const char* MagnificationFilter::lastError() const { return lastError_; }
 
@@ -209,7 +225,7 @@ bool MagnificationFilter::shutdown() {
     if (!initialized_) {
         return operation.success();
     }
-    if (active_ && !disable()) {
+    if (needsRestore() && !disable()) {
         Diagnostics::Log("MagnificationFilter: restore failed; retaining recovery state.");
         return false;
     }

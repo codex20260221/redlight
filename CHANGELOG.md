@@ -58,6 +58,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Support Unicode diagnostics paths and report log-write failures to the debugger.
 
 ### Fixed
+- Retain the latest Magnification snapshot across failed initial activation writes, attempt checked rollback, block recapture while inactive recovery is pending, and restore before shutdown cleanup; successful rollback preserves the activation error, while failed rollback stays recoverable without claiming active filtering.
 - Log failed startup-information and session-dialog message boxes; startup help/version/argument dialogs return failure when Windows cannot show them instead of reporting success.
 - Reject nonfinite Magnification restoration captures at initialization and immediately before activation, without color writes or false ownership; preserve cleanup/fallback gating and allow later usable captures to retry.
 - Honor already queued restore requests after read-only callback failures, defer them under outer busy scopes, retain requests after recovery exceptions, and report pending/inactive recovery conservatively; native callback rescue preserves the correct creation/session-ending failure return values.

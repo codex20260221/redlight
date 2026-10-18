@@ -35,6 +35,7 @@ private:
 
     bool initialized_;
     bool active_;
+    bool restorePending_;
     RedMode redMode_;
     LumaProfile lumaProfile_;
     MAGCOLOREFFECT restoreEffect_;
