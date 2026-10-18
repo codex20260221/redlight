@@ -54,7 +54,7 @@ struct ErrorMode {
     bool changed = false;
 };
 struct ReadResult {
-    std::array<char, 4097> bytes{}; // One extra byte proves the parser's 4096-byte bound was exceeded.
+    std::array<char, PreferencesProfileMaxBytes + 1> bytes{}; // One extra byte proves the shared parser bound was exceeded.
     std::size_t length = 0;
     const char* stage = nullptr;
     DWORD error = ERROR_SUCCESS;

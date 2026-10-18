@@ -237,7 +237,9 @@ The `busy` status also covers a queued control restore request. About/support st
 
 ## Scriptable build identity
 
-`--build-info` writes JSON describing the invoked binary before tray/backend/preferences initialization. It includes `protocol` (1), `product`, `version`, `build_revision`, `source_state`, `platform` (`windows-x64`), `profile_schema` (the exported settings format, currently 3), and `status_protocol` (currently 1). It uses inherited output or an existing parent console and opens no dialogs. Exit codes are `0` for complete output, `1` for metadata/output failure, and `2` for invalid arguments; discard partial output after failure.
+`--build-info` writes JSON describing the invoked binary before tray/backend/preferences initialization. It includes `protocol` (1), `product`, `version`, `build_revision`, `source_state`, `platform` (`windows-x64`), `profile_schema` (the exported settings format, currently 3), `status_protocol` (1), and `current_settings_protocol` (1). `profile_input_schemas` lists accepted input versions as numbers, currently `[1,2,3]`. The `limits` object has `profile_bytes` (4096 UTF-8 input bytes, including comments/BOM) and `session_minutes` (240; zero still means unlimited). Parser, saved-record, offline-file, and clipboard-import entry points share the profile bound; session limits come from the countdown policy.
+
+Discovery describes this invoked binary; it does not inspect or establish compatibility with an existing tray. Scripts should accept additional protocol-1 fields and check query results separately. Output preparation is bounded to 1536 bytes and uses no C++ heap allocation. The command uses inherited output or an existing parent console and opens no dialogs. Exit codes are `0` for complete output, `1` for metadata/output failure, and `2` for invalid arguments; discard partial output after failure.
 
 ```powershell
 $json = & .\RedLight.exe --build-info | Out-String

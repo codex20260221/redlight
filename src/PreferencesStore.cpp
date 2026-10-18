@@ -19,7 +19,7 @@ std::optional<DWORD> ReadLegacy(const wchar_t* name, bool& warning) {
 }
 LoadedPreferences LoadPreferences() {
     LoadedPreferences result;
-    std::array<char, 4096> text = {};
+    std::array<char, PreferencesProfileMaxBytes> text = {};
     DWORD bytes = static_cast<DWORD>(text.size());
     const LSTATUS read = RegGetValueW(HKEY_CURRENT_USER, kKey, L"SettingsProfile", RRF_RT_REG_BINARY, NULL, text.data(), &bytes);
     if (read == ERROR_SUCCESS) {

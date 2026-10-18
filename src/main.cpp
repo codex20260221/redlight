@@ -1020,7 +1020,7 @@ void CopySettingsProfile(HWND owner) {
 
 void ImportSettingsProfile(HWND owner) {
     if (g_busy || g_preferencesApplying) return;
-    const auto text = ReadUtf8TextFromClipboard(owner);
+    const auto text = ReadUtf8TextFromClipboard(owner, PreferencesProfileMaxBytes);
     if (!text) {
         ReportError("A settings profile could not be read from the clipboard. Copy a RedLight profile as text, then retry.");
         return;

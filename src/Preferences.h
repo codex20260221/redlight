@@ -6,12 +6,17 @@
 #include "ExpiryWarning.h"
 #include "Utf8.h"
 #include <charconv>
+#include <array>
+#include <cstddef>
 #include <cstdio>
 #include <optional>
 #include <string>
 #include <string_view>
 
 inline constexpr unsigned PreferencesProfileVersion = 3;
+inline constexpr std::array PreferencesInputSchemas{1u, 2u, 3u};
+inline constexpr std::size_t PreferencesProfileMaxBytes = 4096;
+static_assert(PreferencesInputSchemas.back() == PreferencesProfileVersion);
 struct ProfileSchemaDefaults { bool shortcuts, expiryWarning; };
 inline constexpr std::optional<ProfileSchemaDefaults> DefaultsForProfileSchema(unsigned schema) noexcept {
     switch (schema) {
@@ -83,7 +88,7 @@ inline std::string_view TrimProfileField(std::string_view value) {
     return value;
 }
 inline PreferencesParseResult ParsePreferences(std::string_view input) {
-    if (input.size() > 4096 || input.find('\0') != std::string_view::npos) return {std::nullopt, "Profile is too large or contains a NUL byte", 0};
+    if (input.size() > PreferencesProfileMaxBytes || input.find('\0') != std::string_view::npos) return {std::nullopt, "Profile is too large or contains a NUL byte", 0};
     if (!IsValidUtf8(input)) return {std::nullopt, "Profile contains invalid UTF-8", 0};
     if (input.size() >= 3 && static_cast<unsigned char>(input[0]) == 0xef &&
         static_cast<unsigned char>(input[1]) == 0xbb && static_cast<unsigned char>(input[2]) == 0xbf) input.remove_prefix(3);

@@ -2418,7 +2418,8 @@ void BuildInfoJsonAndIsolation() {
     const auto& text = fake.stdoutText;
     Check(text.starts_with("{\"protocol\":1,\"product\":\"RedLight\",\"version\":\"0.6.0-rc.1\"") &&
         text.find("\"build_revision\":\"0123456789ab\",\"source_state\":\"clean\",\"platform\":\"windows-x64\"") != std::string::npos &&
-        text.ends_with("\"profile_schema\":3,\"status_protocol\":1}\n"), "build info carries a complete stable machine-readable identity");
+        text.ends_with("\"profile_schema\":3,\"status_protocol\":1,\"current_settings_protocol\":1,\"profile_input_schemas\":[1,2,3],"
+            "\"limits\":{\"profile_bytes\":4096,\"session_minutes\":240}}\n"), "build info carries complete identity, supported protocols/schemas, and authoritative limits");
     Check(fake.magInitializes == 0 && fake.dcRequests == 0 && fake.magReads == 0 && fake.gammaReads == 0 &&
         fake.magWrites == 0 && fake.gammaWrites == 0 && fake.mutexCreates == 0 && fake.statusSends == 0 && fake.profileOpens == 0 &&
         fake.registryReads == 0 && fake.registryWrites == 0 && fake.clipOpens == 0 && fake.hotkeyRegisters == 0 && fake.sessionRegisters == 0,
@@ -2431,7 +2432,7 @@ void BuildInfoEscapingAndBounds() {
         "identity fields preserve valid Unicode and escape quotes, slashes, and controls");
     Reset();
     const std::string maximum(254, 'x');
-    Check(WriteBuildInfo(maximum, maximum, maximum) == 0 && fake.stdoutText.size() < 1024 && fake.stdoutText.ends_with("}\n"),
+    Check(WriteBuildInfo(maximum, maximum, maximum) == 0 && fake.stdoutText.size() < BuildMetadataJsonBufferSize && fake.stdoutText.ends_with("}}\n"),
         "three largest accepted encoded identity fields still produce a complete record");
     for (const auto& invalid : {std::string{}, std::string(255, 'x'), std::string(43, '\n'), std::string("\xff")}) {
         for (unsigned field = 0; field < 3; ++field) {
@@ -2442,7 +2443,7 @@ void BuildInfoEscapingAndBounds() {
     }
 }
 void BuildInfoNoCppAllocation() {
-    fake.stdoutText.reserve(1024); // The fake sink must not consume the allocation fault.
+    fake.stdoutText.reserve(BuildMetadataJsonBufferSize); // The fake sink must not consume the allocation fault.
     int result = 1;
     bool allocationUnused = false;
     {
@@ -2459,6 +2460,70 @@ void BuildInfoOutputFailures() {
     Check(WriteBuildInfo("v", "r", "s") == 1 && fake.stdoutText.size() == 5, "interrupted output reports failure and leaves only the failed prefix");
     Reset(); fake.stdoutValid = false; fake.consoleAttach = false;
     Check(WriteBuildInfo("v", "r", "s") == 1 && fake.stdoutText.empty(), "no inherited output or parent console is a noninteractive failure");
+}
+void BuildInfoSupportedSchemasMatchParser() {
+    Check(WriteBuildInfo("v", "r", "s") == 0 && fake.stdoutText.find("\"profile_input_schemas\":[1,2,3]") != std::string::npos,
+        "accepted input schemas are exposed as an ordered JSON number array");
+    unsigned previous = 0;
+    for (const auto schema : PreferencesInputSchemas) {
+        Check(schema > previous && DefaultsForProfileSchema(schema).has_value(), "advertised schemas are unique, ordered, and have defined historical defaults");
+        previous = schema;
+    }
+    Check(previous == PreferencesProfileVersion, "the current canonical schema is accepted as an input schema");
+    for (unsigned schema = 0; schema <= 255; ++schema) {
+        std::string profile = "[RedLightProfile]\nversion=" + std::to_string(schema) + "\nmode=luma\nluma=classic\nbackend=auto\nsession_minutes=0\n";
+        if (schema >= 2) profile += "hotkeys=default\n";
+        if (schema >= 3) profile += "expiry_warning=off\n";
+        const bool advertised = std::find(PreferencesInputSchemas.begin(), PreferencesInputSchemas.end(), schema) != PreferencesInputSchemas.end();
+        const auto parsed = ParsePreferences(profile);
+        Check(parsed.preferences.has_value() == advertised && (!advertised || parsed.inputSchema == schema),
+            "advertised schemas agree with actual parser acceptance, not only the canonical export version");
+    }
+    Check(fake.registryReads == 0 && fake.profileOpens == 0 && fake.statusSends == 0 && fake.metricReads == 0,
+        "capability generation and schema checks need no native file/storage/tray/context work");
+}
+void BuildInfoProfileAndSessionLimitsAgree() {
+    Check(WriteBuildInfo("v", "r", "s") == 0 && fake.stdoutText.find("\"limits\":{\"profile_bytes\":4096,\"session_minutes\":240}") != std::string::npos,
+        "profile bytes and maximum whole minutes are JSON numbers from production limits");
+    const AppPreferences maximum{RedMode::LumaRed, LumaProfile::Classic, BackendPreference::Automatic, SessionTimer::maxMinutes};
+    auto profile = *SerializePreferences(maximum);
+    profile.append(PreferencesProfileMaxBytes - profile.size(), '#');
+    Check(profile.size() == PreferencesProfileMaxBytes && ParsePreferences(profile).preferences == maximum,
+        "the advertised byte limit includes comments and accepts an exact-bound complete profile");
+    fake.registry[L"SettingsProfile"] = {REG_BINARY, std::vector<char>(profile.begin(), profile.end())};
+    Check(LoadPreferences().preferences == maximum, "saved-record reads use the same exact input bound");
+    fake.profileData = profile; fake.stdoutText.clear();
+    Check(ValidateSettingsProfileFile(L"synthetic.profile") == 0, "offline validation accepts the advertised exact byte limit");
+    profile.push_back('#'); fake.profileData = profile; fake.profilePosition = 0; fake.stdoutText.clear();
+    Check(!ParsePreferences(profile).preferences && ValidateSettingsProfileFile(L"synthetic.profile") == 4,
+        "the file reader's extra byte detects input beyond the advertised parser bound");
+    fake.registry[L"SettingsProfile"] = {REG_BINARY, std::vector<char>(profile.begin(), profile.end())};
+    const auto loaded = LoadPreferences();
+    SessionTimer timer;
+    Check(loaded.warning && loaded.source == PreferenceSource::Defaults && fake.registryWrites == 0 &&
+        timer.configure(SessionTimer::maxMinutes, 0, false) && !timer.configure(SessionTimer::maxMinutes + 1, 0, false) &&
+        timer.minutes() == SessionTimer::maxMinutes, "oversized storage is refused without migration and session maximum agrees with controller validation");
+}
+void BuildInfoCapabilitiesPreserveRecovery() {
+    GammaRampFilter filter;
+    Check(filter.initialize(), "initialize gamma for build capability isolation");
+    fake.writes = {Write::FailAfterApply, Write::Fail};
+    Check(!filter.enable() && filter.needsRestore(), "retain failed rollback calibration");
+    const auto statistics = filter.statistics(); const auto clocks = fake.backendClockReads;
+    const auto reads = fake.gammaReads, writes = fake.gammaWrites, releases = fake.mutexReleases;
+    const auto error = std::string(filter.lastError());
+    fake.registryRead = false; fake.stdoutText.reserve(BuildMetadataJsonBufferSize);
+    bool unused = false; int result = 1;
+    {
+        TestMemory::FailNextAllocation fail;
+        result = WriteBuildInfo("v", "r", "s"); unused = TestMemory::AllocationFailurePending();
+    }
+    Check(result == 0 && unused && fake.stdoutText.find("\"current_settings_protocol\":1") != std::string::npos &&
+        filter.needsRestore() && !filter.isActive() && fake.mutexOwned && filter.statistics() == statistics && error == filter.lastError() &&
+        fake.gammaReads == reads && fake.gammaWrites == writes && fake.mutexReleases == releases && fake.backendClockReads == clocks &&
+        fake.registryReads == 0 && fake.registryWrites == 0 && fake.profileOpens == 0 && fake.instanceCreates == 0 && fake.statusSends == 0 &&
+        fake.metricReads == 0 && fake.clipOpens == 0, "complete capability discovery is allocation-free and cannot inspect or disturb pending display recovery");
+    Check(filter.disable(), "original gamma calibration remains recoverable after build capability discovery");
 }
 void BuildInfoArguments() {
     const std::wstring_view args[] = {L"--build-info"};
@@ -5196,6 +5261,8 @@ int main() {
         {"Single-allocation preference serialization", PreferenceSerializationSingleAllocation},
         {"Build metadata JSON and isolation", BuildInfoJsonAndIsolation}, {"Build metadata escaping and bounds", BuildInfoEscapingAndBounds},
         {"Build metadata without C++ allocation", BuildInfoNoCppAllocation}, {"Build metadata output failures", BuildInfoOutputFailures},
+        {"Build metadata accepted schemas match parser", BuildInfoSupportedSchemasMatchParser}, {"Build metadata shared profile/session limits", BuildInfoProfileAndSessionLimitsAgree},
+        {"Build metadata capabilities preserve recovery", BuildInfoCapabilitiesPreserveRecovery},
         {"Build metadata arguments", BuildInfoArguments},
         {"Verification timing outcomes and precision", VerificationTimingStatesAndPrecision}, {"Verification timing wrap/invalidation", VerificationTimingWrapAndInvalidation},
         {"Verification repeated selections retain attention", VerificationRepeatedSelectionsRetainAttention}, {"Verification Strict preferred preset edits", VerificationStrictPresetEditsPreserveCheck},
