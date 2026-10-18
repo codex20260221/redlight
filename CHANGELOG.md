@@ -81,6 +81,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Support Unicode diagnostics paths and report log-write failures to the debugger.
 
 ### Fixed
+- Require one canonical portable ZIP root, reject Windows path aliases and file/directory collisions before reading entries, validate directory contents, and require every current documentation file with exact source spelling/hash; add synthetic package-path policy checks without extraction or app execution.
 - Avoid stale Win32 error codes in both read-only tray-query diagnostics by clearing last-error before bounded sends, distinguishing generic failures, and capturing native errors before logging without changing JSON or exit contracts.
 - Require the PE executable-image flag and reject DLL-marked release artifacts, with static negative metadata fixtures that preserve the source binary and never execute inspected images.
 - Keep cached diagnostic file paths in bounded trivially destructible storage for late backend cleanup logging, validate every complete filename before cache mutation, preserve original paths through failed-close recovery, and report oversized cache inputs without truncation.

@@ -23,6 +23,12 @@ jobs:
       - name: Test static import parser and policies
         shell: pwsh
         run: ./tools/Test-BinaryImports.ps1
+      - name: Test portable package path policy
+        shell: pwsh
+        run: ./tools/Test-PackagePaths.ps1
+      - name: Test static portable archive verification
+        shell: pwsh
+        run: ./tools/Test-PackageLayout.ps1
       - name: Verify tests cannot access display APIs
         shell: pwsh
         run: ./tools/Test-CodeOnlyBinary.ps1

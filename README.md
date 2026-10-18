@@ -330,6 +330,8 @@ These commands do not start RedLight or the manual display probe:
 
 ```powershell
 ./tools/Test-BinaryImports.ps1
+./tools/Test-PackagePaths.ps1
+./tools/Test-PackageLayout.ps1
 ./tools/Test-CodeOnlyBinary.ps1
 ctest --test-dir build -C Release --output-on-failure
 ./tools/Verify-Release.ps1
@@ -345,6 +347,8 @@ The code-test targets compile production backends and supporting helpers against
 Static import verification cross-checks DUMPBIN's dependency list against its [ordinary and delay-loaded import tables](https://learn.microsoft.com/en-us/cpp/build/reference/imports-dumpbin?view=msvc-170). Missing/mismatched/unrecognized output fails verification. Dependency names keep their complete spelling, including nonstandard names, before policy checks. Code-test policy permits only KERNEL32.dll. Release policy separately permits KERNEL32, USER32, GDI32, SHELL32, MAGNIFICATION, WTSAPI32, and ADVAPI32 DLLs; unexpected runtime/private libraries require review. These checks inspect file data, cover declared imports, and make no claim about runtime module loading or API/hardware compatibility. Test-BinaryImports runs 21 synthetic parser/policy code scenarios without invoking an inspected image; it also runs in CI. Native DUMPBIN discovery waits for complete output before checking its exit code.
 
 Release verification also requires the PE executable-image flag and a clear DLL flag. Test-ReleaseImageKind changes those bits in isolated temporary data copies, requires the specific metadata rejection, verifies the original binary's SHA-256 stays unchanged, and deletes its fixture files. It never runs the source or modified image. These two static regressions complement the positive release check.
+
+Portable ZIP verification requires one expected root, exact source filenames, every current documentation file, matching lengths/hashes, empty known directories, and a bounded executable-checksum record. Shared path checks reject traversal, backslashes, streams, reserved Windows names/characters, trailing-dot/space aliases, case-insensitive duplicates, and file/directory collisions before opening entries. The policy follows [Windows naming rules](https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file). Test-PackagePaths runs 19 synthetic name scenarios; Test-PackageLayout runs 14 real-checker regressions with synthetic executable bytes and temporary ZIP data. Both support PowerShell 7 and Windows PowerShell 5.1, run in CI, and never extract archives or execute images. These checks qualify package structure/content against local sources.
 
 The ZIP includes the executable, SHA-256 checksum, license, README, changelog, and documentation. Verify a downloaded executable with `Get-FileHash .\RedLight.exe -Algorithm SHA256` against its published checksum. SHA-256 identifies the file; it does not establish publisher trust.
 
