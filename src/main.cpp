@@ -1172,7 +1172,8 @@ void ShowTrayMenu(HWND hwnd) {
         !g_busy && !g_preferencesApplying && CanChangeSessionLimit(g_sessionTimer, now, *g_displayFilter, g_verification.result().state, g_pendingRestore),
         !g_busy && !g_preferencesApplying && CanRestartCountdown(g_sessionTimer, now, *g_displayFilter, g_verification.result().state, g_pendingRestore),
         !g_busy && !g_preferencesApplying && g_restorationHistory.inProgress() == 0,
-        g_displayFilter->isActive(), g_pendingRestore, !g_busy && !g_preferencesApplying};
+        g_displayFilter->isActive(), g_pendingRestore, !g_busy && !g_preferencesApplying,
+        !g_busy && !g_preferencesApplying};
     HMENU menu = BuildTrayMenu(state);
     if (!menu) { ReportError("Could not build the tray menu."); return; }
     if (!SetForegroundWindow(hwnd)) Diagnostics::Log("SetForegroundWindow failed for tray menu.");
@@ -1302,6 +1303,11 @@ LRESULT HandleWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 Diagnostics::Log("Recent in-memory diagnostics copied at user request.");
                 ShowTrayInfo("RedLight recent diagnostics copied", "Paste these retained records into a text editor. File logging may contain more history.");
             }
+            break;
+        case ID_TRAY_CLEAR_RECENT_DIAGNOSTICS:
+            if (g_busy || g_preferencesApplying) break;
+            Diagnostics::ClearRecentLog();
+            ShowTrayInfo("RedLight diagnostic memory cleared", "Retained records were cleared. Log files and file-logging health stay unchanged.");
             break;
         case ID_TRAY_REFRESH_DISPLAY_CONTEXT:
             RefreshDisplayContext(DisplayContextReason::ManualRefresh);

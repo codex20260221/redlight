@@ -3513,7 +3513,7 @@ void ExpertDiagnosticsMenuLayoutAndOwnership() {
     const auto diagnostics = FakeMenuChild(expert, "Dia&gnostics");
     Check(expert && diagnostics && FakeMenuCommand(expert, ID_TRAY_SAVE_PREFERENCES) && FakeMenuCommand(expert, ID_TRAY_IMPORT_PROFILE),
         "expert choices and preference transfer remain distinct from the diagnostic submenu");
-    for (const auto id : {ID_TRAY_VERIFY_BACKEND, ID_TRAY_COPY_REPORT, ID_TRAY_COPY_STATUS_JSON, ID_TRAY_COPY_RECENT_DIAGNOSTICS, ID_TRAY_REFRESH_DISPLAY_CONTEXT, ID_TRAY_RETRY_LOGGING, ID_TRAY_RETRY_SESSION,
+    for (const auto id : {ID_TRAY_VERIFY_BACKEND, ID_TRAY_COPY_REPORT, ID_TRAY_COPY_STATUS_JSON, ID_TRAY_COPY_RECENT_DIAGNOSTICS, ID_TRAY_CLEAR_RECENT_DIAGNOSTICS, ID_TRAY_REFRESH_DISPLAY_CONTEXT, ID_TRAY_RETRY_LOGGING, ID_TRAY_RETRY_SESSION,
         ID_TRAY_RETRY_SHORTCUTS, ID_TRAY_RESET_BACKEND_COUNTS, ID_TRAY_CLEAR_RESTORATION_HISTORY})
         Check(FakeMenuCommand(diagnostics, id) && !FakeMenuCommand(expert, id), "all diagnostic/retry/bookkeeping actions are grouped exactly once");
     for (const auto& menu : fake.menus) Check(UniqueMenuAccelerators(*menu), "assigned keyboard accelerators remain unique within each submenu");
@@ -3527,16 +3527,19 @@ void ExpertDiagnosticsMenuStateFlags() {
     state.needsRestore = true; state.supportsLuma = false; state.mode = RedMode::StrictRed; state.luma = LumaProfile::EqualDetail;
     state.backendPreference = BackendPreference::Gamma; state.sessionMinutes = 17; state.shortcutProfile = ShortcutProfile::Disabled;
     state.preferencesUnsaved = true; state.canChangeSessionLimit = false; state.canRestartCountdown = false; state.canClearRestorationHistory = false;
+    state.canClearRecentDiagnostics = false;
     const auto root = BuildTrayMenu(state);
     Check(root, "construct mixed recovery/gamma/unsaved menu state");
     const auto luma = FakeMenuCommand(root, ID_TRAY_MODE_LUMA_RED, true);
     const auto preferred = FakeMenuCommand(root, ID_LUMA_PROFILE_BASE + 2, true);
     const auto clear = FakeMenuCommand(root, ID_TRAY_CLEAR_RESTORATION_HISTORY, true);
+    const auto clearRecent = FakeMenuCommand(root, ID_TRAY_CLEAR_RECENT_DIAGNOSTICS, true);
     const auto custom = FakeMenuCommand(root, ID_TRAY_CUSTOM_SESSION, true);
     const auto restart = FakeMenuCommand(root, ID_TRAY_RESTART_COUNTDOWN, true);
     const auto save = FakeMenuCommand(root, ID_TRAY_SAVE_PREFERENCES, true);
     Check(luma && (luma->flags & MF_GRAYED) && preferred && (preferred->flags & MF_CHECKED) && !(preferred->flags & MF_GRAYED) &&
-        clear && (clear->flags & MF_GRAYED) && custom && (custom->flags & MF_GRAYED) && (custom->flags & MF_CHECKED) && restart && (restart->flags & MF_GRAYED),
+        clear && (clear->flags & MF_GRAYED) && clearRecent && (clearRecent->flags & MF_GRAYED) &&
+        !CommandMayChangeFilter(ID_TRAY_CLEAR_RECENT_DIAGNOSTICS) && custom && (custom->flags & MF_GRAYED) && (custom->flags & MF_CHECKED) && restart && (restart->flags & MF_GRAYED),
         "recovery-disabled timing/history and gamma-preferred Luma choices retain accurate checked/enabled states");
     Check(save && save->label.find("Retry saving") != std::string::npos && FakeMenuCommand(root, ID_TRAY_TOGGLE)->label.find("Disabled") != std::string::npos,
         "unsaved preference retry and disabled shortcut captions remain visible");

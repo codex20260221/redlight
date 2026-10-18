@@ -23,6 +23,7 @@ inline const char* FileStateName(FileState state) {
 std::wstring LogDirectory();
 Status GetStatus() noexcept;
 std::optional<std::string> RecentLogText() noexcept;
+void ClearRecentLog() noexcept;
 bool RetryFileLogging() noexcept;
 void Initialize() noexcept;
 void Log(const char* message) noexcept;

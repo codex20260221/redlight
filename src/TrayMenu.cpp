@@ -75,7 +75,8 @@ HMENU BuildTrayMenu(const TrayMenuState& state) {
         !diagnostics.add(ID_TRAY_RETRY_SESSION, "Retry session rec&overy") ||
         !diagnostics.add(ID_TRAY_RETRY_SHORTCUTS, "Retry selected s&hortcuts") ||
         !diagnostics.add(ID_TRAY_RESET_BACKEND_COUNTS, "Reset backend cou&nters") ||
-        !diagnostics.add(ID_TRAY_CLEAR_RESTORATION_HISTORY, "Clear restoration histor&y", MF_STRING | (state.canClearRestorationHistory ? MF_ENABLED : MF_GRAYED))) return NULL;
+        !diagnostics.add(ID_TRAY_CLEAR_RESTORATION_HISTORY, "Clear restoration histor&y", MF_STRING | (state.canClearRestorationHistory ? MF_ENABLED : MF_GRAYED)) ||
+        !diagnostics.add(ID_TRAY_CLEAR_RECENT_DIAGNOSTICS, "Clear recent diagnostic &memory", MF_STRING | (state.canClearRecentDiagnostics ? MF_ENABLED : MF_GRAYED))) return NULL;
     if (!expert.child(shortcuts, "&Shortcut profile") || !expert.child(backend, "&Backend preference (next start)") ||
         !expert.child(diagnostics, "Dia&gnostics") ||
         !expert.add(0, NULL, MF_SEPARATOR) ||

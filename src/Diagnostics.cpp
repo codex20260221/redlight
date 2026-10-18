@@ -143,6 +143,7 @@ void WriteLine(const char* message, bool formatTruncated = false) noexcept {
 namespace Diagnostics {
 std::wstring LogDirectory() { return BuildLogDirectory(); }
 Status GetStatus() noexcept { Guard guard; return g_status; }
+void ClearRecentLog() noexcept { Guard guard; g_recent.clear(); }
 std::optional<std::string> RecentLogText() noexcept {
     try {
         // Allocate before taking the logger lock; snapshot construction does no I/O/logging.

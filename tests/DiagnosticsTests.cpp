@@ -229,6 +229,68 @@ void RecentLogConcurrentSnapshots() {
     Check(valid && text && count == 32 && text->find("Earlier records overwritten: 68") != std::string::npos &&
         Diagnostics::GetStatus().droppedLines == 0, "concurrent snapshots and writers remain complete, bounded, and synchronized");
 }
+void RecentLogClearPreservesFileAndHealth() {
+    Diagnostics::Initialize();
+    for (unsigned record = 0; record < 40; ++record) Diagnostics::LogFormat("before-clear-%u", record);
+    const auto bytes = fake.files.at(Path())->bytes;
+    const auto status = Diagnostics::GetStatus();
+    const auto writes = fake.writes;
+    const auto debug = fake.lastDebug;
+    bool unused = false;
+    {
+        TestMemory::FailNextAllocation fail;
+        Diagnostics::ClearRecentLog();
+        unused = TestMemory::AllocationFailurePending();
+    }
+    const auto text = Diagnostics::RecentLogText();
+    const auto after = Diagnostics::GetStatus();
+    Check(unused && text && text->find("Retained records: 0/32") != std::string::npos &&
+        text->find("Earlier records overwritten: 0") != std::string::npos && text->find("before-clear-") == std::string::npos &&
+        fake.files.at(Path())->bytes == bytes && fake.writes == writes && fake.lastDebug == debug &&
+        after.file == status.file && after.droppedLines == status.droppedLines && after.truncatedLines == status.truncatedLines && after.lastFileError == status.lastFileError,
+        "clearing visible memory history allocates nothing and leaves file bytes, debugger output, and file-health history unchanged");
+    Diagnostics::Log("after-clear");
+    const auto fresh = Diagnostics::RecentLogText();
+    Check(fresh && fresh->find("Retained records: 1/32") != std::string::npos && fresh->find("Earlier records overwritten: 0") != std::string::npos &&
+        fresh->find("after-clear") != std::string::npos && fresh->find("before-clear-") == std::string::npos && fake.writes == writes + 1,
+        "later records begin a fresh memory history while ordinary file logging continues");
+}
+void RecentLogClearPreservesUnavailableStorage() {
+    fake.failOpen = true;
+    Diagnostics::Initialize(); Diagnostics::Log("old unavailable record");
+    const auto before = Diagnostics::GetStatus();
+    Diagnostics::ClearRecentLog();
+    const auto after = Diagnostics::GetStatus();
+    Check(after.file == Diagnostics::FileState::Unavailable && after.file == before.file &&
+        after.droppedLines == before.droppedLines && after.lastFileError == before.lastFileError && fake.files.empty() && fake.writes == 0 &&
+        Diagnostics::RecentLogText()->find("old unavailable record") == std::string::npos,
+        "memory clear neither hides disk failures nor attempts file creation/recovery");
+    fake.failOpen = false;
+    Check(Diagnostics::RetryFileLogging() && Diagnostics::GetStatus().droppedLines == before.droppedLines &&
+        Diagnostics::RecentLogText()->find("old unavailable record") == std::string::npos &&
+        Diagnostics::RecentLogText()->find("File logging retry requested") != std::string::npos,
+        "later file recovery preserves health history and cannot reintroduce cleared records");
+}
+void RecentLogConcurrentClearAndSnapshots() {
+    Diagnostics::Initialize();
+    std::vector<std::thread> workers;
+    for (unsigned worker = 0; worker < 2; ++worker) workers.emplace_back([worker] {
+        for (unsigned record = 0; record < 50; ++record) Diagnostics::LogFormat("clear-worker=%u record=%u", worker, record);
+    });
+    bool valid = true;
+    for (unsigned sample = 0; sample < 50; ++sample) {
+        Diagnostics::ClearRecentLog();
+        const auto text = Diagnostics::RecentLogText();
+        valid = text && text->starts_with("RedLight recent diagnostics\r\n") && IsValidUtf8(*text) && valid;
+    }
+    for (auto& worker : workers) worker.join();
+    const auto& bytes = fake.files.at(Path())->bytes;
+    Diagnostics::ClearRecentLog();
+    const auto final = Diagnostics::RecentLogText();
+    Check(valid && final && final->find("Retained records: 0/32") != std::string::npos &&
+        final->find("Earlier records overwritten: 0") != std::string::npos && std::count(bytes.begin(), bytes.end(), '\n') == 100 &&
+        Diagnostics::GetStatus().droppedLines == 0, "concurrent clear/snapshot/write operations remain synchronized and never remove file records");
+}
 Handle* OpenHandle(HANDLE raw) {
     if (!raw || raw == INVALID_HANDLE_VALUE) { lastError = ERROR_INVALID_HANDLE; return nullptr; }
     auto* handle = static_cast<Handle*>(raw);
@@ -302,7 +364,9 @@ int main() {
         {"File logging retry", RetryFileLogging}, {"Concurrent complete records", ConcurrentRecords},
         {"Recent logs with unavailable storage", RecentLogRetainsUnavailableRecords}, {"Recent log lifecycle/order", RecentLogLifecycleAndOrder},
         {"Recent log truncation/Unicode", RecentLogTruncationAndUnicode}, {"Recent log allocation failure", RecentLogPreparationFailure},
-        {"Recent log concurrent snapshots", RecentLogConcurrentSnapshots}
+        {"Recent log concurrent snapshots", RecentLogConcurrentSnapshots},
+        {"Recent log clear preserves file/health", RecentLogClearPreservesFileAndHealth}, {"Recent log clear with unavailable storage", RecentLogClearPreservesUnavailableStorage},
+        {"Recent log concurrent clear/snapshots", RecentLogConcurrentClearAndSnapshots}
     };
     int failures = 0;
     for (const auto& [name, run] : tests) {

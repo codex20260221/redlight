@@ -20,6 +20,7 @@ struct TrayMenuState {
     bool canChangeSessionLimit, canRestartCountdown;
     bool canClearRestorationHistory = true;
     bool backendActive = false, restoreRequested = false, canToggle = true;
+    bool canClearRecentDiagnostics = true;
 };
 // Ownership of the returned root menu transfers to the caller.
 HMENU BuildTrayMenu(const TrayMenuState& state);
