@@ -4,6 +4,7 @@
 #include <vector>
 #include "CommandLine.h"
 #include "Version.h"
+#include "SessionTimer.h"
 #include <cstdio>
 
 #include "Diagnostics.h"
@@ -23,6 +24,8 @@
 #define ID_HOTKEY_TOGGLE 1
 #define ID_HOTKEY_RESTORE 2
 #define ID_TRAY_RETRY_TIMER 1
+#define ID_SESSION_TIMER 2
+#define ID_SESSION_LIMIT_BASE 1000
 
 namespace {
 
@@ -38,11 +41,18 @@ bool g_toggleHotkey = false;
 bool g_restoreHotkey = false;
 bool g_busy = false;
 bool g_pendingRestore = false;
+SessionTimer g_sessionTimer;
+bool g_sessionTimerInstalled = false;
+bool g_autoRestoreFailureNotified = false;
 
 }
 
 StartupAction GetStartupAction();
-bool RestoreFilter(bool showError);
+bool RestoreFilter(bool showError, bool notifyFailure = true);
+void StopSessionTimer();
+bool StartSessionTimer();
+void SetSessionLimit(unsigned minutes);
+void OnSessionTimer();
 void CloseInstanceMutex(HANDLE handle);
 void PostTrayCommand(HWND hwnd, UINT command);
 void DestroyTrayWindow(HWND hwnd);
@@ -131,6 +141,15 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
 
     Diagnostics::LogFormat("Monitor count: %d", GetSystemMetrics(SM_CMONITORS));
     LoadRedMode();
+    DWORD sessionMinutes = 0;
+    DWORD sessionSize = sizeof(sessionMinutes);
+    const LSTATUS sessionLoad = RegGetValueW(HKEY_CURRENT_USER, L"Software\\RedLight", L"SessionLimitMinutes",
+        RRF_RT_REG_DWORD, NULL, &sessionMinutes, &sessionSize);
+    if (sessionLoad == ERROR_SUCCESS && sessionMinutes <= SessionTimer::maxMinutes) {
+        g_sessionTimer.configure(sessionMinutes, 0, false);
+    } else if (sessionLoad != ERROR_FILE_NOT_FOUND) {
+        Diagnostics::LogFormat("Invalid/unavailable saved session limit (error %ld).", sessionLoad);
+    }
     if (!InitializeTrayIcon(hInstance)) {
         ReportError("The tray controls could not be created. RedLight will exit with the filter off.");
         g_displayFilter->shutdown();
@@ -151,7 +170,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
         ReportError("The Windows message loop failed. RedLight is attempting display restoration.");
     }
     const bool restored = g_displayFilter->shutdown();
-    if (IsWindow(nid.hWnd)) DestroyWindow(nid.hWnd);
+    if (IsWindow(nid.hWnd)) DestroyTrayWindow(nid.hWnd);
     Diagnostics::Log("RedLight exiting.");
     CloseInstanceMutex(hMutex);
     Diagnostics::Shutdown();
@@ -346,15 +365,18 @@ void ReportError(const char* message, bool modal) {
     }
 }
 
-bool RestoreFilter(bool showError) {
+bool RestoreFilter(bool showError, bool notifyFailure) {
     if (g_busy) { g_pendingRestore = true; return false; }
     g_pendingRestore = false;
     g_busy = true;
     const bool restored = !g_displayFilter->needsRestore() || g_displayFilter->disable();
     g_busy = false;
-    if (restored) g_pendingRestore = false;
+    if (restored) {
+        g_pendingRestore = false;
+        StopSessionTimer();
+    }
     RefreshTrayIconTip();
-    if (!restored) {
+    if (!restored && notifyFailure) {
         char message[768];
         sprintf_s(message, "Display restoration failed. RedLight has kept its recovery data.\n"
             "Use Restore display or Ctrl+Alt+Shift+R to retry.\n\n%s", g_displayFilter->lastError());
@@ -375,10 +397,16 @@ void UpdateTrayIconTip(const char* tip) {
 
 void RefreshTrayIconTip() {
     char tip[sizeof(nid.szTip)];
-    sprintf_s(tip, "RedLight %s - %s - %s",
+    char remaining[32] = {};
+    if (g_sessionTimer.armed()) {
+        const auto seconds = (g_sessionTimer.remainingMilliseconds(GetTickCount64()) + 999) / 1000;
+        sprintf_s(remaining, " - %llu:%02llu left",
+            static_cast<unsigned long long>(seconds / 60), static_cast<unsigned long long>(seconds % 60));
+    }
+    sprintf_s(tip, "RedLight %s - %s - %s%s",
         g_displayFilter->needsRestore() && g_displayFilter->lastError()[0] ? "RECOVERY NEEDED" :
         (g_displayFilter->isActive() ? "ON" : "off"),
-        g_displayFilter->name(), RedModeDisplayName(g_displayFilter->redMode()));
+        g_displayFilter->name(), RedModeDisplayName(g_displayFilter->redMode()), remaining);
     UpdateTrayIconTip(tip);
 }
 
@@ -394,16 +422,81 @@ void ToggleRedlight() {
         Diagnostics::LogFormat("Enable request: %s (%s)", g_displayFilter->name(), RedModeDisplayName(g_displayFilter->redMode()));
         g_busy = true;
         const bool enabled = g_displayFilter->enable();
+        char enableError[256] = {};
+        if (!enabled) strcpy_s(enableError, g_displayFilter->lastError());
         g_busy = false;
         if (g_pendingRestore) RestoreFilter(false);
+        if (enabled && g_displayFilter->isActive()) StartSessionTimer();
         if (!enabled) {
             char message[768];
-            sprintf_s(message, "The red filter could not be enabled.\n\n%s", g_displayFilter->lastError());
+            sprintf_s(message, "The red filter could not be enabled.\n\n%s", enableError);
             ReportError(message);
         }
         RefreshTrayIconTip();
     }
     g_busy = false;
+}
+
+void StopSessionTimer() {
+    g_sessionTimer.cancel();
+    g_autoRestoreFailureNotified = false;
+    if (g_sessionTimerInstalled) {
+        if (KillTimer(nid.hWnd, ID_SESSION_TIMER)) g_sessionTimerInstalled = false;
+        else Diagnostics::LogFormat("KillTimer(session) failed (error %lu).", GetLastError());
+    }
+}
+
+bool StartSessionTimer() {
+    g_sessionTimer.start(GetTickCount64());
+    g_autoRestoreFailureNotified = false;
+    if (!g_sessionTimer.armed()) return true;
+    if (!SetTimer(nid.hWnd, ID_SESSION_TIMER, 1000, NULL)) {
+        Diagnostics::LogFormat("SetTimer(session) failed (error %lu).", GetLastError());
+        g_sessionTimer.cancel();
+        const bool restored = RestoreFilter(false);
+        ReportError(restored ? "The auto-restore timer could not be started. The display was restored." :
+            "The auto-restore timer could not be started, and restoration needs attention. Use Restore display to retry.");
+        return false;
+    }
+    g_sessionTimerInstalled = true;
+    Diagnostics::LogFormat("Auto-restore armed for %u minutes.", g_sessionTimer.minutes());
+    return true;
+}
+
+void SetSessionLimit(unsigned minutes) {
+    if (g_busy || minutes > SessionTimer::maxMinutes) return;
+    const bool active = g_displayFilter->isActive();
+    const unsigned previous = g_sessionTimer.minutes();
+    StopSessionTimer();
+    if (!g_sessionTimer.configure(minutes, GetTickCount64(), false)) return;
+    if (active && !StartSessionTimer()) {
+        // The new limit was not armed. Retain the user's prior preference.
+        g_sessionTimer.configure(previous, GetTickCount64(), false);
+        RefreshTrayIconTip();
+        return;
+    }
+    const DWORD value = minutes;
+    const LSTATUS saved = RegSetKeyValueW(HKEY_CURRENT_USER, L"Software\\RedLight", L"SessionLimitMinutes",
+        REG_DWORD, &value, sizeof(value));
+    if (saved != ERROR_SUCCESS) {
+        Diagnostics::LogFormat("Saving session limit failed (error %ld).", saved);
+        ReportError("The session limit changed, but could not be saved for the next start.");
+    }
+    Diagnostics::LogFormat("Session limit changed to %u minutes (0 = unlimited).", minutes);
+    RefreshTrayIconTip();
+}
+
+void OnSessionTimer() {
+    if (!g_sessionTimer.armed()) { StopSessionTimer(); return; }
+    const auto now = GetTickCount64();
+    if (!g_busy && g_sessionTimer.restoreDue(now)) {
+        if (!g_autoRestoreFailureNotified) Diagnostics::Log("Session time limit reached; requesting display restoration.");
+        g_sessionTimer.noteRestoreAttempt(now);
+        const bool restored = RestoreFilter(false, !g_autoRestoreFailureNotified);
+        g_autoRestoreFailureNotified = !restored;
+    } else {
+        RefreshTrayIconTip();
+    }
 }
 
 void ScheduleTrayRecovery() {
@@ -557,6 +650,29 @@ void ShowTrayMenu(HWND hwnd) {
     }
     HMENU menu = CreatePopupMenu();
     if (!menu) { ReportError("Could not create the tray menu."); return; }
+    HMENU sessionMenu = CreatePopupMenu();
+    if (!sessionMenu) {
+        if (!DestroyMenu(menu)) Diagnostics::Log("DestroyMenu failed after submenu failure.");
+        ReportError("Could not create the session menu.");
+        return;
+    }
+    bool sessionBuilt = true;
+    for (const unsigned minutes : {0u, 15u, 30u, 60u, 120u, 240u}) {
+        char label[48];
+        if (minutes == 0) strcpy_s(label, "Unlimited");
+        else sprintf_s(label, "%u minutes", minutes);
+        sessionBuilt = sessionBuilt && AppendMenuA(sessionMenu,
+            MF_STRING | (g_sessionTimer.minutes() == minutes ? MF_CHECKED : MF_UNCHECKED),
+            ID_SESSION_LIMIT_BASE + minutes, label);
+    }
+    const bool sessionAttached = sessionBuilt && AppendMenuA(menu, MF_POPUP,
+        reinterpret_cast<UINT_PTR>(sessionMenu), "Auto-restore after");
+    if (!sessionAttached) {
+        if (!DestroyMenu(sessionMenu)) Diagnostics::Log("DestroyMenu(session) failed.");
+        if (!DestroyMenu(menu)) Diagnostics::Log("DestroyMenu failed after submenu failure.");
+        ReportError("Could not build the session menu.");
+        return;
+    }
     const UINT strictFlags = MF_STRING | (g_displayFilter->redMode() == RedMode::StrictRed ? MF_CHECKED : MF_UNCHECKED);
     const UINT lumaFlags = MF_STRING | (g_displayFilter->redMode() == RedMode::LumaRed ? MF_CHECKED : MF_UNCHECKED)
         | (g_displayFilter->supportsRedMode(RedMode::LumaRed) ? MF_ENABLED : MF_GRAYED);
@@ -593,6 +709,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
     }
     switch (uMsg) {
     case WM_TIMER:
+        if (wParam == ID_SESSION_TIMER) { OnSessionTimer(); return 0; }
         if (wParam == ID_TRAY_RETRY_TIMER && (g_trayAdded || AddTrayIcon())) {
             if (!KillTimer(hwnd, ID_TRAY_RETRY_TIMER)) Diagnostics::Log("Could not stop tray recovery timer.");
         }
@@ -612,6 +729,11 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         else if (wParam == ID_HOTKEY_RESTORE) RestoreFilter(true);
         return 0;
     case WM_COMMAND:
+        if (LOWORD(wParam) >= ID_SESSION_LIMIT_BASE &&
+            LOWORD(wParam) <= ID_SESSION_LIMIT_BASE + SessionTimer::maxMinutes) {
+            SetSessionLimit(LOWORD(wParam) - ID_SESSION_LIMIT_BASE);
+            return 0;
+        }
         switch (LOWORD(wParam)) {
         case ID_TRAY_TOGGLE: ToggleRedlight(); break;
         case ID_TRAY_RESTORE: RestoreFilter(true); break;
@@ -662,6 +784,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         if (RestoreFilter(true)) DestroyTrayWindow(hwnd);
         return 0;
     case WM_DESTROY:
+        StopSessionTimer();
         if (g_toggleHotkey && !UnregisterHotKey(hwnd, ID_HOTKEY_TOGGLE)) Diagnostics::Log("Unregister toggle hotkey failed.");
         if (g_restoreHotkey && !UnregisterHotKey(hwnd, ID_HOTKEY_RESTORE)) Diagnostics::Log("Unregister restore hotkey failed.");
         if (g_sessionNotifications && !WTSUnRegisterSessionNotification(hwnd)) Diagnostics::Log("Unregister session notifications failed.");

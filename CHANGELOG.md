@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Added optional saved auto-restore session limits (15–240 minutes), a tray countdown, and throttled recovery retries after an expired session. Sessions start only after a confirmed enable and never automatically re-enable the filter.
 - Added Ctrl+Alt+R toggle and Ctrl+Alt+Shift+R display restoration shortcuts, with availability shown in About.
 - Added a Restore display command, direct access to diagnostics, accessible tray activation, and saved red-mode selection.
 - Added isolated code tests for color transforms, command-line parsing, API failure handling, rollback, and restoration retries. Tests use fake display APIs and verify binary import isolation.

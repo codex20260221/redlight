@@ -3,6 +3,8 @@
 #include "MagnificationFilter.h"
 #include "GammaRampFilter.h"
 #include "CommandLine.h"
+#include "SessionTimer.h"
+#include <limits>
 #include <array>
 #include <cmath>
 #include <cstdio>
@@ -192,6 +194,38 @@ void GammaResourceFailures() {
     fake.release = true;
     Check(f.shutdown(), "release retry");
 }
+void SessionTimerBoundaries() {
+    SessionTimer timer;
+    timer.start(100);
+    Check(!timer.armed() && !timer.restoreDue(999999), "default unlimited session");
+    Check(timer.configure(15, 1000, false) && !timer.armed(), "configuration while off does not start session");
+    timer.start(5000);
+    Check(timer.remainingMilliseconds(5000) == 900000, "full limit starts on activation");
+    Check(!timer.restoreDue(904999) && timer.restoreDue(905000), "exact deadline");
+    Check(timer.remainingMilliseconds(99999999) == 0, "expired remaining time saturates");
+    Check(!timer.configure(241, 0, true) && timer.minutes() == 15 && timer.restoreDue(905000), "invalid limit does not alter deadline");
+}
+void SessionTimerRetryAndCancellation() {
+    SessionTimer timer;
+    Check(timer.configure(1, 0, true), "one minute session");
+    timer.noteRestoreAttempt(60000);
+    Check(!timer.restoreDue(64999) && timer.restoreDue(65000), "throttle failed restore retries");
+    timer.noteRestoreAttempt(65000);
+    Check(!timer.restoreDue(69999) && timer.restoreDue(70000), "subsequent retry throttled");
+    timer.cancel();
+    Check(!timer.armed() && !timer.restoreDue(999999), "manual/environment restoration cancels session");
+    timer.start(1000000);
+    Check(!timer.restoreDue(1000000) && timer.remainingMilliseconds(1000000) == 60000, "next activation resets deadline and retry state");
+    Check(timer.configure(0, 1001000, true) && !timer.armed(), "unlimited disables active time limit");
+}
+void SessionTimerChangesAndClockWrap() {
+    SessionTimer timer;
+    Check(timer.configure(15, 0, true) && timer.configure(30, 1000, true), "change active duration");
+    Check(timer.remainingMilliseconds(1000) == 1800000, "changing limit restarts countdown explicitly");
+    const auto nearWrap = (std::numeric_limits<std::uint64_t>::max)() - 30000;
+    Check(timer.configure(1, nearWrap, true), "clock near wrap");
+    Check(!timer.restoreDue(nearWrap + 59999) && timer.restoreDue(nearWrap + 60000), "deadline survives unsigned clock wrap");
+}
 void Arguments() {
     using S = StartupAction;
     Check(ParseArguments({}) == S::Tray, "no arguments");
@@ -247,6 +281,8 @@ int main() {
         {"Gamma low-byte leakage", GammaLowByteLeak}, {"Inactive shutdown", OffShutdownDoesNotWrite},
         {"Gamma partial-write recovery", GammaPartialFailureRecovery}, {"Gamma failed disable", GammaFailedDisable},
         {"Gamma read failures", GammaReadFailures}, {"Gamma resource failures", GammaResourceFailures},
+        {"Session timer boundaries", SessionTimerBoundaries},
+        {"Session timer retries", SessionTimerRetryAndCancellation}, {"Session timer clock", SessionTimerChangesAndClockWrap},
         {"Command line", Arguments}
     };
     int failed = 0;

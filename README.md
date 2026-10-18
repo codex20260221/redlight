@@ -11,6 +11,7 @@ RedLight is a lightweight Windows tray application that applies a red-only displ
 - Tray toggle and keyboard shortcuts; a separate Restore display command.
 - Visible errors, recovery retries, and diagnostics available from the tray menu.
 - Tray recovery after Explorer restarts.
+- Optional auto-restore session limits with a remaining-time countdown.
 - Restoration attempts on sleep/wake, lock/unlock, session disconnect, and display configuration changes. Re-enable manually afterward.
 - Native C++/Win32, with no installer or separate Visual C++ runtime required.
 
@@ -63,6 +64,8 @@ After starting RedLight, an icon appears in the system tray with the filter off.
 | Right-click or the keyboard context menu | Open the tray menu |
 
 The menu provides **Turn on / Turn off**, **Restore display**, **Strict Red**, **Luma Red**, **Open logs folder**, **About**, and **Exit**. About shows the backend, mode, filter status, and shortcut/session registration status. If another program has registered a shortcut, use the tray controls.
+
+**Auto-restore after** offers Unlimited (default), 15, 30, 60, 120, or 240 minutes. A successful activation starts the countdown; changing the limit during a session restarts it from that moment. The tray tooltip shows remaining time. When it expires, RedLight restores the display and retries failures every five seconds while retaining recovery data. Manual restoration or environment restoration cancels the countdown. The limit is saved; an active countdown is never saved or resumed across app starts. If Windows cannot create the timer, RedLight attempts restoration and reports the failure. This is a best-effort message-queue timer, so a busy or blocked process may restore later than the requested deadline.
 
 Mode selection is saved under `HKCU\Software\RedLight\RedMode`. An unavailable Luma Red preference is retained for a future Magnification session, while gamma fallback uses Strict Red. The enabled state is never saved. Exit first restores display state; if restoration fails, RedLight stays available for another attempt.
 

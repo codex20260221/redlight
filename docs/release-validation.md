@@ -52,10 +52,16 @@ Validation performed: Windows x64 build, isolated backend/command-line tests, st
 | Hotplug, resolution/orientation changes | Restoration attempted; filter stays off; next enable captures current state | Pending |
 | Unicode Windows profile / clean PC | Diagnostics folder opens, log rotation works, portable app needs no VC++ redistributable | Pending |
 
+## Expert-feature follow-up validation
+
+Auto-restore session limits: pure code tests cover disabled/default behavior, exact deadlines, invalid limits retaining prior state, clock wrap, cancellation, changing active limits, and five-second retry throttling. These run against supplied timestamps; no real timer wait or display operation is used. The earlier 17-scenario result above describes the RC checkpoint, not the growing follow-up suite.
+
+Manual notes (pending; not executed): choose each session limit while off/on, verify a confirmed enable starts the countdown, verify expiration restores on each backend, inject a restoration failure to check retry throttling and retained recovery data, cancel through manual restore/exit/power/session/display changes, and verify a failed Win32 timer registration attempts immediate restoration. Reconfirm red-only output on all monitors while a session is active. No automatic activation should occur.
+
 ## Known limitations and promotion gate
 
 Target Windows 10/11 x64 SDR desktop sessions first. HDR, remote sessions, secure desktop, exclusive full-screen applications, protected content, gamma multi-adapter coverage, and interaction with other color tools remain unqualified. Do not promise hardware blue-light elimination. Gamma read-back checks the driver-reported ramp and cannot measure panel output. See [Microsoft's documented gamma limitations](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/nf-wingdi-setdevicegammaramp).
 
 A standalone reset cannot reconstruct a lost gamma snapshot after a forced termination; it applies only an identity Magnification matrix. Normal exit is preferred. Code signing is not configured; builds remain unsigned.
 
-Before a stable release, complete the relevant manual matrix, resolve failures, review the diff and license/package contents, verify published checksums, and choose a signing/distribution policy. Tag workflows create a draft prerelease for human review. This preparation made no commits or pushes and published nothing.
+Before a stable release, complete the relevant manual matrix, resolve failures, review the diff and license/package contents, verify published checksums, and choose a signing/distribution policy. Tag workflows create a draft prerelease for human review. The initial RC preparation made no commits or pushes and published nothing. Follow-up expert-feature development is checkpointed only in local commits; nothing is pushed or published.
