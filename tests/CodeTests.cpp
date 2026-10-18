@@ -25,6 +25,7 @@
 #include "ProfileSave.h"
 #include "SavedSettings.h"
 #include "CommandHelp.h"
+#include "LoopShutdown.h"
 #include "InstanceName.h"
 #include "JsonString.h"
 #include "BackendComparison.h"
@@ -60,6 +61,8 @@ struct Fake {
     DWORD lastError = 123;
     std::uint64_t monotonicNow = 0, magReadMilliseconds = 0, magWriteMilliseconds = 0, gammaReadMilliseconds = 0, gammaWriteMilliseconds = 0;
     unsigned backendClockReads = 0;
+    bool* shutdownBusyFlag = nullptr;
+    bool shutdownWriteObservedBusy = false;
     int metricMonitors = 1, metricWidth = 1920, metricHeight = 1080, metricRemote = 0;
     unsigned metricReads = 0, unknownMetrics = 0;
     bool clipAllocate = true, clipLock = true, clipOpen = true, clipEmpty = true, clipSet = true, clipClose = true;
@@ -3138,6 +3141,76 @@ void CommandHelpStandaloneArgumentPolicy() {
     Check(GetStartupOptions().action == StartupAction::HelpText && !fake.argumentsOutstanding && fake.argumentFrees == 1,
         "native text-help argv ownership is released");
 }
+void LoopShutdownFailureResumesControlsAndPreservesSnapshot() {
+    bool busy = false;
+    MagnificationFilter filter;
+    Check(filter.initialize(), "initialize quit recovery test");
+    fake.effect.transform[0][0] = 0.31f;
+    const auto original = fake.effect;
+    Check(filter.enable(), "activate before unexpected quit");
+    fake.magSet = false; fake.shutdownBusyFlag = &busy;
+    bool checkedControlsAfterBusy = false;
+    const auto failed = TryLoopShutdown(filter, 0, busy, [&] { checkedControlsAfterBusy = !busy; return true; });
+    Check(failed == LoopShutdownDisposition::ResumeControls && !busy && checkedControlsAfterBusy && fake.shutdownWriteObservedBusy &&
+        filter.isActive() && filter.needsRestore() && fake.uninitializes == 0, "ordinary quit with live controls retains failed restoration and checks controls after guarded shutdown unwinds");
+    fake.magSet = true;
+    Check(TryLoopShutdown(filter, 0, busy, [] { return true; }) == LoopShutdownDisposition::ExitSuccess && !filter.needsRestore() &&
+        !filter.isActive() && Same(fake.effect, original), "a later exit retry can restore the original snapshot and finish shutdown");
+    fake.shutdownBusyFlag = nullptr;
+}
+void LoopShutdownCleanupFailureKeepsOffControlsAvailable() {
+    bool busy = false;
+    MagnificationFilter filter;
+    Check(filter.initialize(), "initialize off-backend cleanup retry");
+    fake.magUninit = false;
+    Check(TryLoopShutdown(filter, 0, busy, [] { return true; }) == LoopShutdownDisposition::ResumeControls && !filter.isActive() && !filter.needsRestore() &&
+        fake.magWrites == 0 && fake.uninitializes == 1 && !busy, "native cleanup failure can preserve live controls while the display remains off");
+    fake.magUninit = true;
+    Check(TryLoopShutdown(filter, 0, busy, [] { return true; }) == LoopShutdownDisposition::ExitSuccess && fake.magWrites == 0 && fake.uninitializes == 2,
+        "cleanup-only retry never introduces a color write");
+}
+void LoopShutdownFatalAndMissingControlPathsStayFailures() {
+    for (const int messageResult : {0, -1}) {
+        Reset(); bool busy = false;
+        MagnificationFilter filter;
+        Check(filter.initialize() && filter.enable(), "prepare unsuccessful fatal/missing-controls shutdown");
+        fake.magSet = false;
+        Check(TryLoopShutdown(filter, messageResult, busy, [] { return false; }) == LoopShutdownDisposition::ExitFailure && !busy &&
+            filter.needsRestore() && fake.uninitializes == 0, "missing controls or a native queue error cannot be reported as successful shutdown");
+        fake.magSet = true;
+        Check(filter.shutdown(), "release fake resources after failed-path assertion");
+    }
+    Reset(); bool busy = false;
+    MagnificationFilter filter;
+    Check(filter.initialize() && filter.enable(), "prepare successful restoration after native queue error");
+    bool queriedControls = false;
+    Check(TryLoopShutdown(filter, -1, busy, [&] { queriedControls = true; return true; }) == LoopShutdownDisposition::ExitFailure &&
+        !queriedControls && !filter.needsRestore() && !filter.isActive(), "a native message-loop error keeps a failure exit even after successful restoration and never starts a repeated failure pump");
+}
+void LoopShutdownDefersOuterBusyOperation() {
+    bool busy = true;
+    MagnificationFilter filter;
+    Check(filter.initialize() && filter.enable(), "active backend under an outer busy scope");
+    const auto statistics = filter.statistics();
+    const auto writes = fake.magWrites, reads = fake.magReads;
+    Check(TryLoopShutdown(filter, 0, busy, [] { return true; }) == LoopShutdownDisposition::ResumeControls && busy &&
+        filter.statistics() == statistics && filter.isActive() && filter.needsRestore() && fake.magReads == reads && fake.magWrites == writes,
+        "quit cannot shut down a backend over an outer in-progress operation or clear its busy ownership");
+    busy = false;
+    Check(TryLoopShutdown(filter, 0, busy, [] { return true; }) == LoopShutdownDisposition::ExitSuccess, "shutdown retries after the outer scope releases");
+}
+void LoopShutdownGammaCleanupRetryPreservesOwnership() {
+    bool busy = false;
+    GammaRampFilter filter;
+    Check(filter.initialize() && filter.enable(), "active gamma ownership before quit cleanup failure");
+    fake.mutexRelease = false;
+    Check(TryLoopShutdown(filter, 0, busy, [] { return true; }) == LoopShutdownDisposition::ResumeControls && !filter.isActive() && filter.needsRestore() &&
+        fake.mutexOwned && fake.mutexOpen && fake.releases == 1, "quit with failed global-owner release retains resources/controls after display restoration");
+    const auto writes = fake.gammaWrites;
+    fake.mutexRelease = true;
+    Check(TryLoopShutdown(filter, 0, busy, [] { return true; }) == LoopShutdownDisposition::ExitSuccess && !filter.needsRestore() &&
+        !fake.mutexOwned && !fake.mutexOpen && fake.gammaWrites == writes, "cleanup-only quit retry releases ownership without rewriting already restored calibration");
+}
 } // namespace
 
 DWORD GetLastError() { return fake.lastError; }
@@ -3321,6 +3394,7 @@ BOOL MagGetFullscreenColorEffect(MAGCOLOREFFECT* effect) {
 BOOL MagSetFullscreenColorEffect(MAGCOLOREFFECT* effect) {
     fake.monotonicNow += fake.magWriteMilliseconds;
     ++fake.magWrites;
+    if (fake.shutdownBusyFlag) fake.shutdownWriteObservedBusy = *fake.shutdownBusyFlag;
     auto result = fake.magSet ? Write::Apply : Write::Fail;
     if (!fake.magWriteResults.empty()) { result = fake.magWriteResults.front(); fake.magWriteResults.pop_front(); }
     if (result == Write::Fail) { fake.lastError = ERROR_ACCESS_DENIED; return 0; }
@@ -3516,6 +3590,9 @@ int main() {
         {"Shared command help output/isolation", CommandHelpCompleteOutputAndIsolation}, {"Command help buffer bounds/termination", CommandHelpBoundsAndNativeTermination},
         {"Command help malformed version rejection", CommandHelpRejectsMalformedVersionBeforeOutput}, {"Command help output failure", CommandHelpOutputFailures},
         {"Command help without C++ allocation", CommandHelpNoCppAllocation}, {"Command help standalone arguments", CommandHelpStandaloneArgumentPolicy},
+        {"Quit failure resumes controls/snapshot", LoopShutdownFailureResumesControlsAndPreservesSnapshot}, {"Quit cleanup-only failure/retry", LoopShutdownCleanupFailureKeepsOffControlsAvailable},
+        {"Quit fatal/missing-control failure paths", LoopShutdownFatalAndMissingControlPathsStayFailures}, {"Quit respects outer busy ownership", LoopShutdownDefersOuterBusyOperation},
+        {"Quit gamma cleanup ownership retry", LoopShutdownGammaCleanupRetryPreservesOwnership},
         {"Command line", Arguments}
     };
     int failed = 0;

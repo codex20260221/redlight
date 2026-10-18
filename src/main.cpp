@@ -21,6 +21,7 @@
 #include "DisplayContext.h"
 #include "SavedSettings.h"
 #include "CommandHelp.h"
+#include "LoopShutdown.h"
 #include "CommandIds.h"
 #include "TrayMenu.h"
 #include "SessionLimitDialog.h"
@@ -268,21 +269,32 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
     }
 
     MSG msg = {};
-    int messageResult = 0;
-    while ((messageResult = GetMessageA(&msg, NULL, 0, 0)) > 0) {
-        TranslateMessage(&msg);
-        DispatchMessageA(&msg);
+    for (;;) {
+        int messageResult = 0;
+        while ((messageResult = GetMessageA(&msg, NULL, 0, 0)) > 0) {
+            TranslateMessage(&msg);
+            DispatchMessageA(&msg);
+        }
+        if (messageResult == -1) {
+            Diagnostics::LogFormat("GetMessage failed (error %lu).", GetLastError());
+            ReportError("The Windows message loop failed. RedLight is attempting display restoration.");
+        }
+        if (!g_busy) g_verification = {};
+        const auto disposition = TryLoopShutdown(*g_displayFilter, messageResult, g_busy, [] { return IsWindow(nid.hWnd) != FALSE; });
+        if (disposition == LoopShutdownDisposition::ResumeControls) {
+            Diagnostics::Log("Quit interrupted by incomplete backend shutdown; retaining controls, instance guard, and recovery resources for retry.");
+            if (g_pendingRestore) RestoreFilter(RestoreReason::DeferredRequest, false);
+            if (!g_busy && !g_displayFilter->isActive() && !g_displayFilter->needsRestore()) StopSessionTimer();
+            RefreshTrayIconTip();
+            ReportError("The shutdown attempt could not complete. RedLight has kept its controls and recovery resources available. Use Restore display or retry Exit.");
+            continue;
+        }
+        if (IsWindow(nid.hWnd)) DestroyTrayWindow(nid.hWnd);
+        Diagnostics::Log("RedLight exiting.");
+        CloseInstanceMutex(hMutex);
+        Diagnostics::Shutdown();
+        return disposition == LoopShutdownDisposition::ExitSuccess ? 0 : 1;
     }
-    if (messageResult == -1) {
-        Diagnostics::LogFormat("GetMessage failed (error %lu).", GetLastError());
-        ReportError("The Windows message loop failed. RedLight is attempting display restoration.");
-    }
-    const bool restored = g_displayFilter->shutdown();
-    if (IsWindow(nid.hWnd)) DestroyTrayWindow(nid.hWnd);
-    Diagnostics::Log("RedLight exiting.");
-    CloseInstanceMutex(hMutex);
-    Diagnostics::Shutdown();
-    return messageResult == -1 || !restored ? 1 : 0;
 }
 
 void CloseInstanceMutex(HANDLE handle) {
