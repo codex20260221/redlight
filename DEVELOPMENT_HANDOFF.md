@@ -1,6 +1,12 @@
-# Paused development checkpoint — 2026-10-18
+# Issue-driven development checkpoint — 2026-10-18
 
-The user requested a stop at the next commit with no uncommitted work. The open-ended expert-feature goal is **paused, not complete**. Do not resume development until the user asks. The final runtime-code checkpoint is `f39c0aa` on `release/0.6.0-rc1`; this handoff commit adds documentation only. No feature implementation remains in progress.
+The user resumed development from `6cc97cb` with a new issue-driven objective, then **cleared the open-ended goal** while the first tray-visibility change was in progress. This checkpoint closes out that focused change on `release/0.6.0-rc1`; stop afterward and do not resume development until the user asks. No feature implementation remains in progress. The earlier Magnification audit remains complete.
+
+## New issue-driven direction
+
+Read the actual open GitHub issue descriptions and every available comment, then compared them with local code. [Issue roadmap](docs/issue-roadmap.md) records priorities, dependencies, and implemented-versus-missing status. Do not resume the old series of specialized diagnostics. Next user-facing priority, if resumed, is #1 adjustable red brightness, followed by #17 optional disabled-by-default startup. Transitions and scheduling require defined semantics first; per-monitor work remains isolated research only.
+
+Issue #27 is addressed locally with four bright monochrome tray symbols (off ring, Strict filled circle, Luma diamond, recovery/unconfirmed triangle), complete shared resource loading, cached state selection, fake-API regressions, and reproducible original pixel assets. Existing tray callbacks, identity, tooltip, menu/shortcuts, recovery priorities, and restore-before-retry behavior remain intact. Native Explorer/DPI/theme/filtered-display acceptance is pending. Brightness, startup, transitions, scheduling, and per-monitor implementations have not been started.
 
 ## Restrictions that persist on resume
 
@@ -39,16 +45,18 @@ The focused audit is committed as `4a1dd71`. The detailed state table, ownership
 | `26e1d99` | Validated UTC support capture stamps, independent of monotonic scheduling |
 | `f882ec1` | Cached startup self process/session IDs, without owner detection |
 | `f39c0aa` | Session-hook native failure history retained after retry/cleanup; stale-error exclusion |
+| This checkpoint | Issue #27 high-contrast tray symbols, fake resource/state regressions, and reviewed issue-driven roadmap |
 
 All commits are local. Each feature's evidence and unexecuted manual notes are recorded in [release validation](docs/release-validation.md#expert-feature-follow-up-validation).
 
 ## Verified checkpoint
 
 - Release and MSVC `/analyze` builds passed.
-- **396 isolated C++ scenarios passed** across two CTest targets: 373 core/fake-API and 23 fake-filesystem diagnostics scenarios.
+- **401 isolated C++ scenarios passed** across two CTest targets: 378 core/fake-API and 23 fake-filesystem diagnostics scenarios.
+- `tools/Test-TrayIcons.ps1` verifies four deterministic original monochrome resources at seven sizes, distinct shapes, transparency, bounded file layout, and Strict/Luma endpoint contrast. The off-screen asset contact sheet was inspected without launching RedLight.
 - Both test executables passed the KERNEL32-only import gate before execution. RedLight itself was never executed.
 - Static release checks passed: seven reviewed Windows DLLs, x64 GUI executable, ASLR/DEP, version/prerelease metadata, embedded `asInvoker` manifest, and SHA-256.
-- The portable ZIP contains 11 files matching the current binary/documentation. Release/package metadata is refreshed after documentation-only checkpoint commits as part of closeout.
+- The portable ZIP contains 12 files matching the current binary/documentation, including the new issue roadmap. Release/package metadata is refreshed after checkpoint commits as part of closeout.
 - Local artifact: `build/packages/RedLight-0.6.0-rc.1-windows-x64.zip`, with SHA-256 sidecars. Generated build artifacts are ignored by Git. This root handoff is internal and excluded by the existing package install rules.
 
 Use the existing build trees when resuming:
@@ -59,6 +67,7 @@ cmake --build build-analysis --config Release
 ./tools/Test-CodeOnlyBinary.ps1
 # Continue only if the import gate succeeds:
 ctest --test-dir build -C Release --output-on-failure
+./tools/Test-TrayIcons.ps1
 ./tools/Verify-Release.ps1
 cpack --config build/CPackConfig.cmake -C Release -B build/packages
 ./tools/Verify-Package.ps1
@@ -70,7 +79,7 @@ cpack --config build/CPackConfig.cmake -C Release -B build/packages
 
 Start with `git status --short` and this handoff. The worktree should be clean. There is no unfinished fix, active build, or required implementation follow-up from this checkpoint. Manual/native qualification remains unauthorized unless the user changes that restriction.
 
-Choose the next small expert improvement when the goal is resumed. One candidate discussed but **not started** is static backend-mode capability discovery in build-info, using authoritative shared declarations without constructing or initializing backends. Reassess its value before editing.
+Choose the next meaningful user-facing task from [issue roadmap](docs/issue-roadmap.md) if the user resumes development. Brightness is next; no changes for it are present. The old static backend-mode discovery candidate was not started and is superseded by the issue-driven priorities.
 
 Preserve these integration boundaries:
 

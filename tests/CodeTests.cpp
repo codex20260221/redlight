@@ -18,6 +18,8 @@
 #include "MemoryFault.h"
 #include "UiSafety.h"
 #include "TrayStatus.h"
+#include "TrayIcons.h"
+#include "resource.h"
 #include "StatusQuery.h"
 #include "PreferencesQuery.h"
 #include "StandardOutput.h"
@@ -65,6 +67,7 @@ enum class Write { Apply, Fail, Ignore, FailAfterApply, LowByteLeak, BlackLift, 
 struct FakeMenuItem { UINT flags; UINT_PTR value; std::string label; };
 struct FakeMenuData { bool alive = true; std::vector<FakeMenuItem> items; };
 struct RegistryValue { DWORD type; std::vector<char> bytes; };
+struct FakeIconRequest { HINSTANCE instance; unsigned resource, type; int width, height; unsigned flags; DWORD errorBefore; };
 struct Fake {
     bool magInit = true, magGet = true, magSet = true, magUninit = true;
     std::deque<Write> magWriteResults;
@@ -95,6 +98,10 @@ struct Fake {
     int metricMonitors = 1, metricWidth = 1920, metricHeight = 1080, metricRemote = 0;
     int metricLeft = 0, metricTop = 0;
     unsigned metricReads = 0, unknownMetrics = 0;
+    int metricIconWidth = 16, metricIconHeight = 16;
+    unsigned iconLoads = 0, iconFailAt = 0;
+    std::optional<DWORD> iconError = ERROR_ACCESS_DENIED;
+    std::array<FakeIconRequest, 8> iconRequests{};
     bool clipAllocate = true, clipLock = true, clipOpen = true, clipEmpty = true, clipSet = true, clipClose = true;
     bool clipConvert = true, clipSecondConvert = true;
     bool clipRead = true, clipWideConvert = true;
@@ -6086,6 +6093,94 @@ void TrayCommandFallbackExceptionRetainsRecoveryRequest() {
         RecoveryAfterUiFailure(false, pending, true) == UiFailureRecovery::Defer,
         "fallback exceptions propagate to the native callback guard with a retained request even for a tray notification");
 }
+void TraySymbolStatePriority() {
+    for (const auto mode : {RedMode::StrictRed, RedMode::LumaRed})
+        for (const auto verification : {BackendVerification::NotChecked, BackendVerification::Inactive, BackendVerification::Matches,
+            BackendVerification::Changed, BackendVerification::Unavailable})
+            for (const bool active : {false, true}) for (const bool pending : {false, true})
+                for (const bool error : {false, true}) for (const bool requested : {false, true}) {
+                    const auto symbol = SelectTraySymbol(active, pending, error, mode, verification, requested);
+                    const std::string_view text = FilterStatusDescription(active, pending, error, verification, requested);
+                    const auto expected = text == "off" ? TraySymbol::Off : text == "ON" ?
+                        (mode == RedMode::StrictRed ? TraySymbol::StrictRed : TraySymbol::LumaRed) : TraySymbol::Attention;
+                    Check(symbol == expected, "symbol has the same recovery/unconfirmed priority as the existing tooltip");
+                }
+}
+void TrayIconResourceLoadingAndCache() {
+    const auto instance = reinterpret_cast<HINSTANCE>(std::uintptr_t{0x1234});
+    TrayIcons icons;
+    Check(!icons.get(TraySymbol::Off) && !icons.get(TraySymbol::Attention) && !icons.get(static_cast<TraySymbol>(999)),
+        "uninitialized/invalid symbols never return an icon");
+    fake.metricIconWidth = 24; fake.metricIconHeight = 32;
+    bool loaded = false, cached = false, noAllocation = false;
+    { TestMemory::FailNextAllocation failure; loaded = icons.initialize(instance); cached = icons.initialize(instance); noAllocation = TestMemory::AllocationFailurePending(); }
+    Check(loaded && cached && noAllocation && fake.iconLoads == 4 && fake.metricReads == 2, "load shared resources once without C++ allocation");
+    constexpr unsigned ids[] = {IDI_TRAY_OFF, IDI_TRAY_STRICT, IDI_TRAY_LUMA, IDI_TRAY_ATTENTION};
+    for (unsigned index = 0; index < 4; ++index) {
+        const auto& request = fake.iconRequests[index];
+        Check(request.instance == instance && request.resource == ids[index] && request.type == IMAGE_ICON && request.width == 24 &&
+            request.height == 32 && request.flags == LR_SHARED && request.errorBefore == ERROR_SUCCESS,
+            "module ordinal, system small dimensions, shared embedded resource, and cleared error are exact");
+        Check(icons.get(static_cast<TraySymbol>(index)) == reinterpret_cast<HICON>(static_cast<std::uintptr_t>(ids[index])),
+            "each symbol uses its own cached resource handle");
+    }
+    Check(!icons.get(static_cast<TraySymbol>(-1)), "out-of-range cached lookup remains safe");
+}
+void TrayIconPartialLoadFailureAndRetry() {
+    const auto instance = reinterpret_cast<HINSTANCE>(std::uintptr_t{0x1234});
+    for (unsigned boundary = 1; boundary <= 4; ++boundary) for (const bool supplied : {false, true}) {
+        Reset(); TrayIcons icons; fake.iconFailAt = boundary;
+        fake.iconError = supplied ? std::optional<DWORD>(4321) : std::nullopt;
+        fake.lastError = 0xbad; fake.captureDiagnosticText = fake.diagnosticsClobbersError = true;
+        bool failed = false, noAllocation = false;
+        { TestMemory::FailNextAllocation failure; failed = !icons.initialize(instance); noAllocation = TestMemory::AllocationFailurePending(); }
+        Check(failed && noAllocation && fake.iconLoads == boundary && fake.iconRequests[boundary - 1].errorBefore == ERROR_SUCCESS &&
+            std::string_view(fake.diagnosticText.data()).find(supplied ? "error 4321" : "no native error code") != std::string_view::npos,
+            "each resource failure captures supplied/absent error before logging and leaves retry possible");
+        for (unsigned index = 0; index < 4; ++index) Check(!icons.get(static_cast<TraySymbol>(index)), "partial load never publishes a partial set");
+        fake.iconFailAt = 0;
+        Check(icons.initialize(instance) && icons.get(TraySymbol::Off) && icons.get(TraySymbol::Attention) && fake.iconLoads == boundary + 4,
+            "retry completes the full set; Windows owns previously shared partial handles");
+    }
+}
+void TrayIconInvalidModuleAndDimensions() {
+    TrayIcons icons;
+    Check(!icons.initialize(nullptr) && fake.iconLoads == 0 && fake.metricReads == 0, "null module never loads unrelated system icons");
+    const auto instance = reinterpret_cast<HINSTANCE>(std::uintptr_t{0x1234});
+    for (const int size : {0, -1}) {
+        fake.metricIconWidth = size;
+        Check(!icons.initialize(instance) && fake.iconLoads == 0, "invalid width never requests default/unbounded resource size");
+        fake.metricIconWidth = 16; fake.metricIconHeight = size;
+        Check(!icons.initialize(instance) && fake.iconLoads == 0, "invalid height refuses initialization");
+        fake.metricIconHeight = 16;
+    }
+    Check(icons.initialize(instance), "later valid size can retry");
+}
+void TraySymbolsPreserveBackendRecovery() {
+    MagnificationFilter filter;
+    Check(filter.initialize() && filter.enable(), "activate fake Magnification backend");
+    Check(SelectTraySymbol(filter.isActive(), filter.needsRestore(), filter.lastError()[0] != 0, filter.redMode(), BackendVerification::NotChecked) == TraySymbol::LumaRed,
+        "confirmed Luma selects bright diamond");
+    Check(filter.setRedMode(RedMode::StrictRed), "confirm Strict switch");
+    Check(SelectTraySymbol(filter.isActive(), filter.needsRestore(), false, filter.redMode(), BackendVerification::NotChecked) == TraySymbol::StrictRed,
+        "confirmed Strict selects filled circle");
+    fake.magWriteResults = {Write::FailAfterApply};
+    Check(!filter.disable(), "ambiguous restoration retains original");
+    const auto before = filter.statistics(); const auto writes = fake.magWrites, reads = fake.magReads; const auto clocks = fake.backendClockReads;
+    const auto original = fake.effect;
+    const auto error = std::string(filter.lastError());
+    TrayIcons icons;
+    Check(icons.initialize(reinterpret_cast<HINSTANCE>(std::uintptr_t{0x1234})), "load fake shared resources while recovery is pending");
+    bool attention = false, noAllocation = false;
+    { TestMemory::FailNextAllocation failure;
+        attention = icons.get(SelectTraySymbol(filter.isActive(), filter.needsRestore(), filter.lastError()[0] != 0,
+            filter.redMode(), BackendVerification::Matches)) == icons.get(TraySymbol::Attention);
+        noAllocation = TestMemory::AllocationFailurePending(); }
+    Check(attention && noAllocation && !filter.isActive() && filter.needsRestore() && filter.statistics() == before &&
+        fake.magWrites == writes && fake.magReads == reads && fake.backendClockReads == clocks && error == filter.lastError() &&
+        std::memcmp(&original, &fake.effect, sizeof(original)) == 0, "resource selection cannot promote stale matches or change display/recovery/counters");
+    Check(filter.disable() && filter.shutdown(), "same original remains restorable after attention icon selection");
+}
 } // namespace
 
 HMENU CreatePopupMenu() {
@@ -6135,8 +6230,18 @@ int GetSystemMetrics(int metric) {
     case SM_XVIRTUALSCREEN: return fake.metricLeft;
     case SM_YVIRTUALSCREEN: return fake.metricTop;
     case SM_REMOTESESSION: return fake.metricRemote;
+    case SM_CXSMICON: return fake.metricIconWidth;
+    case SM_CYSMICON: return fake.metricIconHeight;
     default: ++fake.unknownMetrics; return 0;
     }
+}
+void* LoadImageA(HINSTANCE instance, const char* resource, unsigned type, int width, int height, unsigned flags) {
+    const auto index = fake.iconLoads++;
+    const auto id = static_cast<unsigned>(reinterpret_cast<std::uintptr_t>(resource));
+    if (index < fake.iconRequests.size()) fake.iconRequests[index] = {instance, id, type, width, height, flags, fake.lastError};
+    if (fake.iconLoads == fake.iconFailAt) { if (fake.iconError) fake.lastError = *fake.iconError; return nullptr; }
+    fake.lastError = 0xbad; // Last error on success is deliberately unrelated.
+    return reinterpret_cast<HICON>(static_cast<std::uintptr_t>(id));
 }
 void SetLastError(DWORD value) { fake.lastError = value; }
 BOOL WTSRegisterSessionNotification(HWND owner, DWORD flags) {
@@ -6444,6 +6549,9 @@ std::optional<std::string> RecentLogText() noexcept {
 }
 int main() {
     const std::pair<const char*, void(*)()> tests[] = {
+        {"Tray symbols recovery/state priority", TraySymbolStatePriority}, {"Tray shared icon resources/cache", TrayIconResourceLoadingAndCache},
+        {"Tray icon partial resource failure/retry", TrayIconPartialLoadFailureAndRetry}, {"Tray icon invalid module/dimensions", TrayIconInvalidModuleAndDimensions},
+        {"Tray symbols preserve backend recovery", TraySymbolsPreserveBackendRecovery},
         {"Strict matrix", StrictMatrix}, {"Luma matrix", LumaMatrix},
         {"Magnification recapture", MagCaptureEachActivation}, {"Magnification capture failure", MagCaptureFailure},
         {"Magnification initialization failures", MagInitializationFailures}, {"Magnification write failures", MagWriteFailure},

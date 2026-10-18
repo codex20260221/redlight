@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Improve tray visibility under Strict Red and Luma Red with bright monochrome symbols and dark outlines: hollow ring when off, filled circle for Strict Red, diamond for Luma Red, and warning triangle for recovery or unconfirmed output. Preserve existing tray controls and restore-before-registration-retry safeguards.
 - Retain the last native session-notification registration/unregistration failure in cached support reports after successful retry or cleanup, with separate current error/availability, explicit no-code errors, allocation-free history access, and unchanged exact-window ownership/recovery guards.
 - Cache the tray process ID and checked Windows session ID at startup for logs/support reports, distinguishing zero IDs, absent metadata, and failed lookups with supplied/absent native errors; preserve backend ownership/recovery without process enumeration, new owned handles, or report-time queries.
 - Stamp copied support reports with validated UTC calendar time and milliseconds, preserving stable copied metadata, explicit absent/invalid labels, and monotonic scheduling/recovery independence; format normal and expanded Windows years without allocation or extra backend inspection.

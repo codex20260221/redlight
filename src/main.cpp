@@ -34,6 +34,7 @@
 #include "HotkeyManager.h"
 #include "UiSafety.h"
 #include "TrayStatus.h"
+#include "TrayIcons.h"
 #include "StatusQuery.h"
 #include "ProfileValidation.h"
 #include "ProfileExport.h"
@@ -61,6 +62,7 @@ MagnificationFilter g_magnificationFilter;
 GammaRampFilter g_gammaRampFilter;
 DisplayFilter* g_displayFilter = &g_gammaRampFilter;
 NOTIFYICONDATAA nid = {};
+TrayIcons g_trayIcons;
 UINT g_taskbarCreated = 0;
 bool g_trayAdded = false;
 bool g_trayVersion4 = false;
@@ -560,6 +562,8 @@ void UpdateTrayIconTip(const char* tip) {
 }
 
 void RefreshTrayIconTip() {
+    nid.hIcon = g_trayIcons.get(SelectTraySymbol(g_displayFilter->isActive(), g_displayFilter->needsRestore(),
+        g_displayFilter->lastError()[0] != 0, g_displayFilter->redMode(), g_verification.result().state, g_pendingRestore));
     char tip[sizeof(nid.szTip)];
     char remaining[32] = {};
     if (g_sessionTimer.armed()) {
@@ -784,11 +788,7 @@ bool InitializeTrayIcon(HINSTANCE hInstance) {
     nid.uID = IDI_REDLIGHT_ICON;
     nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_SHOWTIP;
     nid.uCallbackMessage = WM_TRAYICON;
-    nid.hIcon = LoadIconA(hInstance, MAKEINTRESOURCEA(IDI_REDLIGHT_ICON));
-    if (!nid.hIcon) {
-        Diagnostics::LogFormat("LoadIcon failed (error %lu).", GetLastError());
-        return false;
-    }
+    if (!g_trayIcons.initialize(hInstance)) return false;
     RefreshTrayIconTip();
     if (!AddTrayIcon()) return false;
     const bool shortcutsReady = g_hotkeys.initialize(nid.hWnd, g_preferences.shortcuts);

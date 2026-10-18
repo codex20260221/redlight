@@ -2,6 +2,10 @@
 #include "Version.h"
 #include "resource.h"
 100 ICON "redlight.ico"
+IDI_TRAY_OFF ICON "tray-off.ico"
+IDI_TRAY_STRICT ICON "tray-strict.ico"
+IDI_TRAY_LUMA ICON "tray-luma.ico"
+IDI_TRAY_ATTENTION ICON "tray-attention.ico"
 1 RT_MANIFEST "app.manifest"
 1 VERSIONINFO
  FILEVERSION REDLIGHT_VERSION_TUPLE

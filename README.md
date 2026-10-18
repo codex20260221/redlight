@@ -9,6 +9,7 @@ RedLight is a lightweight Windows tray application that applies a red-only displ
 
 - Strict Red and Luma Red modes, with your selection remembered between starts.
 - Tray toggle and keyboard shortcuts; a separate Restore display command.
+- High-contrast tray symbols distinguish off, Strict Red, Luma Red, and recovery through shape rather than hue.
 - Visible errors, recovery retries, and diagnostics available from the tray menu.
 - Tray recovery after Explorer restarts.
 - Optional auto-restore session limits with a remaining-time countdown.
@@ -69,6 +70,8 @@ To install RedLight, follow these steps:
 
 ## Usage
 After starting RedLight, an icon appears in the system tray with the filter off.
+
+The tray uses a hollow ring when off, a filled circle for Strict Red, and a filled diamond for Luma Red. Bright white shapes with dark outlines retain their contrast when mapped to red. A warning triangle means recovery is needed, a restore is queued, or the last explicit backend check is changed/unavailable; use the tooltip and **Restore display** for details. These symbols reflect cached application state, not continuous display measurement. Windows controls notification overflow placement. Actual Explorer/DPI/theme visibility remains pending manual validation for this candidate.
 
 For terminal help, use `RedLight.exe --help-text`. It writes the same versioned help body as the native `--help` dialog to standard output, with no dialog or tray/backend/settings initialization. In PowerShell, `& .\RedLight.exe --help-text | Out-String` waits for this GUI executable to finish. Exit codes are `0` for complete help, `1` for formatting/output failure, and `2` for invalid arguments. Malformed text-help requests log errors without opening a dialog; discard partial output after failure. `--help`, `-h`, and `/?` keep their native help dialog, and `--version` keeps its version dialog.
 
