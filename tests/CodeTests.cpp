@@ -71,6 +71,8 @@ struct Fake {
     std::optional<DWORD> magInitializeError, magUninitializeError;
     std::optional<DWORD> magWriteError = ERROR_ACCESS_DENIED;
     bool dc = true, gammaGet = true, release = true;
+    std::deque<bool> gammaReadResults;
+    std::optional<DWORD> gammaReadError, gammaWriteError, dcError, dcReleaseError, gdiSuccessError;
     int magWrites = 0, gammaWrites = 0, releases = 0, uninitializes = 0;
     int magInitializes = 0, dcRequests = 0, magReads = 0, gammaReads = 0;
     MAGCOLOREFFECT effect = {};
@@ -569,7 +571,7 @@ void GammaFailedDisable() {
     GammaRampFilter f;
     Check(f.initialize() && f.enable(), "enable");
     fake.writes = {Write::Ignore};
-    Check(!f.disable() && f.isActive() && f.needsRestore(), "ignored restore retains active state");
+    Check(!f.disable() && !f.isActive() && f.needsRestore(), "ignored restore drops active confirmation and retains recovery");
     Check(f.disable() && !f.isActive(), "retry disable");
 }
 void GammaReadFailures() {
@@ -583,6 +585,101 @@ void GammaReadFailures() {
     Check(!f.disable() && f.needsRestore(), "failed verification retains restore state");
     fake.gammaGet = true;
     Check(f.disable(), "verification retry");
+}
+void GammaFailedRestorationIsRecoveryOnly() {
+    for (bool shutdown : {false, true}) for (unsigned failure = 0; failure < 5; ++failure) {
+        Reset(); GammaRampFilter filter;
+        Check(filter.initialize(), "initialize restoration failure fixture");
+        fake.ramp[0][90] = 12345;
+        WORD original[3][256]; std::memcpy(original, fake.ramp, sizeof(original));
+        Check(filter.enable(), "capture latest calibration under ownership");
+        if (failure < 4) fake.writes = {std::array{Write::Fail, Write::FailAfterApply, Write::Ignore, Write::LowByteLeak}[failure]};
+        else fake.gammaReadResults = {false};
+        const auto releases = fake.releases, mutexReleases = fake.mutexReleases;
+        Check(!(shutdown ? filter.shutdown() : filter.disable()) && !filter.isActive() && filter.needsRestore() &&
+            fake.mutexOwned && fake.releases == releases && fake.mutexReleases == mutexReleases,
+            "failed setter, partial setter, ignored/mismatching write, or failed read-back retains original/DC/mutex without active confirmation");
+        const auto reads = fake.gammaReads, writes = fake.gammaWrites;
+        Check(SelectFilterControlIntent(false, false, false, false, filter.isActive(), filter.needsRestore()) == FilterControlIntent::Restore &&
+            !filter.enable() && filter.initialize() && fake.gammaReads == reads && fake.gammaWrites == writes,
+            "recovery controls prefer original restoration; direct enable and repeated initialize cannot recapture ambiguous output");
+        const auto verification = filter.inspectState();
+        Check((verification.state == BackendVerification::Matches || verification.state == BackendVerification::Changed) &&
+            !filter.isActive() && filter.needsRestore() && fake.mutexOwned,
+            "even a matching explicit red read cannot promote recovery-only state or release ownership");
+        fake.ramp[0][90] = 54321; // Another tool changes output; the owned original must survive.
+        Check(filter.disable() && !filter.needsRestore() && !filter.isActive() && !fake.mutexOwned &&
+            std::memcmp(original, fake.ramp, sizeof(original)) == 0 && filter.shutdown(),
+            "retry restores the same preactivation calibration and then releases all resources");
+    }
+}
+void GammaAmbiguousActivationAndRollback() {
+    for (unsigned failure = 0; failure < 4; ++failure) {
+        Reset(); GammaRampFilter filter;
+        Check(filter.initialize(), "initialize ambiguous activation fixture");
+        fake.ramp[1][80] = 1234;
+        WORD original[3][256]; std::memcpy(original, fake.ramp, sizeof(original));
+        if (failure == 0) { fake.writes = {Write::Apply, Write::Apply}; fake.gammaReadResults = {true, false, true}; }
+        if (failure == 1) { fake.writes = {Write::FailAfterApply, Write::Apply}; fake.gammaReadResults = {true, false}; }
+        if (failure == 2) fake.writes = {Write::FailAfterApply, Write::FailAfterApply};
+        if (failure == 3) fake.writes = {Write::Fail, Write::Ignore};
+        Check(!filter.enable() && !filter.isActive(), "unconfirmed activation never reports active");
+        const bool rollbackConfirmed = failure == 0 || failure == 3;
+        Check(filter.needsRestore() == !rollbackConfirmed && fake.mutexOwned == !rollbackConfirmed &&
+            std::memcmp(original, fake.ramp, sizeof(original)) == 0,
+            "only a successful rollback setter with matching read-back clears ownership, even if a failed setter actually applied the original");
+        Check(filter.disable() && filter.shutdown(), "ambiguous activation can retry original restoration and cleanup");
+    }
+}
+void GammaInitializationCleanupRetry() {
+    GammaRampFilter filter;
+    fake.gammaGet = false; fake.release = false;
+    Check(!filter.initialize() && fake.dcRequests == 1 && fake.gammaReads == 1 && fake.releases == 1 && fake.gammaWrites == 0,
+        "failed initial capture with failed DC cleanup remains uninitialized without a restore snapshot");
+    fake.gammaGet = true;
+    Check(!filter.initialize() && fake.dcRequests == 1 && fake.gammaReads == 1 && fake.releases == 2 && !filter.enable(),
+        "retained failed cleanup must finish before a fresh initialization or activation");
+    fake.release = true;
+    Check(filter.initialize() && fake.dcRequests == 2 && fake.gammaReads == 2 && fake.releases == 3 && !filter.needsRestore() &&
+        fake.gammaWrites == 0 && filter.enable() && filter.disable() && filter.shutdown(),
+        "fresh initialization and calibration capture occur only after cleanup succeeds");
+}
+void GammaNativeFailureErrorProvenance() {
+    for (unsigned stage = 0; stage < 12; ++stage) for (bool supplied : {false, true}) {
+        Reset(); GammaRampFilter filter;
+        if (stage >= 3) Check(filter.initialize(), "prepare native GDI error fixture");
+        if (stage == 8 || stage == 9 || stage == 11) Check(filter.enable(), "prepare active native GDI error fixture");
+        const std::optional<DWORD> error = supplied ? std::optional<DWORD>(4321) : std::nullopt;
+        fake.gammaReadError = fake.gammaWriteError = fake.dcError = fake.dcReleaseError = error;
+        fake.lastError = 0xbad; fake.gdiSuccessError = 0xbad;
+        fake.diagnosticsClobbersError = fake.captureDiagnosticText = true;
+        bool failed = false;
+        switch (stage) {
+        case 0: fake.dc = false; failed = !filter.initialize(); break;
+        case 1: fake.gammaGet = false; failed = !filter.initialize(); break;
+        case 2: fake.gammaGet = false; fake.release = false; failed = !filter.initialize(); break;
+        case 3: fake.release = false; failed = !filter.enable(); break;
+        case 4: fake.dc = false; failed = !filter.enable(); break;
+        case 5: fake.gammaGet = false; failed = !filter.enable(); break;
+        case 6: fake.writes = {Write::Fail, Write::Apply}; failed = !filter.enable(); break;
+        case 7: fake.gammaReadResults = {true, false, true}; failed = !filter.enable(); break;
+        case 8: fake.writes = {Write::Fail}; failed = !filter.disable(); break;
+        case 9: fake.gammaReadResults = {false}; failed = !filter.disable(); break;
+        case 10: fake.release = false; failed = !filter.shutdown(); break;
+        default: {
+            fake.gammaGet = false;
+            const auto report = filter.inspectState();
+            failed = report.state == BackendVerification::Unavailable && !report.readback && report.errorCode == (supplied ? 4321u : 0u) &&
+                std::string_view(fake.diagnosticText.data()).find(supplied ? "error 4321" : "no native error code") != std::string_view::npos;
+            break;
+        }
+        }
+        Check(failed && (stage == 11 || std::string_view(filter.lastError()).find(supplied ? "GetLastError=4321" : "no native error code") != std::string_view::npos),
+            "every failed GDI capture/write/read/release excludes stale errors from earlier successes/logging and retains driver-supplied errors");
+        fake.dc = fake.gammaGet = fake.release = true;
+        Check(filter.shutdown() && fake.gammaUnownedWrites == 0 && !fake.mutexOwned && !fake.mutexOpen,
+            "native error fixtures retain checked restoration/cleanup ownership");
+    }
 }
 void GammaResourceFailures() {
     GammaRampFilter f;
@@ -655,7 +752,7 @@ void GammaOwnershipRestoreFailureRetainsGuard() {
     GammaRampFilter filter;
     Check(filter.initialize() && filter.enable(), "activate");
     fake.writes = {Write::Fail, Write::Fail};
-    Check(!filter.disable() && !filter.shutdown() && filter.isActive() && filter.needsRestore() && fake.mutexOwned && fake.mutexReleases == 0 && fake.mutexCloses == 0,
+    Check(!filter.disable() && !filter.shutdown() && !filter.isActive() && filter.needsRestore() && fake.mutexOwned && fake.mutexReleases == 0 && fake.mutexCloses == 0,
         "failed restoration/shutdown retain ownership, DC, and original calibration");
     Check(filter.disable() && !filter.needsRestore() && !fake.mutexOwned && fake.mutexReleases == 1, "successful retry finally releases ownership");
 }
@@ -2169,7 +2266,7 @@ void DetailedGammaVerification() {
     Check(report.state == BackendVerification::Changed && report.readback->values == 768 && report.readback->mismatches == 3 && report.readback->unexpectedGreenBlue &&
         !report.readback->nonFiniteValues && std::abs(report.readback->maximumDifference - 257.0 / 65535) < 1e-12, "low-byte green leakage and all other mismatches are counted exactly");
     Check(fake.gammaWrites == writes && fake.mutexReleases == releases && fake.mutexOwned && filter.isActive() && filter.needsRestore(), "detailed gamma verification preserves snapshot and exclusive ownership");
-    fake.gammaGet = false; fake.lastError = 987; fake.diagnosticsClobbersError = true;
+    fake.gammaGet = false; fake.gammaReadError = 987; fake.diagnosticsClobbersError = true;
     report = filter.inspectState();
     Check(report.state == BackendVerification::Unavailable && !report.readback && report.errorCode == 987, "gamma read failure has checked error detail without stale comparison");
     fake.gammaGet = true; fake.diagnosticsClobbersError = false;
@@ -5419,12 +5516,23 @@ BOOL KillTimer(HWND owner, UINT_PTR id) {
     fake.countdownInstalled = false; fake.countdownOwner = nullptr; fake.countdownId = 0;
     return 1;
 }
-HDC GetDC(HWND) { ++fake.dcRequests; return fake.dc ? &fake : nullptr; }
-int ReleaseDC(HWND, HDC) { ++fake.releases; return fake.release ? 1 : 0; }
+HDC GetDC(HWND) {
+    ++fake.dcRequests;
+    if (const auto error = fake.dc ? fake.gdiSuccessError : fake.dcError) fake.lastError = *error;
+    return fake.dc ? &fake : nullptr;
+}
+int ReleaseDC(HWND, HDC) {
+    ++fake.releases;
+    if (const auto error = fake.release ? fake.gdiSuccessError : fake.dcReleaseError) fake.lastError = *error;
+    return fake.release ? 1 : 0;
+}
 BOOL GetDeviceGammaRamp(HDC, void* ramp) {
     fake.monotonicNow += fake.gammaReadMilliseconds;
     ++fake.gammaReads;
-    if (!fake.gammaGet) return 0;
+    bool success = fake.gammaGet;
+    if (!fake.gammaReadResults.empty()) { success = fake.gammaReadResults.front(); fake.gammaReadResults.pop_front(); }
+    if (!success) { if (fake.gammaReadError) fake.lastError = *fake.gammaReadError; return 0; }
+    if (fake.gdiSuccessError) fake.lastError = *fake.gdiSuccessError;
     std::memcpy(ramp, fake.ramp, sizeof(fake.ramp)); return 1;
 }
 BOOL SetDeviceGammaRamp(HDC, void* ramp) {
@@ -5438,7 +5546,9 @@ BOOL SetDeviceGammaRamp(HDC, void* ramp) {
     if (behavior == Write::LowByteLeak) fake.ramp[1][100] = 1;
     if (behavior == Write::BlackLift) fake.ramp[0][0] = 1;
     if (behavior == Write::WhiteLoss) fake.ramp[0][255] = 65534;
-    return behavior == Write::Apply || behavior == Write::Ignore || behavior == Write::LowByteLeak || behavior == Write::BlackLift || behavior == Write::WhiteLoss;
+    const bool success = behavior == Write::Apply || behavior == Write::Ignore || behavior == Write::LowByteLeak || behavior == Write::BlackLift || behavior == Write::WhiteLoss;
+    if (const auto error = success ? fake.gdiSuccessError : fake.gammaWriteError) fake.lastError = *error;
+    return success;
 }
 BOOL MagInitialize() { ++fake.magInitializes; if (!fake.magInit && fake.magInitializeError) fake.lastError = *fake.magInitializeError; return fake.magInit; }
 BOOL MagUninitialize() { ++fake.uninitializes; if (!fake.magUninit && fake.magUninitializeError) fake.lastError = *fake.magUninitializeError; return fake.magUninit; }
@@ -5564,6 +5674,8 @@ int main() {
         {"Gamma low-byte leakage", GammaLowByteLeak}, {"Inactive shutdown", OffShutdownDoesNotWrite},
         {"Gamma partial-write recovery", GammaPartialFailureRecovery}, {"Gamma failed disable", GammaFailedDisable},
         {"Gamma read failures", GammaReadFailures}, {"Gamma resource failures", GammaResourceFailures},
+        {"Gamma failed restoration recovery-only", GammaFailedRestorationIsRecoveryOnly}, {"Gamma ambiguous activation/rollback", GammaAmbiguousActivationAndRollback},
+        {"Gamma initialization cleanup retry", GammaInitializationCleanupRetry}, {"Gamma native error provenance", GammaNativeFailureErrorProvenance},
         {"Gamma ownership lifecycle", GammaOwnershipLifecycle}, {"Gamma ownership conflict/wait failure", GammaOwnershipConflictAndWaitFailure},
         {"Gamma ownership creation failure", GammaOwnershipCreationFailure}, {"Gamma ownership capture cleanup", GammaOwnershipCaptureFailuresReleaseGuard},
         {"Gamma ownership failed restoration", GammaOwnershipRestoreFailureRetainsGuard}, {"Gamma ownership cleanup retry", GammaOwnershipCleanupRetryDoesNotRewrite},

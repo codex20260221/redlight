@@ -86,6 +86,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Support Unicode diagnostics paths and report log-write failures to the debugger.
 
 ### Fixed
+- Drop Gamma's active confirmation before restoration writes, retaining the original calibration/DC/global ownership through failed or unconfirmed restoration and shutdown. Exclude stale GDI error codes across initialization, capture, writes, read-back, verification, and DC cleanup; explicitly report when no native code was supplied.
 - Separate Magnification runtime ownership from completed initialization; retry failed capture/cleanup safely, confirm owned backend writes before committing state, distinguish strict red-only comparison from arbitrary-original restoration, drop active confirmation on ambiguous restoration, and clear stale native errors. Keep live controls after failed shutdown on queue errors and retain failed session-end recovery while Windows permits; standalone reset now reports cleanup failure.
 - Require one canonical portable ZIP root, reject Windows path aliases and file/directory collisions before reading entries, validate directory contents, and require every current documentation file with exact source spelling/hash; add synthetic package-path policy checks without extraction or app execution.
 - Avoid stale Win32 error codes in both read-only tray-query diagnostics by clearing last-error before bounded sends, distinguishing generic failures, and capturing native errors before logging without changing JSON or exit contracts.

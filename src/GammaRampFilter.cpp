@@ -35,6 +35,7 @@ bool GammaRampFilter::initialize() {
     }
 
     if ((hdc_ || ownershipMutex_) && !shutdown()) return false;
+    SetLastError(ERROR_SUCCESS);
     hdc_ = GetDC(NULL);
     if (!hdc_) {
         SetError("GetDC", GetLastError());
@@ -42,8 +43,10 @@ bool GammaRampFilter::initialize() {
         return false;
     }
 
+    SetLastError(ERROR_SUCCESS);
     if (!GetDeviceGammaRamp(hdc_, originalGammaRamp_)) {
         SetError("GetDeviceGammaRamp", GetLastError());
+        SetLastError(ERROR_SUCCESS);
         if (!ReleaseDC(NULL, hdc_)) {
             SetError("ReleaseDC after capture failure", GetLastError());
         } else {
@@ -78,13 +81,24 @@ bool GammaRampFilter::enable() {
     }
     if (!AcquireOwnership()) return false;
     // Reacquire after topology changes and save the latest calibration on each enable.
-    if (hdc_ && !ReleaseDC(NULL, hdc_)) {
-        SetError("ReleaseDC before enable", GetLastError());
+    if (hdc_) {
+        SetLastError(ERROR_SUCCESS);
+        if (!ReleaseDC(NULL, hdc_)) {
+            SetError("ReleaseDC before enable", GetLastError());
+            ReleaseOwnership();
+            return false;
+        }
+        hdc_ = NULL;
+    }
+    SetLastError(ERROR_SUCCESS);
+    hdc_ = GetDC(NULL);
+    if (!hdc_) {
+        SetError("GetDC before enable", GetLastError());
         ReleaseOwnership();
         return false;
     }
-    hdc_ = GetDC(NULL);
-    if (!hdc_ || !GetDeviceGammaRamp(hdc_, originalGammaRamp_)) {
+    SetLastError(ERROR_SUCCESS);
+    if (!GetDeviceGammaRamp(hdc_, originalGammaRamp_)) {
         SetError("capture before enable", GetLastError());
         ReleaseOwnership();
         return false;
@@ -112,8 +126,10 @@ bool GammaRampFilter::disable() {
     }
 
     if (active_ || restorePending_) {
-        if (!SetGammaRamp(originalGammaRamp_, "SetDeviceGammaRamp(restore)")) return false;
+        // Even a failed write can change the ramp; red output is no longer confirmed.
         active_ = false;
+        restorePending_ = true;
+        if (!SetGammaRamp(originalGammaRamp_, "SetDeviceGammaRamp(restore)")) return false;
         restorePending_ = false;
         Diagnostics::LogFormat("%s display restoration succeeded.", kFilterName);
     }
@@ -135,9 +151,11 @@ BackendVerificationReport GammaRampFilter::inspectState() const {
     if (!initialized_) return {BackendVerification::Unavailable, std::nullopt, ERROR_INVALID_HANDLE};
     if (!active_ && !restorePending_) { operation.success(); return {BackendVerification::Inactive}; }
     WORD actual[3][256] = {};
+    SetLastError(ERROR_SUCCESS);
     if (!hdc_ || !GetDeviceGammaRamp(hdc_, actual)) {
         const auto error = static_cast<std::uint32_t>(hdc_ ? GetLastError() : ERROR_INVALID_HANDLE);
-        Diagnostics::LogFormat("Gamma verification read failed (error %lu).", static_cast<unsigned long>(error));
+        if (error) Diagnostics::LogFormat("Gamma verification read failed (error %lu).", static_cast<unsigned long>(error));
+        else Diagnostics::Log("Gamma verification read failed (no native error code).");
         return {BackendVerification::Unavailable, std::nullopt, error};
     }
     const auto details = BackendComparison::Gamma(actual, redGammaRamp_, true);
@@ -178,9 +196,12 @@ bool GammaRampFilter::shutdown() {
         Diagnostics::Log("GammaRampFilter: recovery/ownership cleanup failed; retaining resources for retry.");
         return false;
     }
-    if (hdc_ && !ReleaseDC(NULL, hdc_)) {
-        SetError("ReleaseDC", GetLastError());
-        return false;
+    if (hdc_) {
+        SetLastError(ERROR_SUCCESS);
+        if (!ReleaseDC(NULL, hdc_)) {
+            SetError("ReleaseDC", GetLastError());
+            return false;
+        }
     }
     hdc_ = NULL;
     initialized_ = false;
@@ -241,11 +262,14 @@ bool GammaRampFilter::ReleaseOwnership() {
 }
 
 void GammaRampFilter::SetError(const char* action, DWORD error) {
-    std::snprintf(lastError_, sizeof(lastError_), "%s: %s failed (GetLastError=%lu)\n",
-        kFilterName,
-        action,
-        static_cast<unsigned long>(error));
-    Diagnostics::LogFormat("%s: %s failed (GetLastError=%lu)", kFilterName, action, static_cast<unsigned long>(error));
+    if (error) {
+        std::snprintf(lastError_, sizeof(lastError_), "%s: %s failed (GetLastError=%lu)\n",
+            kFilterName, action, static_cast<unsigned long>(error));
+        Diagnostics::LogFormat("%s: %s failed (GetLastError=%lu)", kFilterName, action, static_cast<unsigned long>(error));
+    } else {
+        std::snprintf(lastError_, sizeof(lastError_), "%s: %s failed (no native error code)\n", kFilterName, action);
+        Diagnostics::LogFormat("%s: %s failed (no native error code)", kFilterName, action);
+    }
 }
 
 bool GammaRampFilter::SetGammaRamp(WORD (&ramp)[3][256], const char* action, bool requireStrictRed) {
@@ -258,6 +282,9 @@ bool GammaRampFilter::SetGammaRamp(WORD (&ramp)[3][256], const char* action, boo
         return false;
     }
 
+    // These GDI APIs do not promise extended error information. Never report a
+    // previous call's error when the driver supplies no error code of its own.
+    SetLastError(ERROR_SUCCESS);
     if (!SetDeviceGammaRamp(hdc_, ramp)) {
         SetError(action, GetLastError());
         return false;
@@ -265,6 +292,7 @@ bool GammaRampFilter::SetGammaRamp(WORD (&ramp)[3][256], const char* action, boo
 
     // Drivers can silently ignore a successful SetDeviceGammaRamp call.
     WORD applied[3][256] = {};
+    SetLastError(ERROR_SUCCESS);
     if (!GetDeviceGammaRamp(hdc_, applied)) {
         SetError("gamma read-back", GetLastError());
         return false;
