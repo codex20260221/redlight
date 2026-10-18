@@ -1,0 +1,84 @@
+name: Display or backend problem
+description: Report ineffective filtering, incorrect colors, restoration failures, or display compatibility problems.
+title: "[Display] "
+labels: ["bug", "area: display-backend"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe what you observed. Report recovery actions already tried; no extra display experiment is required to complete this form.
+        If a detail is unavailable or RedLight cannot start, say so. Remove device/product IDs, usernames, and personal paths from pasted reports or logs.
+  - type: input
+    id: redlight-version
+    attributes:
+      label: RedLight version and build
+      description: Copy the version and build revision from About if available, or the executable's Properties > Details.
+      placeholder: "Version, build revision, and whether this is a release or a local build"
+    validations:
+      required: true
+  - type: input
+    id: windows-version
+    attributes:
+      label: Windows version and OS build
+      placeholder: "Windows 10/11/Server, version, and OS build; include RDP/remote use if relevant"
+    validations:
+      required: true
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Selected backend
+      description: About and the support report show the selected backend.
+      options:
+        - MagnificationFilter
+        - GammaRampFilter
+        - Not sure or app cannot start
+    validations:
+      required: true
+  - type: input
+    id: red-mode
+    attributes:
+      label: Red mode, Luma preset, and brightness
+      placeholder: "Strict Red or Luma Red; preset; preferred/backend brightness if available"
+    validations:
+      required: true
+  - type: textarea
+    id: display-setup
+    attributes:
+      label: Monitors, GPUs, and drivers
+      description: Include monitor count, which displays are affected, GPU models/driver versions, connections/docks/adapters, layout, resolution, and scaling if known.
+      placeholder: "Monitor count and affected panels; GPU/driver(s); display setup"
+    validations:
+      required: true
+  - type: textarea
+    id: color-settings
+    attributes:
+      label: HDR and other color tools
+      description: List HDR per monitor, Windows Night Light, f.lux, GPU color settings, ICC/display calibration, and other filters. Say Off, not installed, or unknown where appropriate.
+    validations:
+      required: true
+  - type: textarea
+    id: observed-behavior
+    attributes:
+      label: Steps, expected result, and actual result
+      description: Include when this started and any relevant sleep/wake, lock/unlock, display hotplug, settings change, or Explorer restart. Describe black/white and green/blue output if already observed.
+    validations:
+      required: true
+  - type: textarea
+    id: recovery
+    attributes:
+      label: Recovery observations
+      description: What happened with Restore display, a restore shortcut, --restore, or --reset-display, if already tried? Include any error text or retained recovery state. Say not tried/unavailable otherwise; you do not need to run every command.
+    validations:
+      required: true
+  - type: textarea
+    id: support-report
+    attributes:
+      label: Support report (if available)
+      description: Paste Expert controls > Diagnostics > Copy support report. It records cached state; leave blank if unavailable.
+      render: text
+  - type: textarea
+    id: diagnostic-log
+    attributes:
+      label: Relevant redlight.log contents (if available)
+      description: Use Open logs folder or %LOCALAPPDATA%\RedLight\redlight.log. Paste the relevant startup/failure/recovery entries after reviewing personal information. Explain if the log is unavailable.
+      render: text

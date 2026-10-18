@@ -1,6 +1,6 @@
 # Issue-driven development checkpoint — 2026-10-18
 
-The user resumed the issue-driven goal from clean local commit `693d204`. Integrated brightness is committed as `7ced3fe`; this checkpoint completes optional per-user startup for issue #17 on `release/0.6.0-rc1`. Continue autonomously through the roadmap until externally interrupted, keeping focused local commits and all restrictions below. The earlier Magnification audit and tray visibility change remain complete. No later feature implementation is in progress at this checkpoint.
+The user resumed the issue-driven goal from clean local commit `693d204`. Integrated brightness is committed as `7ced3fe`, optional per-user startup as `b12065a`; this data-only checkpoint adds the requested display/backend issue form (#16) on `release/0.6.0-rc1`. Runtime code is unchanged from `b12065a`. Continue autonomously through the roadmap until externally interrupted, keeping focused local commits and all restrictions below. No transition implementation is in progress at this checkpoint.
 
 ## New issue-driven direction
 
@@ -51,7 +51,8 @@ The focused audit is committed as `4a1dd71`. The detailed state table, ownership
 | `f39c0aa` | Session-hook native failure history retained after retry/cleanup; stale-error exclusion |
 | `693d204` | Issue #27 high-contrast tray symbols, fake resource/state regressions, and reviewed issue-driven roadmap |
 | `7ced3fe` | Issue #1 integrated 1–100% red brightness, schema-4 profiles, independent Gamma policy, and isolated failure regressions |
-| This checkpoint | Issue #17 consented per-user startup, portable path/entry review and verified removal, fake-registry failure coverage |
+| `b12065a` | Issue #17 consented per-user startup, portable path/entry review and verified removal, fake-registry failure coverage |
+| This checkpoint | Issue #16 local structured display/backend report form; static-only review, no publication |
 
 All commits are local. Each feature's evidence and unexecuted manual notes are recorded in [release validation](docs/release-validation.md#expert-feature-follow-up-validation).
 
@@ -85,7 +86,7 @@ cpack --config build/CPackConfig.cmake -C Release -B build/packages
 
 Start with `git status --short` and this handoff. The worktree should be clean. There is no unfinished fix, active build, or required implementation follow-up from this checkpoint. Manual/native qualification remains unauthorized unless the user changes that restriction.
 
-Choose the next meaningful user-facing task from [issue roadmap](docs/issue-roadmap.md). Gradual transitions are next; no implementation is present. Define optional red-only brightness progression, cancellation/live target edits, timer failure/ownership and countdown interactions first; all Restore/Exit/environment recovery must remain immediate. Scheduling then needs manual overrides, sleep/resume, clock/DST/missed triggers, and countdown precedence defined. The old static backend-mode discovery candidate was not started and is superseded by the issue-driven priorities.
+Choose the next meaningful user-facing task from [issue roadmap](docs/issue-roadmap.md). Gradual transitions are next; no implementation is present. An asynchronous optional question asked whether ramps should apply only at activation (recommended) or also to later brightness edits; preserve any user answer before deciding scope. Define optional red-only brightness progression, cancellation/live target edits, timer failure/ownership and countdown interactions first; all Restore/Exit/environment recovery must remain immediate. Scheduling then needs manual overrides, sleep/resume, clock/DST/missed triggers, and countdown precedence defined. The old static backend-mode discovery candidate was not started and is superseded by the issue-driven priorities.
 
 Preserve these integration boundaries:
 
