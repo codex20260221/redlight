@@ -567,6 +567,18 @@ void VerificationStatusPriority() {
     state.lastError = "restore failed";
     Check(BuildSupportReport(state).find("State: Recovery needed") != std::string::npos, "failed restoration remains highest priority");
 }
+void CustomSessionLimitParsing() {
+    for (const unsigned minutes : {0u, 1u, 15u, 57u, 239u, 240u}) {
+        Check(ParseSessionMinutes(std::to_wstring(minutes)) == minutes, "custom duration boundary and arbitrary minute values");
+    }
+    Check(ParseSessionMinutes(L"  00057\t") == 57u, "padding and leading zeros");
+    for (const auto text : {L"", L" ", L"-1", L"+1", L"1.5", L"241", L"42949672960", L"15x", L"1 5", L"１"}) {
+        Check(!ParseSessionMinutes(text), "invalid/overflow/non-ASCII custom duration rejected");
+    }
+    SessionTimer timer;
+    Check(timer.configure(*ParseSessionMinutes(L"57"), 1000, true) &&
+        timer.remainingMilliseconds(1000) == 3420000, "custom limit uses the same tested session timer");
+}
 void Arguments() {
     using S = StartupAction;
     Check(ParseArguments({}) == S::Tray, "no arguments");
@@ -688,6 +700,7 @@ int main() {
         {"Preference import recovery gate", PreferencesImportRecoveryGate}, {"Preference import validation gate", PreferencesImportValidationGate},
         {"Magnification read-only verification", MagnificationVerificationReadOnly}, {"Matrix verification nonfinite values", MagnificationVerificationFiniteValues},
         {"Gamma read-only verification", GammaVerificationReadOnly}, {"Verification status priority", VerificationStatusPriority},
+        {"Custom session-limit input", CustomSessionLimitParsing},
         {"Command line", Arguments}
     };
     int failed = 0;

@@ -1,0 +1,3 @@
+#pragma once
+#define IDD_CUSTOM_SESSION_LIMIT 300
+#define IDC_SESSION_MINUTES 301

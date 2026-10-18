@@ -74,6 +74,8 @@ Backend verification: fake-API tests prove inactive checks make no display reads
 
 Expert menu organization: native menu construction uses scoped ownership, releasing submenu ownership only after successful attachment. Build and static analysis cover the refactor; no application/menu test ran. Manual notes (pending; not executed): verify primary actions appear before expert options, keyboard accelerators and Escape work in every submenu, disabled gamma-only luma controls remain unavailable, shortcut conflicts are labeled, and failed menu construction leaves the running filter's controls/recovery paths intact.
 
+Custom session limits: code tests cover arbitrary minute values, 0/240 boundaries, whitespace/leading zeros, invalid signs/fractions/overflow/non-ASCII input, and integration with the existing deadline policy. The dialog and resource were compiled and statically analyzed only; no dialog was launched. Manual notes (pending; not executed): test Apply/Cancel/close/Escape/Enter, pasted overlong input, keyboard traversal, current custom value display, active countdown restart, and session expiry/restoration on each backend. Reconfirm no custom input can activate an inactive filter.
+
 ## Known limitations and promotion gate
 
 Target Windows 10/11 x64 SDR desktop sessions first. HDR, remote sessions, secure desktop, exclusive full-screen applications, protected content, gamma multi-adapter coverage, and interaction with other color tools remain unqualified. Do not promise hardware blue-light elimination. Gamma read-back checks the driver-reported ramp and cannot measure panel output. See [Microsoft's documented gamma limitations](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/nf-wingdi-setdevicegammaramp).

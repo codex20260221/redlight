@@ -1,5 +1,7 @@
 #pragma once
 #include <cstdint>
+#include <optional>
+#include <string_view>
 
 // Pure monotonic-time policy. The caller owns the Win32 timer and restore calls.
 class SessionTimer {
@@ -41,3 +43,16 @@ private:
     std::uint64_t started_ = 0;
     std::uint64_t lastAttempt_ = 0;
 };
+
+inline std::optional<unsigned> ParseSessionMinutes(std::wstring_view text) {
+    while (!text.empty() && (text.front() == L' ' || text.front() == L'\t')) text.remove_prefix(1);
+    while (!text.empty() && (text.back() == L' ' || text.back() == L'\t')) text.remove_suffix(1);
+    if (text.empty()) return std::nullopt;
+    unsigned value = 0;
+    for (const wchar_t digit : text) {
+        if (digit < L'0' || digit > L'9') return std::nullopt;
+        value = value * 10 + static_cast<unsigned>(digit - L'0');
+        if (value > SessionTimer::maxMinutes) return std::nullopt;
+    }
+    return value;
+}

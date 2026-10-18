@@ -13,6 +13,7 @@ inline constexpr unsigned ID_TRAY_COPY_REPORT = 207;
 inline constexpr unsigned ID_TRAY_COPY_PROFILE = 208;
 inline constexpr unsigned ID_TRAY_IMPORT_PROFILE = 209;
 inline constexpr unsigned ID_TRAY_VERIFY_BACKEND = 210;
+inline constexpr unsigned ID_TRAY_CUSTOM_SESSION = 211;
 inline constexpr unsigned ID_HOTKEY_TOGGLE = 1;
 inline constexpr unsigned ID_HOTKEY_RESTORE = 2;
 inline constexpr unsigned ID_TRAY_RETRY_TIMER = 1;

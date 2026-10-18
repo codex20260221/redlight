@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Added a native Custom auto-restore time-limit dialog for 0–240 whole minutes, with validation, cancellation, and protection against truncated pasted input.
 - Added explicit read-only backend-state verification, showing software read-back mismatches/unavailability in the tray and support report without reapplying the filter or discarding recovery data.
 - Added bounded settings-profile import from clipboard with strict validation and a readable confirmation preview; restore succeeds before saving, imports stay off, and failed restoration/storage keeps prior preferences.
 - Added a versioned, human-readable settings profile export that preserves preferred mode/luma selections even during gamma fallback; strict profile parsing rejects duplicate, unknown, missing, and out-of-range settings.

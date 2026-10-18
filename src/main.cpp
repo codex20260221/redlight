@@ -13,6 +13,7 @@
 #include "PreferencesImport.h"
 #include "CommandIds.h"
 #include "TrayMenu.h"
+#include "SessionLimitDialog.h"
 #include <cstdio>
 
 #include "Diagnostics.h"
@@ -861,6 +862,11 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         }
         switch (LOWORD(wParam)) {
         case ID_TRAY_TOGGLE: ToggleRedlight(); break;
+        case ID_TRAY_CUSTOM_SESSION:
+            if (!g_busy) {
+                if (const auto minutes = ShowSessionLimitDialog(hwnd, g_sessionTimer.minutes())) SetSessionLimit(*minutes);
+            }
+            break;
         case ID_TRAY_RESTORE: RestoreFilter(true); break;
         case ID_TRAY_MODE_STRICT_RED: SetRedModeFromTray(RedMode::StrictRed); break;
         case ID_TRAY_MODE_LUMA_RED: SetRedModeFromTray(RedMode::LumaRed); break;
