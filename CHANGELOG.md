@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Added read-only `--build-info` JSON for the invoked binary's version, path-free source identity, platform, settings schema, and status protocol, with bounded allocation-free C++ preparation and noninteractive output failures before tray/backend/preferences initialization.
 - Added Retry selected shortcuts without preference writes or backend changes, plus explicit selected-profile registration health in About, support reports, and status JSON, including partial/mixed/disabled states.
 - Added Restart current countdown for healthy, active, unexpired timed sessions, reusing the configured duration and rearming one warning without saving preferences or changing the display backend.
 - Allow preferred Luma-detail edits during gamma fallback without backend calls, output/error/snapshot changes, or verification invalidation; distinguish effective and preferred selections in About/support reports and add explicit Luma-profile scope to status JSON.

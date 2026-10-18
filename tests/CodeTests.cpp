@@ -24,6 +24,7 @@
 #include "BackendComparison.h"
 #include "SessionNotifications.h"
 #include "LumaPreference.h"
+#include "BuildMetadata.h"
 #include <map>
 #include <algorithm>
 #include "Clipboard.h"
@@ -56,7 +57,7 @@ struct Fake {
     std::vector<wchar_t> clipMemory;
     std::map<std::wstring, RegistryValue> registry;
     bool registryRead = true, registryWrite = true;
-    int registryWrites = 0;
+    int registryReads = 0, registryWrites = 0;
     std::map<int, ShortcutBinding> registeredHotkeys;
     std::deque<bool> hotkeyRegisterResults, hotkeyUnregisterResults;
     int hotkeyRegisters = 0, hotkeyUnregisters = 0;
@@ -1806,6 +1807,71 @@ void PreferenceSerializationSingleAllocation() {
     const auto versionLine = std::string("version=") + std::to_string(PreferencesProfileVersion) + "\r\n";
     Check(text->find(versionLine) != std::string::npos && text->ends_with("expiry_warning=5m\r\n"), "schema metadata and canonical output remain consistent");
 }
+void BuildInfoJsonAndIsolation() {
+    fake.stdoutChunk = 7;
+    Check(WriteBuildInfo("0.6.0-rc.1", "0123456789ab", "clean") == 0, "build info handles partial output writes");
+    const auto& text = fake.stdoutText;
+    Check(text.starts_with("{\"protocol\":1,\"product\":\"RedLight\",\"version\":\"0.6.0-rc.1\"") &&
+        text.find("\"build_revision\":\"0123456789ab\",\"source_state\":\"clean\",\"platform\":\"windows-x64\"") != std::string::npos &&
+        text.ends_with("\"profile_schema\":3,\"status_protocol\":1}\n"), "build info carries a complete stable machine-readable identity");
+    Check(fake.magInitializes == 0 && fake.dcRequests == 0 && fake.magReads == 0 && fake.gammaReads == 0 &&
+        fake.magWrites == 0 && fake.gammaWrites == 0 && fake.mutexCreates == 0 && fake.statusSends == 0 && fake.profileOpens == 0 &&
+        fake.registryReads == 0 && fake.registryWrites == 0 && fake.clipOpens == 0 && fake.hotkeyRegisters == 0 && fake.sessionRegisters == 0,
+        "metadata output needs no instance, preferences, clipboard, registration, profile file, or display operation");
+}
+void BuildInfoEscapingAndBounds() {
+    Check(WriteBuildInfo("v\"\\\n", "\xc3\xa9", std::string_view("a\0b", 3)) == 0 &&
+        fake.stdoutText.find("\"version\":\"v\\\"\\\\\\u000a\"") != std::string::npos &&
+        fake.stdoutText.find("\"build_revision\":\"\xc3\xa9\",\"source_state\":\"a\\u0000b\"") != std::string::npos,
+        "identity fields preserve valid Unicode and escape quotes, slashes, and controls");
+    Reset();
+    const std::string maximum(254, 'x');
+    Check(WriteBuildInfo(maximum, maximum, maximum) == 0 && fake.stdoutText.size() < 1024 && fake.stdoutText.ends_with("}\n"),
+        "three largest accepted encoded identity fields still produce a complete record");
+    for (const auto& invalid : {std::string{}, std::string(255, 'x'), std::string(43, '\n'), std::string("\xff")}) {
+        for (unsigned field = 0; field < 3; ++field) {
+            Reset();
+            Check(WriteBuildInfo(field == 0 ? invalid : "version", field == 1 ? invalid : "revision", field == 2 ? invalid : "state") == 1 &&
+                fake.stdoutText.empty() && fake.stdoutLookups == 0, "invalid, empty, or oversized field fails before any output lookup/write");
+        }
+    }
+}
+void BuildInfoNoCppAllocation() {
+    fake.stdoutText.reserve(1024); // The fake sink must not consume the allocation fault.
+    int result = 1;
+    bool allocationUnused = false;
+    {
+        TestMemory::FailNextAllocation fail;
+        result = WriteBuildInfo("0.6.0-rc.1", "unknown", "archive");
+        allocationUnused = TestMemory::AllocationFailurePending();
+    }
+    Check(result == 0 && allocationUnused && fake.stdoutText.ends_with("}\n"), "build metadata preparation and output do not allocate C++ heap storage");
+}
+void BuildInfoOutputFailures() {
+    fake.stdoutWrite = false;
+    Check(WriteBuildInfo("v", "r", "s") == 1 && fake.stdoutText.empty(), "output failure cannot report successful build metadata");
+    Reset(); fake.stdoutChunk = 5; fake.stdoutFailOnCall = 2;
+    Check(WriteBuildInfo("v", "r", "s") == 1 && fake.stdoutText.size() == 5, "interrupted output reports failure and leaves only the failed prefix");
+    Reset(); fake.stdoutValid = false; fake.consoleAttach = false;
+    Check(WriteBuildInfo("v", "r", "s") == 1 && fake.stdoutText.empty(), "no inherited output or parent console is a noninteractive failure");
+}
+void BuildInfoArguments() {
+    const std::wstring_view args[] = {L"--build-info"};
+    const auto options = ParseStartupOptions(args);
+    Check(options.action == StartupAction::BuildInfo && options.errorOutput == StartupErrorOutput::Json && options.profilePath.empty() && !options.backendOverride,
+        "build info is a standalone read-only JSON action");
+    for (const auto malformed : {L"--build-info=extra", L"--build-info-extra"}) {
+        const std::wstring_view bad[] = {malformed};
+        Check(ParseStartupOptions(bad).action == StartupAction::Invalid && ParseStartupOptions(bad).errorOutput == StartupErrorOutput::Json,
+            "malformed metadata requests keep noninteractive JSON error policy");
+    }
+    const std::wstring_view combined[] = {L"--export-profile", L"--build-info"};
+    Check(ParseStartupOptions(combined).action == StartupAction::Invalid && ParseStartupOptions(combined).errorOutput == StartupErrorOutput::Json,
+        "conflicting metadata action takes JSON error precedence");
+    fake.argumentsCount = 2; fake.arguments[1] = const_cast<LPWSTR>(L"--build-info");
+    Check(GetStartupOptions().action == StartupAction::BuildInfo && fake.argumentFrees == 1 && !fake.argumentsOutstanding,
+        "native argument ownership is released for build metadata requests");
+}
 } // namespace
 
 DWORD GetLastError() { return fake.lastError; }
@@ -1976,6 +2042,7 @@ int WideCharToMultiByte(unsigned, DWORD, const wchar_t* input, int length, char*
     return length;
 }
 LSTATUS RegGetValueW(HKEY, const wchar_t*, const wchar_t* name, DWORD flags, DWORD* type, void* output, DWORD* size) {
+    ++fake.registryReads;
     if (!fake.registryRead) return ERROR_ACCESS_DENIED;
     const auto found = fake.registry.find(name);
     if (found == fake.registry.end()) return ERROR_FILE_NOT_FOUND;
@@ -2083,6 +2150,9 @@ int main() {
         {"Selected shortcut retry without persistence", SelectedShortcutRetryRecoversConflictWithoutSaving}, {"Selected shortcut retry failure/disabled", SelectedShortcutRetryFailureAndDisabledHealth},
         {"Shortcut registration health reports", ShortcutRegistrationHealthReports},
         {"Single-allocation preference serialization", PreferenceSerializationSingleAllocation},
+        {"Build metadata JSON and isolation", BuildInfoJsonAndIsolation}, {"Build metadata escaping and bounds", BuildInfoEscapingAndBounds},
+        {"Build metadata without C++ allocation", BuildInfoNoCppAllocation}, {"Build metadata output failures", BuildInfoOutputFailures},
+        {"Build metadata arguments", BuildInfoArguments},
         {"Command line", Arguments}
     };
     int failed = 0;

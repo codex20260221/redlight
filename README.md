@@ -157,13 +157,25 @@ if ($result -eq 0) { $json | ConvertFrom-Json }
 
 Exit codes are `0` for a valid snapshot (including an off filter), `3` when no tray instance exists, and `1` for timeout, incompatible response, or output failure. A missing instance produces `status: "not-running"`; query failures produce `query-failed` or `invalid-response` when output is available. Responses use protocol 1. A request waits up to three seconds for the tray; it opens no dialogs and creates no console window. Redirected standard output is preserved; otherwise it uses an existing parent console if available.
 
-Malformed `--status` or `--validate-profile` requests produce JSON with `status: "invalid-arguments"` and exit code `2`, keeping script errors noninteractive. Output failure returns `1`.
+Malformed `--status`, `--validate-profile`, or `--build-info` requests produce JSON with `status: "invalid-arguments"` and exit code `2`, keeping script errors noninteractive. Output failure returns `1`.
 
 Snapshots report backend/mode/luma selection, configured session limit and remaining whole seconds, preferred/actual shortcuts, unsaved settings, session-notification registration, and logging health flags. `remaining_seconds` is null when the countdown is unarmed. `restore_pending` means restoration data or ownership cleanup is pending, including during a normal active session. `backend_active` is the last confirmed backend activation flag; `active` is true only when `status` is `on`, and becomes false for busy, recovery-needed, backend-changed, or verification-unavailable states. `verification` describes the last explicit check, which may be `not-checked`. A status query does not refresh verification or measure physical output. Full diagnostic counters and build identity remain available in the support report.
 
 The `busy` status also covers a queued control restore request. About/support status gives recovery priority to pending restoration or inactive ownership cleanup; support reports show control restore requests separately from owned recovery data.
 
 `luma_profile_scope` is `backend-selection` on Magnification or `magnification-preference` on gamma. `luma_profile` reports that configured choice; gamma remains Strict Red, and a Magnification selection in Strict Red applies only after switching to Luma Red.
+
+## Scriptable build identity
+
+`--build-info` writes JSON describing the invoked binary before tray/backend/preferences initialization. It includes `protocol` (1), `product`, `version`, `build_revision`, `source_state`, `platform` (`windows-x64`), `profile_schema` (the exported settings format, currently 3), and `status_protocol` (currently 1). It uses inherited output or an existing parent console and opens no dialogs. Exit codes are `0` for complete output, `1` for metadata/output failure, and `2` for invalid arguments; discard partial output after failure.
+
+```powershell
+$json = & .\RedLight.exe --build-info | Out-String
+if ($LASTEXITCODE -ne 0) { throw 'RedLight build-info request failed.' }
+$json | ConvertFrom-Json
+```
+
+This identity belongs to the executable you invoked. A tray instance may be running a different build; its About dialog and support report carry its identity. Build metadata does not probe backend availability or display state. Source archives and builds with revision recording disabled use the same fallback identity values as support reports.
 
 ## Compatibility and limitations
 

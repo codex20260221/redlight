@@ -5,6 +5,7 @@
 #include "StartupOptions.h"
 #include "Version.h"
 #include "BuildInfo.h"
+#include "BuildMetadata.h"
 #include "SessionTimer.h"
 #include "SessionControl.h"
 #include "BackendSelection.h"
@@ -134,6 +135,11 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
         Diagnostics::Shutdown();
         return result;
     }
+    if (action == StartupAction::BuildInfo) {
+        const int result = WriteBuildInfo(REDLIGHT_VERSION, REDLIGHT_BUILD_REVISION, REDLIGHT_SOURCE_STATE);
+        Diagnostics::Shutdown();
+        return result;
+    }
     if (action == StartupAction::ValidateProfile) {
         const int result = ValidateSettingsProfileFile(options.profilePath.c_str());
         Diagnostics::Shutdown();
@@ -149,6 +155,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
             "RedLight " REDLIGHT_VERSION "\n\nUsage: RedLight.exe [option]\n\n"
             "--restore / --reset-display: restore display colors\n"
             "--help: show this help\n--version: show version\n"
+            "--build-info: report this binary's build metadata as JSON\n"
             "--status: report cached tray state as JSON without starting it\n"
             "--validate-profile=<file>: validate a settings file offline (JSON)\n"
             "--export-profile: write saved/default preferences as profile text\n"

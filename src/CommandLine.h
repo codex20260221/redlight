@@ -5,7 +5,7 @@
 #include <string>
 #include <string_view>
 
-enum class StartupAction { Tray, Restore, Help, Version, Status, ValidateProfile, ExportProfile, Invalid, Failed };
+enum class StartupAction { Tray, Restore, Help, Version, BuildInfo, Status, ValidateProfile, ExportProfile, Invalid, Failed };
 enum class StartupErrorOutput { Dialog, Json, LogOnly };
 struct StartupOptions {
     StartupAction action = StartupAction::Tray;
@@ -16,7 +16,7 @@ struct StartupOptions {
 inline StartupOptions ParseStartupOptions(std::span<const std::wstring_view> args) {
     if (args.empty()) return {};
     const bool jsonErrors = std::any_of(args.begin(), args.end(), [](std::wstring_view arg) {
-        return arg.starts_with(L"--status") || arg.starts_with(L"--validate-profile");
+        return arg.starts_with(L"--status") || arg.starts_with(L"--validate-profile") || arg.starts_with(L"--build-info");
     });
     const bool quietExport = std::any_of(args.begin(), args.end(), [](std::wstring_view arg) { return arg.starts_with(L"--export-profile"); });
     const auto errorOutput = jsonErrors ? StartupErrorOutput::Json : (quietExport ? StartupErrorOutput::LogOnly : StartupErrorOutput::Dialog);
@@ -26,6 +26,7 @@ inline StartupOptions ParseStartupOptions(std::span<const std::wstring_view> arg
     if (arg == L"--restore" || arg == L"--reset-display") return {StartupAction::Restore, std::nullopt};
     if (arg == L"--help" || arg == L"-h" || arg == L"/?") return {StartupAction::Help, std::nullopt};
     if (arg == L"--version") return {StartupAction::Version, std::nullopt};
+    if (arg == L"--build-info") return {StartupAction::BuildInfo, std::nullopt, {}, StartupErrorOutput::Json};
     if (arg == L"--status") return {StartupAction::Status, std::nullopt, {}, StartupErrorOutput::Json};
     if (arg == L"--export-profile") return {StartupAction::ExportProfile, std::nullopt, {}, StartupErrorOutput::LogOnly};
     if (arg.starts_with(L"--validate-profile=")) {
