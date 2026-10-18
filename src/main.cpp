@@ -979,7 +979,8 @@ void CopySupportReport(HWND owner) {
     state.preferredRedMode = RedModeDisplayName(g_preferences.mode);
     state.preferredLumaProfile = LumaProfileName(g_preferences.luma);
     state.lastError = g_displayFilter->lastError();
-    state.backendLifecycle = g_displayFilter == &g_magnificationFilter ? g_magnificationFilter.lifecycleDescription() : "Not reported for gamma";
+    state.backendLifecycle = g_displayFilter == &g_magnificationFilter ? g_magnificationFilter.lifecycleDescription() :
+        g_displayFilter == &g_gammaRampFilter ? g_gammaRampFilter.lifecycleDescription() : "Not reported";
     state.active = g_displayFilter->isActive();
     state.needsRestore = g_displayFilter->needsRestore();
     state.restoreRequested = g_pendingRestore;

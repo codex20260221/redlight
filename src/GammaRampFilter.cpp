@@ -146,6 +146,19 @@ bool GammaRampFilter::needsRestore() const { return active_ || restorePending_ |
 
 const char* GammaRampFilter::lastError() const { return lastError_; }
 
+const char* GammaRampFilter::lifecycleDescription() const noexcept {
+    if (active_) return "Active; red output confirmed at last operation";
+    if (restorePending_) return "Restoration pending; red output unconfirmed";
+    if (ownershipMutex_) {
+        if (ownershipAbandoned_) return "Activation blocked; abandoned ownership cleanup pending";
+        return ownershipAcquired_ ? "Filter off; ownership release pending" : "Filter off; ownership handle cleanup pending";
+    }
+    if (ownershipAbandoned_) return initialized_ ? "Ready/off; activation blocked after abandoned ownership" : "Released; activation blocked after abandoned ownership";
+    if (initialized_) return "Ready; filter off";
+    if (hdc_) return "Device context retained; initialization incomplete or cleanup pending";
+    return "Released; backend not initialized";
+}
+
 BackendVerificationReport GammaRampFilter::inspectState() const {
     RecordBackendOperation operation(statistics_.verification, BackendMonotonicMilliseconds);
     if (!initialized_) return {BackendVerification::Unavailable, std::nullopt, ERROR_INVALID_HANDLE};

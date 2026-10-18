@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Include Gamma lifecycle in cached support diagnostics: distinguish retained initial-capture resources, ready/off, last-confirmed red output, pending ramp restoration, ownership release/handle cleanup, and the persistent abandoned-owner activation block without native calls or state changes.
 - Add read-only Copy restoration history JSON under Expert diagnostics with bounded canonical reason/outcome tokens, completed-scope order, ages/durations, overwritten counts and unfinished-scope metadata, using a cached snapshot and checked clipboard transfer without backend or history mutation.
 - Show cached Magnification lifecycle phases in support reports, distinguishing released, retained/unready API resources, ready/off, confirmed red output, and restoration pending without fresh API calls, allocation, or recovery-state changes.
 - Extend build-info JSON with the current-settings protocol, accepted profile schema list, and shared profile-byte/session-minute limits; keep discovery bounded/allocation-free and centralize profile read limits across parser/storage/file/clipboard entry points without initializing a tray or backend.

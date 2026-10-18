@@ -681,6 +681,88 @@ void GammaNativeFailureErrorProvenance() {
             "native error fixtures retain checked restoration/cleanup ownership");
     }
 }
+void CheckGammaCachedLifecycle(const GammaRampFilter& filter, std::string_view expected) {
+    const auto reads = fake.gammaReads, writes = fake.gammaWrites, requests = fake.dcRequests, releases = fake.releases;
+    const auto creates = fake.mutexCreates, waits = fake.mutexWaits, mutexReleases = fake.mutexReleases, closes = fake.mutexCloses;
+    const auto statistics = filter.statistics(); const auto clocks = fake.backendClockReads;
+    const auto tick = fake.monotonicNow, nativeError = static_cast<std::uint64_t>(fake.lastError);
+    const auto diagnostic = fake.diagnosticText; const auto error = std::string(filter.lastError());
+    bool matches = false, unused = false;
+    { TestMemory::FailNextAllocation fail; matches = filter.lifecycleDescription() == expected; unused = TestMemory::AllocationFailurePending(); }
+    Check(matches && unused && filter.statistics() == statistics && fake.backendClockReads == clocks && fake.monotonicNow == tick &&
+        fake.lastError == nativeError && fake.diagnosticText == diagnostic && error == filter.lastError() &&
+        fake.gammaReads == reads && fake.gammaWrites == writes && fake.dcRequests == requests && fake.releases == releases &&
+        fake.mutexCreates == creates && fake.mutexWaits == waits && fake.mutexReleases == mutexReleases && fake.mutexCloses == closes,
+        "cached Gamma lifecycle label is exact, allocation-free, and leaves errors/counters/clocks/GDI/ownership/logging untouched");
+}
+void GammaCachedLifecycleTransitions() {
+    GammaRampFilter filter;
+    fake.captureDiagnosticText = fake.diagnosticsClobbersError = true;
+    CheckGammaCachedLifecycle(filter, "Released; backend not initialized");
+    fake.gammaGet = false; fake.release = false;
+    Check(!filter.initialize(), "retain incomplete initial capture and failed DC cleanup");
+    CheckGammaCachedLifecycle(filter, "Device context retained; initialization incomplete or cleanup pending");
+    fake.gammaGet = fake.release = true;
+    Check(filter.initialize(), "initial capture cleanup and fresh initialization retry");
+    CheckGammaCachedLifecycle(filter, "Ready; filter off");
+    Check(filter.enable(), "activate while holding the original for eventual restoration");
+    CheckGammaCachedLifecycle(filter, "Active; red output confirmed at last operation");
+    fake.writes = {Write::FailAfterApply};
+    Check(!filter.disable(), "a partially applied restoration cannot remain confirmed active");
+    CheckGammaCachedLifecycle(filter, "Restoration pending; red output unconfirmed");
+    fake.mutexRelease = false;
+    Check(!filter.disable(), "confirmed original restoration still owns a failed-release guard");
+    CheckGammaCachedLifecycle(filter, "Filter off; ownership release pending");
+    fake.ramp[0][100] = 1234; const auto writes = fake.gammaWrites;
+    fake.mutexRelease = true; fake.mutexClose = false;
+    Check(!filter.disable(), "successful mutex release with failed handle close");
+    CheckGammaCachedLifecycle(filter, "Filter off; ownership handle cleanup pending");
+    fake.mutexClose = true;
+    Check(filter.disable() && fake.gammaWrites == writes && fake.ramp[0][100] == 1234, "cleanup retry does not rewrite later external calibration");
+    CheckGammaCachedLifecycle(filter, "Ready; filter off");
+    Check(filter.shutdown(), "release cached DC");
+    CheckGammaCachedLifecycle(filter, "Released; backend not initialized");
+}
+void GammaCachedLifecycleRejectedOwnership() {
+    for (bool abandoned : {false, true}) {
+        Reset(); GammaRampFilter filter;
+        fake.captureDiagnosticText = fake.diagnosticsClobbersError = true;
+        Check(filter.initialize(), "prepare rejected ownership fixture");
+        fake.mutexWaitResult = abandoned ? WAIT_ABANDONED : WAIT_TIMEOUT;
+        fake.mutexRelease = !abandoned; fake.mutexClose = false;
+        Check(!filter.enable() && filter.needsRestore() && !filter.isActive() && fake.gammaWrites == 0, "rejected wait cleanup has no display write");
+        CheckGammaCachedLifecycle(filter, abandoned ? "Activation blocked; abandoned ownership cleanup pending" : "Filter off; ownership handle cleanup pending");
+        fake.mutexRelease = true;
+        Check(!filter.disable(), "failed handle close remains represented after ownership release");
+        CheckGammaCachedLifecycle(filter, abandoned ? "Activation blocked; abandoned ownership cleanup pending" : "Filter off; ownership handle cleanup pending");
+        fake.mutexClose = true;
+        Check(filter.disable() && !filter.needsRestore(), "cleanup can complete without a pending ramp restoration");
+        CheckGammaCachedLifecycle(filter, abandoned ? "Ready/off; activation blocked after abandoned ownership" : "Ready; filter off");
+        Check(filter.shutdown(), "clean resources after rejected/abandoned ownership");
+        CheckGammaCachedLifecycle(filter, abandoned ? "Released; activation blocked after abandoned ownership" : "Released; backend not initialized");
+        fake.mutexWaitResult = WAIT_OBJECT_0;
+        Check(filter.initialize() && filter.enable() == !abandoned, "cached diagnostics cannot clear the abandoned-owner process-lifetime latch");
+        CheckGammaCachedLifecycle(filter, abandoned ? "Ready/off; activation blocked after abandoned ownership" : "Active; red output confirmed at last operation");
+        Check(filter.shutdown(), "finish ownership fixture");
+    }
+}
+void GammaLifecycleReportUsesCachedSnapshot() {
+    GammaRampFilter filter;
+    Check(filter.initialize() && filter.enable(), "prepare historical Gamma support snapshot");
+    fake.writes = {Write::Fail};
+    Check(!filter.disable(), "prepare pending original calibration recovery");
+    SupportReportState state; state.backend = filter.name(); state.backendLifecycle = filter.lifecycleDescription();
+    state.active = filter.isActive(); state.needsRestore = filter.needsRestore(); state.lastError = "saved diagnostic";
+    const auto statistics = filter.statistics(); const auto clocks = fake.backendClockReads;
+    const auto reads = fake.gammaReads, writes = fake.gammaWrites, releases = fake.mutexReleases;
+    const auto report = BuildSupportReport(state);
+    Check(report.find("Backend: GammaRampFilter\r\nBackend lifecycle: Restoration pending; red output unconfirmed\r\n") != std::string::npos &&
+        report.find("State: Recovery needed") != std::string::npos && filter.statistics() == statistics && fake.backendClockReads == clocks &&
+        fake.gammaReads == reads && fake.gammaWrites == writes && fake.mutexReleases == releases && fake.mutexOwned,
+        "support formatting uses cached lifecycle and retains inactive Gamma recovery ownership without new API or clock work");
+    Check(filter.shutdown() && state.backendLifecycle == "Restoration pending; red output unconfirmed" && BuildSupportReport(state) == report,
+        "copied static lifecycle labels and report state remain historical after successful recovery/release");
+}
 void GammaResourceFailures() {
     GammaRampFilter f;
     fake.dc = false;
@@ -5676,6 +5758,8 @@ int main() {
         {"Gamma read failures", GammaReadFailures}, {"Gamma resource failures", GammaResourceFailures},
         {"Gamma failed restoration recovery-only", GammaFailedRestorationIsRecoveryOnly}, {"Gamma ambiguous activation/rollback", GammaAmbiguousActivationAndRollback},
         {"Gamma initialization cleanup retry", GammaInitializationCleanupRetry}, {"Gamma native error provenance", GammaNativeFailureErrorProvenance},
+        {"Gamma cached lifecycle transitions", GammaCachedLifecycleTransitions}, {"Gamma cached lifecycle rejected ownership", GammaCachedLifecycleRejectedOwnership},
+        {"Gamma cached lifecycle support snapshot", GammaLifecycleReportUsesCachedSnapshot},
         {"Gamma ownership lifecycle", GammaOwnershipLifecycle}, {"Gamma ownership conflict/wait failure", GammaOwnershipConflictAndWaitFailure},
         {"Gamma ownership creation failure", GammaOwnershipCreationFailure}, {"Gamma ownership capture cleanup", GammaOwnershipCaptureFailuresReleaseGuard},
         {"Gamma ownership failed restoration", GammaOwnershipRestoreFailureRetainsGuard}, {"Gamma ownership cleanup retry", GammaOwnershipCleanupRetryDoesNotRewrite},
