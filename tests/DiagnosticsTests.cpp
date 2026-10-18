@@ -1,5 +1,7 @@
 // Production Diagnostics.cpp linked exclusively to in-memory Win32 file API fakes.
 #include "Diagnostics.h"
+#include "MemoryFault.h"
+#include "RecentDiagnostics.h"
 #include <windows.h>
 #include <algorithm>
 #include <cstdio>
@@ -150,6 +152,83 @@ void ConcurrentRecords() {
     const auto& data = fake.files.at(Path())->bytes;
     Check(std::count(data.begin(), data.end(), '\n') == 400 && Diagnostics::GetStatus().droppedLines == 0, "thread-safe complete records");
 }
+void RecentLogRetainsUnavailableRecords() {
+    fake.failOpen = true;
+    Diagnostics::Initialize();
+    Diagnostics::Log("record retained despite unavailable file");
+    const auto status = Diagnostics::GetStatus();
+    const auto debug = fake.lastDebug;
+    const auto writes = fake.writes;
+    const auto text = Diagnostics::RecentLogText();
+    Check(text && text->find("diagnostics open failed") != std::string::npos &&
+        text->find("record retained despite unavailable file") != std::string::npos &&
+        text->find("Retained records: 2/32") != std::string::npos, "file-open warning and skipped file record remain shareable in memory");
+    const auto after = Diagnostics::GetStatus();
+    Check(after.file == status.file && after.droppedLines == status.droppedLines && after.lastFileError == status.lastFileError &&
+        fake.writes == writes && fake.lastDebug == debug && fake.files.empty(), "snapshot reading performs no logging/file retry or health mutation");
+    fake.failOpen = false;
+    Check(Diagnostics::RetryFileLogging() && Diagnostics::RecentLogText()->find("record retained despite unavailable file") != std::string::npos,
+        "logging retry preserves earlier retained failure records");
+}
+void RecentLogLifecycleAndOrder() {
+    Diagnostics::Initialize();
+    for (unsigned record = 0; record < 40; ++record) Diagnostics::LogFormat("retained-%02u", record);
+    auto text = Diagnostics::RecentLogText();
+    Check(text && text->find("Retained records: 32/32") != std::string::npos && text->find("Earlier records overwritten: 8") != std::string::npos &&
+        text->find("retained-07") == std::string::npos && text->find("retained-08") < text->find("retained-09") &&
+        text->ends_with("retained-39\r\n"), "production recording keeps the last 32 complete records in chronological order");
+    Diagnostics::Initialize();
+    Check(Diagnostics::RecentLogText() == text, "idempotent initialization does not erase live diagnostics");
+    Diagnostics::Shutdown();
+    Check(Diagnostics::RecentLogText() == text, "successful shutdown leaves memory history available");
+    Diagnostics::Initialize();
+    text = Diagnostics::RecentLogText();
+    Check(text && text->find("Retained records: 0/32") != std::string::npos && text->find("retained-39") == std::string::npos,
+        "new logging lifecycle resets visible records and overwrite count");
+}
+void RecentLogTruncationAndUnicode() {
+    Diagnostics::Initialize();
+    Diagnostics::Log("Unicode retained: \xe2\x82\xac");
+    const std::string longUnicode = std::string(1899, 'x') + "\xe2\x82\xac";
+    Diagnostics::Log(longUnicode.c_str());
+    const auto text = Diagnostics::RecentLogText();
+    Check(text && text->size() < RecentDiagnosticsBuffer::maximumTextBytes && IsValidUtf8(*text) &&
+        text->find("Unicode retained: \xe2\x82\xac") != std::string::npos && text->find("\\xE2 [truncated]") != std::string::npos &&
+        Diagnostics::GetStatus().truncatedLines == 1, "complete formatted records preserve valid Unicode and escape a truncated multibyte tail without losing the truncation marker");
+}
+void RecentLogPreparationFailure() {
+    Diagnostics::Initialize();
+    Diagnostics::Log("record survives snapshot allocation failure");
+    const auto debug = fake.lastDebug;
+    const auto writes = fake.writes;
+    bool failed = false, consumed = false;
+    {
+        TestMemory::FailNextAllocation fail;
+        failed = !Diagnostics::RecentLogText();
+        consumed = !TestMemory::AllocationFailurePending();
+    }
+    Check(failed && consumed && fake.writes == writes && fake.lastDebug == debug &&
+        Diagnostics::RecentLogText()->find("record survives snapshot allocation failure") != std::string::npos,
+        "snapshot allocation failure is contained without logging, file I/O, history loss, or held-lock leakage");
+}
+void RecentLogConcurrentSnapshots() {
+    Diagnostics::Initialize();
+    std::vector<std::thread> workers;
+    for (unsigned worker = 0; worker < 2; ++worker) workers.emplace_back([worker] {
+        for (unsigned record = 0; record < 50; ++record) Diagnostics::LogFormat("snapshot-worker=%u record=%u", worker, record);
+    });
+    bool valid = true;
+    for (unsigned sample = 0; sample < 50; ++sample) {
+        const auto text = Diagnostics::RecentLogText();
+        valid = text && text->starts_with("RedLight recent diagnostics\r\n") && IsValidUtf8(*text) && valid;
+    }
+    for (auto& worker : workers) worker.join();
+    const auto text = Diagnostics::RecentLogText();
+    std::size_t count = 0, position = 0;
+    if (text) while ((position = text->find("snapshot-worker=", position)) != std::string::npos) { ++count; ++position; }
+    Check(valid && text && count == 32 && text->find("Earlier records overwritten: 68") != std::string::npos &&
+        Diagnostics::GetStatus().droppedLines == 0, "concurrent snapshots and writers remain complete, bounded, and synchronized");
+}
 Handle* OpenHandle(HANDLE raw) {
     if (!raw || raw == INVALID_HANDLE_VALUE) { lastError = ERROR_INVALID_HANDLE; return nullptr; }
     auto* handle = static_cast<Handle*>(raw);
@@ -220,7 +299,10 @@ int main() {
         {"Unicode paths and bounded records", UnicodeAndBoundedLines}, {"Runtime archive rotation", RuntimeRotation},
         {"Rotation failure and retry", RotationFailureAndRecovery}, {"File write/size failures", FileFailures},
         {"Close failure retry", CloseFailureRetry}, {"Flush failure", FlushFailureStillCloses}, {"Directory/open failures", DirectoryAndOpenFailures},
-        {"File logging retry", RetryFileLogging}, {"Concurrent complete records", ConcurrentRecords}
+        {"File logging retry", RetryFileLogging}, {"Concurrent complete records", ConcurrentRecords},
+        {"Recent logs with unavailable storage", RecentLogRetainsUnavailableRecords}, {"Recent log lifecycle/order", RecentLogLifecycleAndOrder},
+        {"Recent log truncation/Unicode", RecentLogTruncationAndUnicode}, {"Recent log allocation failure", RecentLogPreparationFailure},
+        {"Recent log concurrent snapshots", RecentLogConcurrentSnapshots}
     };
     int failures = 0;
     for (const auto& [name, run] : tests) {

@@ -28,6 +28,8 @@
 #include "LoopShutdown.h"
 #include "TrayMenu.h"
 #include "StatusClipboard.h"
+#include "RecentDiagnostics.h"
+#include "RecentDiagnosticsClipboard.h"
 #include "FilterControl.h"
 #include <memory>
 #include "InstanceName.h"
@@ -125,6 +127,8 @@ struct Fake {
     unsigned stdoutWhileProfileOpen = 0;
     DWORD stdoutErrorMode = 0;
     bool diagnosticsClobbersError = false;
+    bool recentDiagnosticsAvailable = true;
+    std::string recentDiagnosticsText;
     int stdoutFailOnCall = 0;
     bool sessionRegister = true, sessionUnregister = true, sessionRegisterThrows = false;
     DWORD sessionError = 1702, sessionFlags = 999;
@@ -3413,7 +3417,7 @@ void ExpertDiagnosticsMenuLayoutAndOwnership() {
     const auto diagnostics = FakeMenuChild(expert, "Dia&gnostics");
     Check(expert && diagnostics && FakeMenuCommand(expert, ID_TRAY_SAVE_PREFERENCES) && FakeMenuCommand(expert, ID_TRAY_IMPORT_PROFILE),
         "expert choices and preference transfer remain distinct from the diagnostic submenu");
-    for (const auto id : {ID_TRAY_VERIFY_BACKEND, ID_TRAY_COPY_REPORT, ID_TRAY_COPY_STATUS_JSON, ID_TRAY_REFRESH_DISPLAY_CONTEXT, ID_TRAY_RETRY_LOGGING, ID_TRAY_RETRY_SESSION,
+    for (const auto id : {ID_TRAY_VERIFY_BACKEND, ID_TRAY_COPY_REPORT, ID_TRAY_COPY_STATUS_JSON, ID_TRAY_COPY_RECENT_DIAGNOSTICS, ID_TRAY_REFRESH_DISPLAY_CONTEXT, ID_TRAY_RETRY_LOGGING, ID_TRAY_RETRY_SESSION,
         ID_TRAY_RETRY_SHORTCUTS, ID_TRAY_RESET_BACKEND_COUNTS, ID_TRAY_CLEAR_RESTORATION_HISTORY})
         Check(FakeMenuCommand(diagnostics, id) && !FakeMenuCommand(expert, id), "all diagnostic/retry/bookkeeping actions are grouped exactly once");
     for (const auto& menu : fake.menus) Check(UniqueMenuAccelerators(*menu), "assigned keyboard accelerators remain unique within each submenu");
@@ -3520,6 +3524,95 @@ void StatusClipboardRetainsPendingGammaRecovery() {
         fake.mutexOwned && fake.gammaReads == reads && fake.gammaWrites == writes && fake.mutexReleases == releases && filter.statistics() == statistics,
         "conservative JSON export preserves pending snapshot/ownership/error state and performs no recovery/backend call");
     Check(filter.disable(), "original gamma calibration remains recoverable after status export");
+}
+void RecentDiagnosticsRingOrderAndBounds() {
+    RecentDiagnosticsBuffer buffer;
+    std::string output(RecentDiagnosticsBuffer::maximumTextBytes, '\0');
+    for (unsigned index = 0; index < 40; ++index) {
+        char line[32];
+        std::snprintf(line, sizeof(line), "record-%02u\r\n", index);
+        Check(buffer.append(line), "complete bounded record accepted");
+    }
+    const auto text = buffer.format(output);
+    Check(text && text->find("Retained records: 32/32") != std::string_view::npos &&
+        text->find("Earlier records overwritten: 8") != std::string_view::npos && text->find("record-07") == std::string_view::npos &&
+        text->find("record-08") < text->find("record-09") && text->ends_with("record-39\r\n"),
+        "bounded ring exports oldest retained first and reports overwritten history");
+    const std::string tooLarge(RecentDiagnosticsBuffer::lineBytes, 'x');
+    Check(!buffer.append({}) && !buffer.append(tooLarge) && buffer.format(output)->ends_with("record-39\r\n"),
+        "empty/oversized records are rejected without disturbing retained history");
+    std::array<char, 8> small{};
+    Check(!buffer.format(small) && !buffer.format({}), "insufficient export buffers cannot expose a partial successful snapshot");
+    buffer.clear();
+    const auto cleared = buffer.format(output);
+    Check(cleared && cleared->find("Retained records: 0/32") != std::string_view::npos &&
+        cleared->find("Earlier records overwritten: 0") != std::string_view::npos && cleared->find("record-39") == std::string_view::npos,
+        "new logging lifecycle clears visible history and overwrite count");
+}
+void RecentDiagnosticsUtf8AndMaximumExport() {
+    RecentDiagnosticsBuffer buffer;
+    std::string output(RecentDiagnosticsBuffer::maximumTextBytes, '\0');
+    Check(buffer.append("Unicode: \xe2\x82\xac\r\n") && buffer.append(std::string_view("bad:\xff\\\0\x7f\r\n", 10)), "retain valid Unicode and malformed bytes");
+    auto text = buffer.format(output);
+    Check(text && IsValidUtf8(*text) && text->find('\0') == std::string_view::npos &&
+        text->find("Unicode: \xe2\x82\xac\r\n") != std::string_view::npos &&
+        text->find("bad:\\xFF\\x5C\\x00\\x7F\r\n") != std::string_view::npos,
+        "valid Unicode is preserved and malformed records become unambiguous clipboard-safe escapes");
+    buffer.clear();
+    const std::string largest(RecentDiagnosticsBuffer::lineBytes - 1, static_cast<char>(0xff));
+    for (std::size_t index = 0; index < RecentDiagnosticsBuffer::capacity; ++index) Check(buffer.append(largest), "largest supported record accepted");
+    text = buffer.format(output);
+    Check(text && text->size() <= RecentDiagnosticsBuffer::maximumTextBytes && IsValidUtf8(*text) && text->ends_with("\\xFF"),
+        "worst-case escaped full ring fits the published export bound without truncation");
+}
+void RecentDiagnosticsRecordingNoAllocation() {
+    RecentDiagnosticsBuffer buffer;
+    std::string output(RecentDiagnosticsBuffer::maximumTextBytes, '\0');
+    bool accepted = true, formatted = false, unused = false;
+    {
+        TestMemory::FailNextAllocation fail;
+        for (unsigned index = 0; index < 100; ++index) accepted = buffer.append("retained under memory pressure\r\n") && accepted;
+        formatted = buffer.format(output).has_value();
+        unused = TestMemory::AllocationFailurePending();
+    }
+    Check(accepted && formatted && unused, "recording, overwrite, and formatting into prepared storage allocate nothing");
+}
+void RecentDiagnosticsClipboardPreparationAndRecovery() {
+    GammaRampFilter filter;
+    Check(filter.initialize(), "prepare gamma recovery");
+    fake.writes = {Write::FailAfterApply, Write::Fail};
+    Check(!filter.enable() && filter.needsRestore(), "retain pending recovery snapshot");
+    const auto reads = fake.gammaReads, writes = fake.gammaWrites, releases = fake.mutexReleases;
+    const auto statistics = filter.statistics();
+    fake.recentDiagnosticsText = "RedLight retained diagnostic records\r\n";
+    fake.clipMemory = {L'k', L'e', L'e', L'p', 0};
+    fake.recentDiagnosticsAvailable = false;
+    Check(!CopyRecentDiagnosticsToClipboard(nullptr) && fake.clipAllocations == 0 && fake.clipOpens == 0, "unavailable snapshot fails before touching clipboard");
+    fake.recentDiagnosticsAvailable = true;
+    {
+        TestMemory::FailNextAllocation fail;
+        Check(!CopyRecentDiagnosticsToClipboard(nullptr) && fake.clipOpens == 0 && fake.clipEmpties == 0 && fake.clipAllocations == 0,
+            "snapshot allocation failure is contained before clipboard preparation");
+    }
+    Check(std::wstring_view(fake.clipMemory.data()) == L"keep" && CopyRecentDiagnosticsToClipboard(nullptr) &&
+        std::wstring_view(fake.clipMemory.data()) == L"RedLight retained diagnostic records\r\n" &&
+        !CommandMayChangeFilter(ID_TRAY_COPY_RECENT_DIAGNOSTICS) && !filter.isActive() && filter.needsRestore() && fake.mutexOwned &&
+        fake.gammaReads == reads && fake.gammaWrites == writes && fake.mutexReleases == releases && filter.statistics() == statistics,
+        "successful cached-log copy retains recovery/ownership/counters and does no backend work");
+    Check(filter.disable(), "original calibration still restores after cached diagnostics export");
+}
+void RecentDiagnosticsClipboardFailureOwnership() {
+    for (unsigned failure = 0; failure < 3; ++failure) {
+        Reset();
+        fake.recentDiagnosticsText = "cached diagnostics\r\n";
+        if (failure == 0) fake.clipOpen = false;
+        else if (failure == 1) fake.clipSet = false;
+        else fake.clipClose = false;
+        Check(!CopyRecentDiagnosticsToClipboard(nullptr) && fake.clipFrees == (failure == 2 ? 0 : 1) &&
+            fake.magWrites == 0 && fake.gammaWrites == 0 && fake.registryWrites == 0,
+            "busy/transfer/close failures propagate and free only app-owned memory without state mutation");
+        if (failure == 0) Check(fake.clipEmpties == 0, "busy clipboard keeps existing content intact");
+    }
 }
 void ManualContextRefreshPreservesActiveBackend() {
     GammaRampFilter filter;
@@ -3937,6 +4030,10 @@ BOOL UnregisterHotKey(HWND, int id) {
 namespace Diagnostics {
 void Log(const char*) noexcept {}
 void LogFormat(const char*, ...) noexcept { if (fake.diagnosticsClobbersError) fake.lastError = ERROR_DISK_FULL; }
+std::optional<std::string> RecentLogText() noexcept {
+    try { return fake.recentDiagnosticsAvailable ? std::optional<std::string>(fake.recentDiagnosticsText) : std::nullopt; }
+    catch (...) { return std::nullopt; }
+}
 }
 int main() {
     const std::pair<const char*, void(*)()> tests[] = {
@@ -4071,6 +4168,9 @@ int main() {
         {"Status clipboard native failure propagation", StatusClipboardPropagatesNativeFailures}, {"Status clipboard allocation preparation failure", StatusClipboardPreparationAllocationFailure},
         {"Status clipboard retains pending gamma recovery", StatusClipboardRetainsPendingGammaRecovery},
         {"Manual context refresh preserves active backend", ManualContextRefreshPreservesActiveBackend}, {"Manual context refresh failure preserves cache/verification", ManualContextRefreshFailureRetainsVerificationAndAge},
+        {"Recent diagnostics ring order/bounds", RecentDiagnosticsRingOrderAndBounds}, {"Recent diagnostics Unicode/worst-case export", RecentDiagnosticsUtf8AndMaximumExport},
+        {"Recent diagnostics recording without allocation", RecentDiagnosticsRecordingNoAllocation}, {"Recent diagnostics clipboard preparation/recovery", RecentDiagnosticsClipboardPreparationAndRecovery},
+        {"Recent diagnostics clipboard failure ownership", RecentDiagnosticsClipboardFailureOwnership},
         {"Manual context refresh allocation/policy", ManualContextRefreshNoAllocationAndReadOnlyPolicy},
         {"Filter control recovery/busy priority", FilterControlRecoveryPriorityAndBusyScopes}, {"Explicit enable preserves active countdown", ExplicitEnableIntentIsIdempotentForActiveSession},
         {"Recovery menu captions/busy availability", RecoveryMenuCaptionsAndBusyAvailability}, {"Stale off-menu cannot activate", StaleTurnOffMenuCannotEnableAfterExternalRestore},

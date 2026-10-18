@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <string>
+#include <optional>
 
 namespace Diagnostics {
 enum class FileState { NotInitialized, Available, Degraded, Unavailable };
@@ -15,12 +16,13 @@ inline const char* FileStateName(FileState state) {
     case FileState::NotInitialized: return "Not initialized";
     case FileState::Available: return "Available";
     case FileState::Degraded: return "Degraded (some records were not written)";
-    case FileState::Unavailable: return "Unavailable (debugger output only)";
+    case FileState::Unavailable: return "Unavailable (memory and debugger output)";
     }
     return "Unknown";
 }
 std::wstring LogDirectory();
 Status GetStatus() noexcept;
+std::optional<std::string> RecentLogText() noexcept;
 bool RetryFileLogging() noexcept;
 void Initialize() noexcept;
 void Log(const char* message) noexcept;

@@ -35,6 +35,7 @@
 #include "ProfileExport.h"
 #include "SessionNotifications.h"
 #include "LumaPreference.h"
+#include "RecentDiagnosticsClipboard.h"
 #include "StandardOutput.h"
 #include <cstdio>
 
@@ -1288,6 +1289,14 @@ LRESULT HandleWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         case ID_TRAY_ABOUT: ShowAboutDialog(hwnd); break;
         case ID_TRAY_COPY_REPORT: CopySupportReport(hwnd); break;
         case ID_TRAY_COPY_STATUS_JSON: CopyStatusJson(hwnd); break;
+        case ID_TRAY_COPY_RECENT_DIAGNOSTICS:
+            if (!CopyRecentDiagnosticsToClipboard(hwnd)) {
+                ReportError("Recent diagnostics could not be copied. Retry when the clipboard is available.");
+            } else {
+                Diagnostics::Log("Recent in-memory diagnostics copied at user request.");
+                ShowTrayInfo("RedLight recent diagnostics copied", "Paste these retained records into a text editor. File logging may contain more history.");
+            }
+            break;
         case ID_TRAY_REFRESH_DISPLAY_CONTEXT:
             RefreshDisplayContext(DisplayContextReason::ManualRefresh);
             if (g_displayContext.lastFailed()) ReportError("Windows display metrics are unavailable. Prior cached context is retained; see the support report.", false);

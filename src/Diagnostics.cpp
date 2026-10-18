@@ -1,4 +1,5 @@
 #include "Diagnostics.h"
+#include "RecentDiagnostics.h"
 #include <windows.h>
 #include <array>
 #include <cstdarg>
@@ -11,6 +12,7 @@ bool g_initialized = false;
 SRWLOCK g_lock = SRWLOCK_INIT;
 std::array<std::wstring, 4> g_paths;
 Diagnostics::Status g_status;
+RecentDiagnosticsBuffer g_recent;
 constexpr ULONGLONG kMaxLogSizeBytes = 1ull << 20;
 constexpr std::size_t kMessageLimit = 1900;
 
@@ -44,7 +46,8 @@ void FileFailure(const char* action, DWORD error) noexcept {
     g_status.file = g_logFile == INVALID_HANDLE_VALUE ? Diagnostics::FileState::Unavailable : Diagnostics::FileState::Degraded;
     if (changed) {
         char text[256];
-        std::snprintf(text, sizeof(text), "RedLight: diagnostics %s failed (error %lu); continuing with debugger output.\n", action, error);
+        std::snprintf(text, sizeof(text), "RedLight: diagnostics %s failed (error %lu); continuing with memory and debugger output.\n", action, error);
+        g_recent.append(text);
         OutputDebugStringA(text);
     }
 }
@@ -118,6 +121,7 @@ void WriteLine(const char* message, bool formatTruncated = false) noexcept {
         return;
     }
     Guard guard;
+    g_recent.append(std::string_view(line, static_cast<std::size_t>(length)));
     OutputDebugStringA(line);
     if (!g_initialized) return;
     if (truncated) ++g_status.truncatedLines;
@@ -139,9 +143,21 @@ void WriteLine(const char* message, bool formatTruncated = false) noexcept {
 namespace Diagnostics {
 std::wstring LogDirectory() { return BuildLogDirectory(); }
 Status GetStatus() noexcept { Guard guard; return g_status; }
+std::optional<std::string> RecentLogText() noexcept {
+    try {
+        // Allocate before taking the logger lock; snapshot construction does no I/O/logging.
+        std::string text(RecentDiagnosticsBuffer::maximumTextBytes, '\0');
+        Guard guard;
+        const auto formatted = g_recent.format(text);
+        if (!formatted) return std::nullopt;
+        text.resize(formatted->size());
+        return text;
+    } catch (...) { return std::nullopt; }
+}
 void Initialize() noexcept {
     Guard guard;
     if (g_initialized) return;
+    g_recent.clear();
     g_status = {};
     g_initialized = true;
     try {

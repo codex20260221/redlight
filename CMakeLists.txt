@@ -25,7 +25,7 @@ add_custom_target(RedLightBuildInfo
 )
 
 add_executable(RedLight WIN32
-    src/Diagnostics.cpp src/Clipboard.cpp src/PreferencesStore.cpp src/TrayMenu.cpp src/SessionLimitDialog.cpp src/HotkeyManager.cpp src/StandardOutput.cpp src/StatusQuery.cpp src/StartupOptions.cpp src/ProfileValidation.cpp src/ProfileExport.cpp src/SessionNotifications.cpp src/BuildMetadata.cpp src/ProfileComparison.cpp src/ProfileSave.cpp src/DisplayContext.cpp src/SavedSettings.cpp src/CommandHelp.cpp src/StatusClipboard.cpp src/main.cpp
+    src/Diagnostics.cpp src/Clipboard.cpp src/PreferencesStore.cpp src/TrayMenu.cpp src/SessionLimitDialog.cpp src/HotkeyManager.cpp src/StandardOutput.cpp src/StatusQuery.cpp src/StartupOptions.cpp src/ProfileValidation.cpp src/ProfileExport.cpp src/SessionNotifications.cpp src/BuildMetadata.cpp src/ProfileComparison.cpp src/ProfileSave.cpp src/DisplayContext.cpp src/SavedSettings.cpp src/CommandHelp.cpp src/StatusClipboard.cpp src/RecentDiagnosticsClipboard.cpp src/main.cpp
     src/GammaRampFilter.cpp src/MagnificationFilter.cpp
     resources/app.rc
 )
@@ -47,14 +47,14 @@ endif()
 include(CTest)
 if(BUILD_TESTING)
     add_executable(RedLightCodeTests
-        tests/CodeTests.cpp tests/MemoryFault.cpp src/MagnificationFilter.cpp src/GammaRampFilter.cpp src/Clipboard.cpp src/PreferencesStore.cpp src/HotkeyManager.cpp src/StandardOutput.cpp src/StatusQuery.cpp src/StartupOptions.cpp src/ProfileValidation.cpp src/ProfileExport.cpp src/SessionNotifications.cpp src/BuildMetadata.cpp src/ProfileComparison.cpp src/ProfileSave.cpp src/DisplayContext.cpp src/SavedSettings.cpp src/CommandHelp.cpp src/StatusClipboard.cpp src/TrayMenu.cpp)
+        tests/CodeTests.cpp tests/MemoryFault.cpp src/MagnificationFilter.cpp src/GammaRampFilter.cpp src/Clipboard.cpp src/PreferencesStore.cpp src/HotkeyManager.cpp src/StandardOutput.cpp src/StatusQuery.cpp src/StartupOptions.cpp src/ProfileValidation.cpp src/ProfileExport.cpp src/SessionNotifications.cpp src/BuildMetadata.cpp src/ProfileComparison.cpp src/ProfileSave.cpp src/DisplayContext.cpp src/SavedSettings.cpp src/CommandHelp.cpp src/StatusClipboard.cpp src/RecentDiagnosticsClipboard.cpp src/TrayMenu.cpp)
     # Fake headers provide every display API: this target cannot call real display APIs.
     target_include_directories(RedLightCodeTests BEFORE PRIVATE tests/fake_win32 src)
     target_compile_definitions(RedLightCodeTests PRIVATE REDLIGHT_FAKE_WIN32=1)
     if(MSVC)
         target_compile_options(RedLightCodeTests PRIVATE /W4 /WX /permissive- /utf-8 /EHsc)
     endif()
-    add_executable(RedLightDiagnosticsCodeTests tests/DiagnosticsTests.cpp src/Diagnostics.cpp)
+    add_executable(RedLightDiagnosticsCodeTests tests/DiagnosticsTests.cpp tests/MemoryFault.cpp src/Diagnostics.cpp)
     target_include_directories(RedLightDiagnosticsCodeTests BEFORE PRIVATE tests/fake_win32 src)
     target_compile_definitions(RedLightDiagnosticsCodeTests PRIVATE REDLIGHT_FAKE_WIN32=1)
     if(MSVC)

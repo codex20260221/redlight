@@ -69,6 +69,7 @@ HMENU BuildTrayMenu(const TrayMenuState& state) {
     if (!diagnostics.add(ID_TRAY_VERIFY_BACKEND, "&Verify backend state") ||
         !diagnostics.add(ID_TRAY_COPY_REPORT, "&Copy support report") ||
         !diagnostics.add(ID_TRAY_COPY_STATUS_JSON, "Copy status &JSON") ||
+        !diagnostics.add(ID_TRAY_COPY_RECENT_DIAGNOSTICS, "Copy recent dia&gnostics") ||
         !diagnostics.add(ID_TRAY_REFRESH_DISPLAY_CONTEXT, "Refresh dis&play context") ||
         !diagnostics.add(ID_TRAY_RETRY_LOGGING, "&Retry file logging") ||
         !diagnostics.add(ID_TRAY_RETRY_SESSION, "Retry session rec&overy") ||

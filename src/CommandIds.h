@@ -25,6 +25,7 @@ inline constexpr unsigned ID_TRAY_CLEAR_RESTORATION_HISTORY = 219;
 inline constexpr unsigned ID_TRAY_COPY_STATUS_JSON = 220;
 inline constexpr unsigned ID_TRAY_REFRESH_DISPLAY_CONTEXT = 221;
 inline constexpr unsigned ID_TRAY_ENABLE = 222; // Explicit intent from an already displayed menu.
+inline constexpr unsigned ID_TRAY_COPY_RECENT_DIAGNOSTICS = 223;
 inline constexpr unsigned ID_HOTKEY_TOGGLE = 1;
 inline constexpr unsigned ID_HOTKEY_RESTORE = 2;
 inline constexpr unsigned ID_TRAY_RETRY_TIMER = 1;
