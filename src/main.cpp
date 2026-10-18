@@ -793,6 +793,7 @@ void CopySupportReport(HWND owner) {
     state.lastError = g_displayFilter->lastError();
     state.active = g_displayFilter->isActive();
     state.needsRestore = g_displayFilter->needsRestore();
+    state.restoreRequested = g_pendingRestore;
     state.toggleHotkey = g_hotkeys.toggle().has_value();
     state.restoreHotkey = g_hotkeys.restore().has_value();
     state.shortcutProfile = ShortcutProfileName(g_preferences.shortcuts);
@@ -885,7 +886,7 @@ void ConfirmPreferences(HWND owner, const AppPreferences& candidate, const char*
 
 const char* FilterStatusText() {
     return FilterStatusDescription(g_displayFilter->isActive(), g_displayFilter->needsRestore(),
-        g_displayFilter->lastError()[0] != 0, g_verification.state);
+        g_displayFilter->lastError()[0] != 0, g_verification.state, g_pendingRestore);
 }
 
 void VerifyBackendState(HWND owner) {
@@ -976,26 +977,26 @@ void ShowTrayMenu(HWND hwnd) {
 }
 
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) noexcept {
+    const LRESULT fallback = uMsg == WM_CREATE ? -1 : (uMsg == WM_QUERYENDSESSION ? TRUE : 0);
     return GuardUiCall<LRESULT>([&] { return HandleWindowMessage(hwnd, uMsg, wParam, lParam); },
         [&](const char* error) -> LRESULT {
             Diagnostics::LogFormat("C++ failure in window message %u: %s", uMsg, error);
             if (uMsg == WM_REDLIGHT_STATUS) return 0; // Read-only automation never restores or opens an error dialog.
             const bool mayChangeFilter = uMsg == WM_COMMAND ? CommandMayChangeFilter(LOWORD(wParam)) :
-                uMsg != WM_TRAYICON;
-            if (mayChangeFilter) {
-                if (g_busy) g_pendingRestore = true;
-                else {
-                    try { RestoreFilter(false); }
-                    catch (...) { Diagnostics::Log("C++ failure during emergency restoration; recovery data retained."); }
+                (uMsg == WM_REDLIGHT_UI_ERROR ? wParam != 0 : uMsg != WM_TRAYICON);
+            const auto recovery = RecoveryAfterUiFailure(mayChangeFilter, g_pendingRestore, g_busy);
+            if (recovery == UiFailureRecovery::Defer) g_pendingRestore = true;
+            else if (recovery == UiFailureRecovery::Restore) {
+                try { RestoreFilter(false); }
+                catch (...) {
+                    g_pendingRestore = true;
+                    Diagnostics::Log("C++ failure during emergency restoration; restore request and recovery data retained.");
                 }
             }
-            if (uMsg != WM_REDLIGHT_UI_ERROR && !PostMessageA(hwnd, WM_REDLIGHT_UI_ERROR, mayChangeFilter ? 1 : 0, 0))
+            if (uMsg != WM_REDLIGHT_UI_ERROR && !PostMessageA(hwnd, WM_REDLIGHT_UI_ERROR, recovery != UiFailureRecovery::None ? 1 : 0, 0))
                 Diagnostics::LogFormat("Posting internal-error notification failed (error %lu).", GetLastError());
-            if (uMsg == WM_NCCREATE) return FALSE;
-            if (uMsg == WM_CREATE) return -1;
-            if (uMsg == WM_QUERYENDSESSION) return TRUE;
-            return 0;
-        });
+            return fallback;
+        }, fallback);
 }
 
 LRESULT HandleWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
@@ -1026,7 +1027,7 @@ LRESULT HandleWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         state.restore = StatusShortcutKey(g_hotkeys.restore());
         state.settingsUnsaved = g_preferencesUnsaved;
         state.sessionNotifications = g_sessionNotifications.isRegistered();
-        state.busy = g_busy || g_preferencesApplying;
+        state.busy = g_busy || g_preferencesApplying || g_pendingRestore;
         const auto logging = Diagnostics::GetStatus();
         state.fileLogging = logging.file;
         state.missingFileRecords = logging.droppedLines != 0;

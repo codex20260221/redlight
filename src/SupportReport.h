@@ -22,6 +22,7 @@ struct SupportReportState {
     std::uint64_t droppedLogLines = 0, truncatedLogLines = 0;
     std::uint32_t lastFileError = 0;
     bool active = false, needsRestore = false;
+    bool restoreRequested = false;
     bool toggleHotkey = false, restoreHotkey = false, sessionNotifications = false;
     std::uint32_t sessionNotificationError = 0;
     unsigned sessionMinutes = 0;
@@ -38,7 +39,7 @@ inline std::string BuildSupportReport(const SupportReportState& state) {
         << (state.commandLineOverride ? " (command-line override)" : "")
         << "\r\nNext-start preference: " << state.nextStartupPolicy << "\r\nMode: " << state.redMode
         << "\r\nLuma detail: " << state.lumaProfile << "\r\nState: "
-        << FilterStatusDescription(state.active, state.needsRestore, !state.lastError.empty(), state.verification)
+        << FilterStatusDescription(state.active, state.needsRestore, !state.lastError.empty(), state.verification, state.restoreRequested)
         << "\r\nBackend verification: " << BackendVerificationName(state.verification);
     if (state.readback) {
         const auto& readback = *state.readback;
@@ -53,6 +54,7 @@ inline std::string BuildSupportReport(const SupportReportState& state) {
         << "\r\nStartup preference source: " << state.startupPreferenceSource
         << "\r\nStartup preference load warnings: " << (state.startupPreferenceWarning ? "yes" : "no")
         << "\r\nRecovery data pending: " << (state.needsRestore ? "yes" : "no")
+        << "\r\nControl restore requested: " << (state.restoreRequested ? "yes" : "no")
         << "\r\nShortcut preference: " << state.shortcutProfile
         << "\r\nToggle shortcut: " << (state.toggleHotkey ? "registered" : "unavailable") << " (" << state.toggleBinding << ")"
         << "\r\nRestore shortcut: " << (state.restoreHotkey ? "registered" : "unavailable") << " (" << state.restoreBinding << ")"

@@ -746,6 +746,12 @@ void VerificationStatusPriority() {
     Check(BuildSupportReport(state).find("State: Verification unavailable") != std::string::npos, "unavailable read-back is visible");
     state.lastError = "restore failed";
     Check(BuildSupportReport(state).find("State: Recovery needed") != std::string::npos, "failed restoration remains highest priority");
+    state.lastError = {}; state.verification = BackendVerification::Matches; state.restoreRequested = true;
+    const auto pending = BuildSupportReport(state);
+    Check(pending.find("State: Recovery needed") != std::string::npos && pending.find("Control restore requested: yes") != std::string::npos,
+        "queued control restoration outranks an earlier healthy active state");
+    Check(std::string_view(FilterStatusDescription(false, true, false, BackendVerification::NotChecked)) == "Recovery needed",
+        "inactive pending ownership/restore state cannot be reported simply off");
 }
 void CustomSessionLimitParsing() {
     for (const unsigned minutes : {0u, 1u, 15u, 57u, 239u, 240u}) {
@@ -862,7 +868,7 @@ void ReadOnlyUiFailureRetainsFilter() {
         return CopyUtf8TextToClipboard(nullptr, report) ? 1L : 2L;
     }, [&](const char*) {
         caught = true;
-        if (CommandMayChangeFilter(ID_TRAY_COPY_REPORT)) filter.disable();
+        if (RecoveryAfterUiFailure(CommandMayChangeFilter(ID_TRAY_COPY_REPORT), false, false) == UiFailureRecovery::Restore) filter.disable();
         return 0L;
     });
     Check(result == 0 && caught && filter.isActive() && filter.needsRestore() && fake.magWrites == 1 && fake.clipOpens == 0,
@@ -879,7 +885,7 @@ void MutatingUiFailureRestoresAfterUnwind() {
         throw std::runtime_error("injected action failure");
     }, [&](const char*) {
         sawUnwind = !busy;
-        return CommandMayChangeFilter(ID_TRAY_TOGGLE) && filter.disable() ? 0L : -1L;
+        return RecoveryAfterUiFailure(CommandMayChangeFilter(ID_TRAY_TOGGLE), false, busy) == UiFailureRecovery::Restore && filter.disable() ? 0L : -1L;
     });
     Check(result == 0 && sawUnwind && !busy && !filter.isActive() && Same(fake.effect, original),
         "busy flag unwinds before failure recovery restores original display state");
@@ -910,6 +916,8 @@ void NestedUiFlagsAndFailureHandler() {
     Check(!busy, "outer scope restores prior state");
     const auto result = GuardUiCall<long>([]() -> long { throw 1; }, [](const char*) -> long { throw 2; });
     Check(result == 0, "failure-handler exceptions cannot cross native callback boundary");
+    const auto failedCreate = GuardUiCall<LRESULT>([]() -> LRESULT { throw std::runtime_error("action"); }, [](const char*) -> LRESULT { throw 2; }, LRESULT{-1});
+    Check(failedCreate == -1, "native creation failure fallback cannot accidentally become success when its error handler also fails");
     Check(!CommandMayChangeFilter(ID_TRAY_COPY_PROFILE) && !CommandMayChangeFilter(ID_TRAY_LOGS) &&
         CommandMayChangeFilter(ID_TRAY_IMPORT_PROFILE) && CommandMayChangeFilter(ID_TRAY_RESET_PREFERENCES), "display recovery policy distinguishes read-only tools from mutating actions");
 }
@@ -1557,6 +1565,45 @@ void SessionNotificationReport() {
         "registration recovery and display-read-only failure policy are explicit");
     Check(fake.sessionRegisters == 0 && fake.magReads == 0 && fake.gammaReads == 0, "reporting cached status does not register or inspect backends");
 }
+void ReadOnlyFailureHonorsQueuedRestore() {
+    MagnificationFilter filter;
+    Check(filter.initialize(), "initialize");
+    const auto original = fake.effect;
+    Check(filter.enable(), "activate");
+    bool busy = false, requested = false, attempted = false;
+    GuardUiCall<int>([&]() -> int {
+        ScopedFlag call(busy);
+        requested = true; // A restore request arrived while the read-only operation was busy.
+        throw std::runtime_error("read-only tool failure");
+    }, [&](const char*) {
+        if (RecoveryAfterUiFailure(CommandMayChangeFilter(ID_TRAY_RETRY_SESSION), requested, busy) == UiFailureRecovery::Restore) {
+            attempted = true;
+            if (filter.disable()) requested = false;
+        }
+        return 1;
+    });
+    Check(!busy && attempted && !requested && !filter.isActive() && !filter.needsRestore() && Same(fake.effect, original),
+        "read-only failure preserves and honors the independently requested restoration after busy scope unwinds");
+}
+void QueuedRestoreRetainsOuterBusyOwnership() {
+    MagnificationFilter filter;
+    Check(filter.initialize() && filter.enable(), "activate");
+    const auto writes = fake.magWrites;
+    bool busy = false, requested = false, deferred = false;
+    {
+        ScopedFlag outer(busy);
+        GuardUiCall<int>([&]() -> int {
+            ScopedFlag inner(busy); requested = true; throw 7;
+        }, [&](const char*) {
+            deferred = RecoveryAfterUiFailure(false, requested, busy) == UiFailureRecovery::Defer;
+            if (deferred) requested = true;
+            return 1;
+        });
+        Check(deferred && busy && requested && filter.isActive() && fake.magWrites == writes, "inner failure cannot restore over an outer in-progress operation");
+        Check(RecoveryAfterUiFailure(false, false, busy) == UiFailureRecovery::None, "read-only failure without a request never queues restoration on its own");
+    }
+    Check(!busy && requested && RecoveryAfterUiFailure(false, requested, busy) == UiFailureRecovery::Restore && filter.disable(), "queued restoration remains actionable after outer scope ends");
+}
 } // namespace
 
 DWORD GetLastError() { return fake.lastError; }
@@ -1824,6 +1871,7 @@ int main() {
         {"Comparison tolerance/finite range", ComparisonToleranceAndFiniteRange}, {"Detailed verification support report", DetailedVerificationReportFormatting},
         {"Session notification ownership", SessionNotificationOwnership}, {"Session notification failure/retry", SessionNotificationFailureRecovery},
         {"Session notification reentrancy/unwind", SessionNotificationReentrancyAndUnwind}, {"Session notification support report", SessionNotificationReport},
+        {"Read-only exception with queued restore", ReadOnlyFailureHonorsQueuedRestore}, {"Queued restore under outer busy scope", QueuedRestoreRetainsOuterBusyOwnership},
         {"Command line", Arguments}
     };
     int failed = 0;

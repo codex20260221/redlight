@@ -29,13 +29,18 @@ inline bool CommandMayChangeFilter(unsigned command) noexcept {
         return true;
     }
 }
+enum class UiFailureRecovery { None, Restore, Defer };
+inline UiFailureRecovery RecoveryAfterUiFailure(bool mayChangeFilter, bool restoreRequested, bool busy) noexcept {
+    if (!mayChangeFilter && !restoreRequested) return UiFailureRecovery::None;
+    return busy ? UiFailureRecovery::Defer : UiFailureRecovery::Restore;
+}
 // Never unwind a C++ exception across a native window callback boundary.
 template<class Result, class Action, class Failure>
-Result GuardUiCall(Action&& action, Failure&& failure) noexcept {
+Result GuardUiCall(Action&& action, Failure&& failure, Result fallback = Result{}) noexcept {
     try { return action(); }
     catch (const std::exception& error) {
-        try { return failure(error.what()); } catch (...) { return Result{}; }
+        try { return failure(error.what()); } catch (...) { return fallback; }
     } catch (...) {
-        try { return failure("Unknown C++ exception"); } catch (...) { return Result{}; }
+        try { return failure("Unknown C++ exception"); } catch (...) { return fallback; }
     }
 }

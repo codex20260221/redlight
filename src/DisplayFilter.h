@@ -41,8 +41,8 @@ inline const char* BackendVerificationName(BackendVerification value) {
     return "Unknown";
 }
 
-inline const char* FilterStatusDescription(bool active, bool needsRestore, bool hasError, BackendVerification verification) {
-    if (needsRestore && hasError) return "Recovery needed";
+inline const char* FilterStatusDescription(bool active, bool needsRestore, bool hasError, BackendVerification verification, bool restoreRequested = false) {
+    if (restoreRequested || (needsRestore && (!active || hasError))) return "Recovery needed";
     if (verification == BackendVerification::Changed) return "Backend changed";
     if (verification == BackendVerification::Unavailable) return "Verification unavailable";
     return active ? "ON" : "off";
