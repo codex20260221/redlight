@@ -3,10 +3,18 @@
 #include <cstdint>
 #include <optional>
 
-// One explicit check and its monotonic timing, cleared together after filter operations.
+// One explicit check and its monotonic timing, cleared together before output changes.
 class BackendVerificationCache {
 public:
     const BackendVerificationReport& result() const noexcept { return report_; }
+    void beforeModeSelection(const DisplayFilter& filter, RedMode mode) {
+        if (filter.isActive() && filter.supportsRedMode(mode) && filter.redMode() != mode) *this = {};
+    }
+    void beforeLumaSelection(const DisplayFilter& filter, LumaProfile profile) {
+        if (IsValidLumaProfile(static_cast<unsigned>(profile)) && filter.isActive() &&
+            filter.supportsRedMode(RedMode::LumaRed) && filter.redMode() == RedMode::LumaRed &&
+            filter.lumaProfile() != profile) *this = {};
+    }
     void record(const BackendVerificationReport& report, std::uint64_t started, std::uint64_t completed) noexcept {
         if (report.state == BackendVerification::NotChecked) {
             *this = {};

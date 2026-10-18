@@ -1971,6 +1971,112 @@ void VerificationTimingWrapAndInvalidation() {
     Check(cache.result().state == BackendVerification::NotChecked && cache.result().errorCode == 0 && !cache.ageSeconds(50),
         "an unchecked replacement cannot retain an earlier failure timestamp");
 }
+void VerificationRepeatedSelectionsRetainAttention() {
+    MagnificationFilter filter;
+    Check(filter.initialize() && filter.enable(), "prepare active Luma output");
+    SessionTimer timer;
+    Check(timer.configure(1, 1000, true), "prepare restartable countdown");
+    BackendVerificationCache cache;
+    AppPreferences preferences;
+    const auto reads = fake.magReads, writes = fake.magWrites;
+    for (const auto state : {BackendVerification::Changed, BackendVerification::Unavailable}) {
+        cache.record({state, BackendReadbackDetails{25, 1, 0.5, false, true, false}, 5}, 100, 125);
+        cache.beforeModeSelection(filter, filter.redMode());
+        Check(filter.setRedMode(filter.redMode()), "same mode remains an accepted selection");
+        cache.beforeLumaSelection(filter, filter.lumaProfile());
+        Check(UpdateLumaPreference(filter, preferences, filter.lumaProfile()) == LumaPreferenceResult::Applied,
+            "same preset remains an accepted selection");
+        Check(cache.result().state == state && cache.result().errorCode == 5 && cache.result().readback->mismatches == 1 &&
+            cache.durationMilliseconds() == 25 && cache.ageSeconds(2125) == 2 &&
+            !CanRestartCountdown(timer, 2000, filter, cache.result().state, false),
+            "no-op selections retain attention, numerical details, timing, and countdown refusal");
+    }
+    Check(fake.magReads == reads && fake.magWrites == writes, "retaining cached attention performs no display reads or writes");
+}
+void VerificationStrictPresetEditsPreserveCheck() {
+    MagnificationFilter filter;
+    Check(filter.initialize() && filter.setRedMode(RedMode::StrictRed) && filter.enable(), "prepare active Strict Red output");
+    BackendVerificationCache cache;
+    cache.record(filter.inspectState(), 100, 117);
+    AppPreferences preferences;
+    const auto reads = fake.magReads, writes = fake.magWrites;
+    for (const auto profile : {LumaProfile::GreenDetail, LumaProfile::EqualDetail}) {
+        cache.beforeLumaSelection(filter, profile);
+        Check(UpdateLumaPreference(filter, preferences, profile) == LumaPreferenceResult::Applied && preferences.luma == profile && filter.lumaProfile() == profile,
+            "Strict Red accepts a future Luma preset without transforming current output");
+        Check(cache.result().state == BackendVerification::Matches && cache.result().readback->mismatches == 0 &&
+            cache.durationMilliseconds() == 17 && cache.ageSeconds(2117) == 2,
+            "Strict Red preset edits preserve the complete check and original completion time");
+    }
+    Check(fake.magReads == reads && fake.magWrites == writes && filter.disable(), "preferred detail edits do not touch current output and restoration remains available");
+}
+void VerificationInactiveAndUnsupportedSelections() {
+    MagnificationFilter filter;
+    Check(filter.initialize(), "prepare inactive backend");
+    BackendVerificationCache cache;
+    cache.record(filter.inspectState(), 10, 12);
+    AppPreferences preferences;
+    const auto reads = fake.magReads, writes = fake.magWrites;
+    cache.beforeModeSelection(filter, RedMode::StrictRed);
+    Check(filter.setRedMode(RedMode::StrictRed), "inactive mode selection");
+    cache.beforeLumaSelection(filter, LumaProfile::EqualDetail);
+    Check(UpdateLumaPreference(filter, preferences, LumaProfile::EqualDetail) == LumaPreferenceResult::Applied &&
+        cache.result().state == BackendVerification::Inactive && cache.durationMilliseconds() == 2 && cache.ageSeconds(2012) == 2 &&
+        fake.magReads == reads && fake.magWrites == writes, "inactive preference edits preserve a still-valid inactive check without native output work");
+    GammaRampFilter gamma;
+    Check(gamma.initialize() && gamma.enable(), "prepare gamma output");
+    cache.record({BackendVerification::Changed, BackendReadbackDetails{768, 1, 0.25, false, true, true}}, 100, 120);
+    const auto gammaReads = fake.gammaReads, gammaWrites = fake.gammaWrites;
+    cache.beforeModeSelection(gamma, RedMode::LumaRed);
+    cache.beforeModeSelection(gamma, RedMode::StrictRed);
+    cache.beforeLumaSelection(gamma, LumaProfile::GreenDetail);
+    Check(UpdateLumaPreference(gamma, preferences, LumaProfile::GreenDetail) == LumaPreferenceResult::PreferredOnly &&
+        cache.result().state == BackendVerification::Changed && cache.result().readback->gammaRamp &&
+        cache.durationMilliseconds() == 20 && cache.ageSeconds(2120) == 2 &&
+        fake.gammaReads == gammaReads && fake.gammaWrites == gammaWrites, "unsupported/current mode and gamma preferred-only edits cannot clear cached attention");
+}
+void VerificationLiveSelectionAttemptsInvalidate() {
+    MagnificationFilter filter;
+    Check(filter.initialize() && filter.enable(), "prepare live backend");
+    BackendVerificationCache cache;
+    cache.record(filter.inspectState(), 100, 125);
+    const auto writes = fake.magWrites;
+    cache.beforeModeSelection(filter, RedMode::StrictRed);
+    Check(cache.result().state == BackendVerification::NotChecked && !cache.result().readback &&
+        !cache.durationMilliseconds() && !cache.ageSeconds(3000) && fake.magWrites == writes,
+        "live mode selection invalidates all cached details before any write");
+    fake.magWriteResults = {Write::FailAfterApply, Write::Apply};
+    Check(!filter.setRedMode(RedMode::StrictRed) && filter.isActive() && filter.redMode() == RedMode::LumaRed &&
+        cache.result().state == BackendVerification::NotChecked, "confirmed rollback does not resurrect a pre-attempt check");
+    cache.record(filter.inspectState(), 200, 225);
+    cache.beforeLumaSelection(filter, LumaProfile::GreenDetail);
+    Check(cache.result().state == BackendVerification::NotChecked && !cache.durationMilliseconds(), "different live Luma preset invalidates before application");
+    fake.magWriteResults = {Write::FailAfterApply, Write::Fail};
+    AppPreferences preferences;
+    Check(UpdateLumaPreference(filter, preferences, LumaProfile::GreenDetail) == LumaPreferenceResult::BackendFailed &&
+        !filter.isActive() && filter.needsRestore() && cache.result().state == BackendVerification::NotChecked,
+        "failed target and rollback retain recovery while stale verification stays absent");
+    cache.record({BackendVerification::Unavailable, std::nullopt, 5}, 300, 325);
+    const auto failedWrites = fake.magWrites;
+    cache.beforeLumaSelection(filter, LumaProfile::EqualDetail);
+    cache.beforeModeSelection(filter, RedMode::StrictRed);
+    Check(UpdateLumaPreference(filter, preferences, LumaProfile::EqualDetail) == LumaPreferenceResult::Rejected &&
+        cache.result().state == BackendVerification::Unavailable && cache.result().errorCode == 5 && fake.magWrites == failedWrites,
+        "blocked inactive-recovery selections retain the diagnostic and do not write");
+    Check(filter.disable(), "original snapshot remains recoverable after selection failures");
+}
+void VerificationInvalidSelectionsPreserveCache() {
+    MagnificationFilter filter;
+    Check(filter.initialize() && filter.enable(), "prepare active backend");
+    BackendVerificationCache cache;
+    cache.record({BackendVerification::Unavailable, std::nullopt, 123}, 10, 20);
+    const auto reads = fake.magReads, writes = fake.magWrites;
+    cache.beforeModeSelection(filter, static_cast<RedMode>(99));
+    cache.beforeLumaSelection(filter, static_cast<LumaProfile>(99));
+    Check(cache.result().state == BackendVerification::Unavailable && cache.result().errorCode == 123 &&
+        cache.durationMilliseconds() == 10 && cache.ageSeconds(2020) == 2 && fake.magReads == reads && fake.magWrites == writes,
+        "invalid selections cannot invalidate a check or invoke native output APIs");
+}
 void VerificationTimingReportingPreservesBackend() {
     MagnificationFilter filter;
     Check(filter.initialize() && filter.enable(), "prepare active backend for explicit verification");
@@ -3904,6 +4010,9 @@ int main() {
         {"Build metadata without C++ allocation", BuildInfoNoCppAllocation}, {"Build metadata output failures", BuildInfoOutputFailures},
         {"Build metadata arguments", BuildInfoArguments},
         {"Verification timing outcomes and precision", VerificationTimingStatesAndPrecision}, {"Verification timing wrap/invalidation", VerificationTimingWrapAndInvalidation},
+        {"Verification repeated selections retain attention", VerificationRepeatedSelectionsRetainAttention}, {"Verification Strict preferred preset edits", VerificationStrictPresetEditsPreserveCheck},
+        {"Verification inactive/gamma selection preservation", VerificationInactiveAndUnsupportedSelections}, {"Verification live selection attempt invalidation", VerificationLiveSelectionAttemptsInvalidate},
+        {"Verification invalid selection preservation", VerificationInvalidSelectionsPreserveCache},
         {"Verification timing read-only reporting", VerificationTimingReportingPreservesBackend}, {"Verification timing missing/zero reports", VerificationTimingUnknownAndZeroReports},
         {"Profile normalization schema upgrade/canonical output", ProfileNormalizationUpgradeAndCanonical}, {"Profile normalization read-only isolation", ProfileNormalizationReadOnlyIsolation},
         {"Profile normalization bounds/invalid data", ProfileNormalizationBoundsAndRejections}, {"Profile normalization I/O cleanup failures", ProfileNormalizationIoCleanupFailures},

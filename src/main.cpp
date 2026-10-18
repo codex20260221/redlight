@@ -826,12 +826,13 @@ void SetLumaProfile(LumaProfile profile) {
     char error[256] = {};
     {
         ScopedFlag busy(g_busy);
-        if (g_displayFilter->supportsRedMode(RedMode::LumaRed)) g_verification = {};
+        g_verification.beforeLumaSelection(*g_displayFilter, profile);
         result = UpdateLumaPreference(*g_displayFilter, g_preferences, profile);
         if (result == LumaPreferenceResult::BackendFailed) strcpy_s(error, g_displayFilter->lastError());
     }
     const bool restored = !g_pendingRestore || RestoreFilter(RestoreReason::DeferredRequest, false);
     if (result == LumaPreferenceResult::BackendFailed) {
+        RefreshTrayIconTip();
         ReportError(error);
         return;
     }
@@ -867,7 +868,7 @@ void SetRedModeFromTray(RedMode mode) {
     char modeError[256] = {};
     {
         ScopedFlag busy(g_busy);
-        g_verification = {};
+        g_verification.beforeModeSelection(*g_displayFilter, mode);
         changed = g_displayFilter->setRedMode(mode);
         if (!changed) strcpy_s(modeError, g_displayFilter->lastError());
     }

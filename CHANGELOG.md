@@ -70,6 +70,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Support Unicode diagnostics paths and report log-write failures to the debugger.
 
 ### Fixed
+- Preserve cached verification warnings, numerical details, and timing for unchanged mode/preset selections and preference-only edits; invalidate before live transform attempts, retain countdown attention guards, and refresh tray status immediately after failed Luma writes.
 - Show Retry recovery for inactive/queued restoration, disable busy primary toggles while keeping Restore available, honor queued restore before activation, and bind displayed menu On/Off choices to explicit intent so stale menus cannot invert current state or restart an already-active countdown.
 - Preserve live tray controls and the instance/recovery resources after an unexpected ordinary quit when backend shutdown fails, guard shutdown against nested changes, invalidate attempted verification state, and cancel an off display's stale countdown while allowing Restore/Exit retry.
 - Require exact red black/white endpoints during gamma filter confirmation and explicit verification, report endpoint mismatches separately from green/blue leakage, and roll back unconfirmed activation; retain middle-red tolerance, original-calibration restoration policy, and failed-rollback ownership for retry.
