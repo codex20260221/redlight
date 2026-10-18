@@ -14,6 +14,7 @@ struct SupportReportState {
     BackendVerification verification = BackendVerification::NotChecked;
     std::optional<BackendReadbackDetails> readback;
     std::uint32_t verificationError = 0;
+    std::optional<std::uint64_t> verificationAgeSeconds, verificationDurationMilliseconds;
     bool commandLineOverride = false;
     bool preferencesUnsaved = false;
     std::string_view startupPreferenceSource = "Not reported";
@@ -45,6 +46,12 @@ inline std::string BuildSupportReport(const SupportReportState& state) {
         << "\r\nState: "
         << FilterStatusDescription(state.active, state.needsRestore, !state.lastError.empty(), state.verification, state.restoreRequested)
         << "\r\nBackend verification: " << BackendVerificationName(state.verification);
+    report << "\r\nVerification age: ";
+    if (state.verificationAgeSeconds) report << *state.verificationAgeSeconds << " seconds since check completed";
+    else report << "not recorded";
+    report << "\r\nVerification duration: ";
+    if (state.verificationDurationMilliseconds) report << *state.verificationDurationMilliseconds << " milliseconds";
+    else report << "not recorded";
     if (state.readback) {
         const auto& readback = *state.readback;
         report << "\r\nRead-back values/mismatches: " << readback.values << " / " << readback.mismatches

@@ -6,6 +6,7 @@
 #include "Version.h"
 #include "BuildInfo.h"
 #include "BuildMetadata.h"
+#include "VerificationCache.h"
 #include "SessionTimer.h"
 #include "SessionControl.h"
 #include "BackendSelection.h"
@@ -61,7 +62,7 @@ PreferenceSource g_startupPreferenceSource = PreferenceSource::Defaults;
 bool g_startupPreferenceWarning = false;
 bool g_preferencesApplying = false;
 bool g_uiErrorVisible = false;
-BackendVerificationReport g_verification;
+BackendVerificationCache g_verification;
 
 }
 
@@ -538,7 +539,7 @@ bool StartSessionTimer(bool restartOnly) {
 }
 
 void RestartCountdown() {
-    if (g_busy || g_preferencesApplying || !CanRestartCountdown(g_sessionTimer, GetTickCount64(), *g_displayFilter, g_verification.state, g_pendingRestore)) return;
+    if (g_busy || g_preferencesApplying || !CanRestartCountdown(g_sessionTimer, GetTickCount64(), *g_displayFilter, g_verification.result().state, g_pendingRestore)) return;
     if (StartSessionTimer(true)) {
         Diagnostics::LogFormat("User restarted current countdown for %u minutes; preferences and display backend unchanged.", g_sessionTimer.minutes());
         ShowTrayInfo("RedLight countdown restarted", "The configured time limit starts again now. Preferences were not changed.");
@@ -549,7 +550,7 @@ void RestartCountdown() {
 void SetSessionLimit(unsigned minutes) {
     if (g_busy || g_preferencesApplying || minutes > SessionTimer::maxMinutes) return;
     if (minutes == g_sessionTimer.minutes()) return;
-    if (!CanChangeSessionLimit(g_sessionTimer, GetTickCount64(), *g_displayFilter, g_verification.state, g_pendingRestore)) {
+    if (!CanChangeSessionLimit(g_sessionTimer, GetTickCount64(), *g_displayFilter, g_verification.result().state, g_pendingRestore)) {
         ReportError("Restore display before changing the time limit while expiry or recovery is pending.");
         return;
     }
@@ -829,9 +830,11 @@ void CopySupportReport(HWND owner) {
     state.droppedLogLines = logging.droppedLines;
     state.truncatedLogLines = logging.truncatedLines;
     state.lastFileError = logging.lastFileError;
-    state.verification = g_verification.state;
-    state.readback = g_verification.readback;
-    state.verificationError = g_verification.errorCode;
+    state.verification = g_verification.result().state;
+    state.readback = g_verification.result().readback;
+    state.verificationError = g_verification.result().errorCode;
+    state.verificationAgeSeconds = g_verification.ageSeconds(GetTickCount64());
+    state.verificationDurationMilliseconds = g_verification.durationMilliseconds();
     state.redMode = RedModeDisplayName(g_displayFilter->redMode());
     state.lumaProfile = g_displayFilter->supportsRedMode(RedMode::LumaRed) ?
         LumaProfileName(g_displayFilter->lumaProfile()) : "Unavailable on gamma";
@@ -934,45 +937,59 @@ void ConfirmPreferences(HWND owner, const AppPreferences& candidate, const char*
 
 const char* FilterStatusText() {
     return FilterStatusDescription(g_displayFilter->isActive(), g_displayFilter->needsRestore(),
-        g_displayFilter->lastError()[0] != 0, g_verification.state, g_pendingRestore);
+        g_displayFilter->lastError()[0] != 0, g_verification.result().state, g_pendingRestore);
 }
 
 void VerifyBackendState(HWND owner) {
     if (g_busy) return;
-    { ScopedFlag busy(g_busy); g_verification = g_displayFilter->inspectState(); }
+    {
+        ScopedFlag busy(g_busy);
+        const auto started = GetTickCount64();
+        const auto report = g_displayFilter->inspectState();
+        g_verification.record(report, started, GetTickCount64());
+        Diagnostics::LogFormat("Explicit verification completed in %llu ms.",
+            static_cast<unsigned long long>(g_verification.durationMilliseconds().value_or(0)));
+    }
     if (g_pendingRestore) RestoreFilter(false);
     RefreshTrayIconTip();
-    const char* message = BackendVerificationName(g_verification.state);
-    if (g_verification.state == BackendVerification::Matches) {
+    const auto& report = g_verification.result();
+    const char* message = BackendVerificationName(report.state);
+    if (report.state == BackendVerification::Matches) {
         message = "Software read-back matches the requested red-only transform. Physical display output was not measured.";
-    } else if (g_verification.state == BackendVerification::Changed) {
+    } else if (report.state == BackendVerification::Changed) {
         message = "Read-back differs from the requested transform. Another color tool or display change may be involved.\n\n"
             "This check did not reapply the filter. Use Restore display to restore the saved state, then re-enable when ready.";
-    } else if (g_verification.state == BackendVerification::Unavailable) {
+    } else if (report.state == BackendVerification::Unavailable) {
         message = "The backend state could not be read. See the diagnostics log and use Restore display if recovery is needed.";
     }
     char details[1024];
-    if (g_verification.readback) {
-        const auto& values = *g_verification.readback;
+    if (report.readback) {
+        const auto& values = *report.readback;
         sprintf_s(details, "%s\n\nValues compared: %u\nMismatches: %u\nLargest finite difference: %.9g (%s)\n"
             "Nonfinite values: %s\nUnexpected green/blue entries: %s",
             message, values.values, values.mismatches, values.maximumDifference,
             values.gammaRamp ? "gamma fraction of full scale" : "matrix coefficient",
             values.nonFiniteValues ? "yes" : "no", values.unexpectedGreenBlue ? "yes" : "no");
-    } else if (g_verification.state == BackendVerification::Unavailable) {
-        sprintf_s(details, "%s\n\nVerification error code: %lu", message, static_cast<unsigned long>(g_verification.errorCode));
+    } else if (report.state == BackendVerification::Unavailable) {
+        sprintf_s(details, "%s\n\nVerification error code: %lu", message, static_cast<unsigned long>(report.errorCode));
     } else strcpy_s(details, message);
     if (!MessageBoxA(owner, details, "RedLight backend state", MB_OK | MB_ICONINFORMATION))
         Diagnostics::LogFormat("MessageBox(verification) failed (error %lu).", GetLastError());
 }
 
 void ShowAboutDialog(HWND parent) {
-    char aboutText[1536];
+    char aboutText[2048];
     char sessionRecovery[96];
+    char verificationTiming[128];
+    const auto verificationAge = g_verification.ageSeconds(GetTickCount64());
+    if (verificationAge) sprintf_s(verificationTiming, "%llu seconds ago (%llu ms)",
+        static_cast<unsigned long long>(*verificationAge),
+        static_cast<unsigned long long>(g_verification.durationMilliseconds().value_or(0)));
+    else strcpy_s(verificationTiming, "Not checked since last filter operation");
     if (g_sessionNotifications.isRegistered()) strcpy_s(sessionRecovery, "Available");
     else sprintf_s(sessionRecovery, "Unavailable (error %lu); retry in Expert controls", g_sessionNotifications.lastError());
     const auto logging = Diagnostics::GetStatus();
-    sprintf_s(aboutText, "RedLight " REDLIGHT_VERSION "\nBuild revision: " REDLIGHT_BUILD_REVISION " (" REDLIGHT_SOURCE_STATE ")\n\nBackend: %s\nStartup selection: %s%s\nNext start: %s\nMode: %s\nLuma detail: %s\nPreferred mode/detail: %s / %s\nStatus: %s\nSettings: %s\nStartup preferences: %s%s\n\n"
+    sprintf_s(aboutText, "RedLight " REDLIGHT_VERSION "\nBuild revision: " REDLIGHT_BUILD_REVISION " (" REDLIGHT_SOURCE_STATE ")\n\nBackend: %s\nStartup selection: %s%s\nNext start: %s\nMode: %s\nLuma detail: %s\nPreferred mode/detail: %s / %s\nStatus: %s\nVerification: %s\nLast check: %s\nSettings: %s\nStartup preferences: %s%s\n\n"
         "Toggle shortcut: %s\nRestore shortcut: %s\nShortcut preference: %s\nShortcut preference applied: %s\nSession recovery: %s\nExpiry warning: %s\n\n"
         "File logging: %s\nMissing file records: %llu\nTruncated records: %llu\nLast file error: %lu\n\n"
         "Logs: %%LOCALAPPDATA%%\\RedLight\nUnsigned release candidate\n"
@@ -983,6 +1000,7 @@ void ShowAboutDialog(HWND parent) {
         g_displayFilter->supportsRedMode(RedMode::LumaRed) ? LumaProfileName(g_displayFilter->lumaProfile()) : "Unavailable on gamma",
         RedModeDisplayName(g_preferences.mode), LumaProfileName(g_preferences.luma),
         FilterStatusText(),
+        BackendVerificationName(g_verification.result().state), verificationTiming,
         g_preferencesUnsaved ? "Unsaved changes" : "Saved/default",
         PreferenceSourceName(g_startupPreferenceSource), g_startupPreferenceWarning ? " (load warnings)" : "",
         g_hotkeys.toggle() ? ShortcutBindingName(*g_hotkeys.toggle()) : "Unavailable/disabled",
@@ -1016,8 +1034,8 @@ void ShowTrayMenu(HWND hwnd) {
         g_backendPreference, g_sessionTimer.minutes(), g_preferences.shortcuts,
         g_hotkeys.toggle() ? ShortcutBindingName(*g_hotkeys.toggle()) : NULL,
         g_hotkeys.restore() ? ShortcutBindingName(*g_hotkeys.restore()) : NULL, g_preferences.expiryWarning, g_preferencesUnsaved,
-        !g_busy && !g_preferencesApplying && CanChangeSessionLimit(g_sessionTimer, now, *g_displayFilter, g_verification.state, g_pendingRestore),
-        !g_busy && !g_preferencesApplying && CanRestartCountdown(g_sessionTimer, now, *g_displayFilter, g_verification.state, g_pendingRestore)};
+        !g_busy && !g_preferencesApplying && CanChangeSessionLimit(g_sessionTimer, now, *g_displayFilter, g_verification.result().state, g_pendingRestore),
+        !g_busy && !g_preferencesApplying && CanRestartCountdown(g_sessionTimer, now, *g_displayFilter, g_verification.result().state, g_pendingRestore)};
     HMENU menu = BuildTrayMenu(state);
     if (!menu) { ReportError("Could not build the tray menu."); return; }
     if (!SetForegroundWindow(hwnd)) Diagnostics::Log("SetForegroundWindow failed for tray menu.");
@@ -1071,7 +1089,7 @@ LRESULT HandleWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         state.backend = g_displayFilter == &g_magnificationFilter ? StatusBackend::Magnification : StatusBackend::Gamma;
         state.mode = g_displayFilter->redMode();
         state.luma = g_preferences.luma;
-        state.verification = g_verification.state;
+        state.verification = g_verification.result().state;
         state.sessionMinutes = g_sessionTimer.minutes();
         state.timerArmed = g_sessionTimer.armed();
         state.remainingSeconds = static_cast<unsigned>((g_sessionTimer.remainingMilliseconds(GetTickCount64()) + 999) / 1000);
@@ -1147,7 +1165,7 @@ LRESULT HandleWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         switch (LOWORD(wParam)) {
         case ID_TRAY_TOGGLE: ToggleRedlight(); break;
         case ID_TRAY_CUSTOM_SESSION:
-            if (!g_busy && !g_preferencesApplying && CanChangeSessionLimit(g_sessionTimer, GetTickCount64(), *g_displayFilter, g_verification.state, g_pendingRestore)) {
+            if (!g_busy && !g_preferencesApplying && CanChangeSessionLimit(g_sessionTimer, GetTickCount64(), *g_displayFilter, g_verification.result().state, g_pendingRestore)) {
                 if (const auto minutes = ShowSessionLimitDialog(hwnd, g_sessionTimer.minutes())) SetSessionLimit(*minutes);
             }
             break;

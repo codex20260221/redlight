@@ -25,6 +25,7 @@
 #include "SessionNotifications.h"
 #include "LumaPreference.h"
 #include "BuildMetadata.h"
+#include "VerificationCache.h"
 #include <map>
 #include <algorithm>
 #include "Clipboard.h"
@@ -1872,6 +1873,67 @@ void BuildInfoArguments() {
     Check(GetStartupOptions().action == StartupAction::BuildInfo && fake.argumentFrees == 1 && !fake.argumentsOutstanding,
         "native argument ownership is released for build metadata requests");
 }
+void VerificationTimingStatesAndPrecision() {
+    BackendVerificationCache cache;
+    Check(cache.result().state == BackendVerification::NotChecked && !cache.ageSeconds(5000) && !cache.durationMilliseconds(),
+        "an unchecked cache has no invented check time or duration");
+    for (const auto state : {BackendVerification::Inactive, BackendVerification::Matches, BackendVerification::Changed, BackendVerification::Unavailable}) {
+        BackendVerificationReport report{state, BackendReadbackDetails{25, 2, 0.125, true, true, false}, 5};
+        cache.record(report, 1000, 1075);
+        Check(cache.result().state == state && cache.result().errorCode == 5 && cache.result().readback->mismatches == 2 &&
+            cache.result().readback->nonFiniteValues && cache.durationMilliseconds() == 75 && cache.ageSeconds(1075) == 0 &&
+            cache.ageSeconds(2074) == 0 && cache.ageSeconds(2075) == 1,
+            "every completed outcome preserves its result with duration and whole-second age since completion");
+    }
+    cache.record({BackendVerification::Inactive}, 0, 0);
+    Check(cache.ageSeconds(0) == 0 && cache.durationMilliseconds() == 0, "a check at monotonic zero is recorded, not confused with absence");
+}
+void VerificationTimingWrapAndInvalidation() {
+    BackendVerificationCache cache;
+    const auto maximum = (std::numeric_limits<std::uint64_t>::max)();
+    cache.record({BackendVerification::Changed, BackendReadbackDetails{768, 1, 1, false, true, true}, 0}, maximum - 4, 3);
+    Check(cache.durationMilliseconds() == 8 && cache.ageSeconds(2003) == 2, "duration and age tolerate unsigned monotonic-clock wrap");
+    cache = {};
+    Check(cache.result().state == BackendVerification::NotChecked && !cache.result().readback && cache.result().errorCode == 0 &&
+        !cache.ageSeconds(99999) && !cache.durationMilliseconds(), "filter-operation invalidation clears the result and all timing together");
+    cache.record({BackendVerification::Unavailable, std::nullopt, 123}, 10, 20);
+    cache.record({}, 30, 40);
+    Check(cache.result().state == BackendVerification::NotChecked && cache.result().errorCode == 0 && !cache.ageSeconds(50),
+        "an unchecked replacement cannot retain an earlier failure timestamp");
+}
+void VerificationTimingReportingPreservesBackend() {
+    MagnificationFilter filter;
+    Check(filter.initialize() && filter.enable(), "prepare active backend for explicit verification");
+    BackendVerificationCache cache;
+    cache.record(filter.inspectState(), 100, 115);
+    const int reads = fake.magReads, writes = fake.magWrites;
+    const auto statistics = filter.statistics();
+    SupportReportState state;
+    state.active = filter.isActive(); state.needsRestore = filter.needsRestore();
+    state.verification = cache.result().state; state.readback = cache.result().readback;
+    state.verificationAgeSeconds = cache.ageSeconds(6115); state.verificationDurationMilliseconds = cache.durationMilliseconds();
+    const auto report = BuildSupportReport(state);
+    Check(report.find("Verification age: 6 seconds since check completed") != std::string::npos &&
+        report.find("Verification duration: 15 milliseconds") != std::string::npos && report.find("State: ON") != std::string::npos,
+        "support report distinguishes cached age and call duration from active backend state");
+    Check(fake.magReads == reads && fake.magWrites == writes && filter.statistics() == statistics && filter.isActive() && filter.needsRestore(),
+        "viewing timing makes no display operation or counter/ownership change");
+    cache = {};
+    Check(filter.isActive() && filter.needsRestore() && filter.disable(), "invalidating only the cache preserves the original restoration snapshot");
+}
+void VerificationTimingUnknownAndZeroReports() {
+    SupportReportState state;
+    auto report = BuildSupportReport(state);
+    Check(report.find("Verification age: not recorded\r\nVerification duration: not recorded") != std::string::npos,
+        "reports do not present an unmeasured check as zero milliseconds old");
+    state.verification = BackendVerification::Unavailable;
+    state.verificationError = 123;
+    state.verificationAgeSeconds = 0; state.verificationDurationMilliseconds = 0;
+    report = BuildSupportReport(state);
+    Check(report.find("Verification age: 0 seconds since check completed\r\nVerification duration: 0 milliseconds") != std::string::npos &&
+        report.find("Verification error code: 123") != std::string::npos,
+        "an immediate failed check retains genuine zero timing and its API error");
+}
 } // namespace
 
 DWORD GetLastError() { return fake.lastError; }
@@ -2153,6 +2215,8 @@ int main() {
         {"Build metadata JSON and isolation", BuildInfoJsonAndIsolation}, {"Build metadata escaping and bounds", BuildInfoEscapingAndBounds},
         {"Build metadata without C++ allocation", BuildInfoNoCppAllocation}, {"Build metadata output failures", BuildInfoOutputFailures},
         {"Build metadata arguments", BuildInfoArguments},
+        {"Verification timing outcomes and precision", VerificationTimingStatesAndPrecision}, {"Verification timing wrap/invalidation", VerificationTimingWrapAndInvalidation},
+        {"Verification timing read-only reporting", VerificationTimingReportingPreservesBackend}, {"Verification timing missing/zero reports", VerificationTimingUnknownAndZeroReports},
         {"Command line", Arguments}
     };
     int failed = 0;
