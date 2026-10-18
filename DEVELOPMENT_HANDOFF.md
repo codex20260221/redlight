@@ -1,14 +1,16 @@
 # Issue-driven development checkpoint — 2026-10-18
 
-The user resumed the issue-driven goal from clean local commit `693d204`. This checkpoint completes integrated red brightness for issue #1 on `release/0.6.0-rc1`. Continue autonomously through the roadmap until externally interrupted, keeping focused local commits and all restrictions below. The earlier Magnification audit and tray visibility change remain complete. No later feature implementation is in progress at this checkpoint.
+The user resumed the issue-driven goal from clean local commit `693d204`. Integrated brightness is committed as `7ced3fe`; this checkpoint completes optional per-user startup for issue #17 on `release/0.6.0-rc1`. Continue autonomously through the roadmap until externally interrupted, keeping focused local commits and all restrictions below. The earlier Magnification audit and tray visibility change remain complete. No later feature implementation is in progress at this checkpoint.
 
 ## New issue-driven direction
 
-Read the actual open GitHub issue descriptions and every available comment, then compared them with local code; issue #1 and its comments were rechecked during brightness implementation. [Issue roadmap](docs/issue-roadmap.md) records priorities, dependencies, and implemented-versus-missing status. Do not resume the old series of specialized diagnostics. Next user-facing priority is #17 optional disabled-by-default startup. Transitions and scheduling require defined semantics first; per-monitor work remains isolated research only.
+Read the actual open GitHub issue descriptions and every available comment, then compared them with local code; issues #1 and #17 were rechecked during implementation. [Issue roadmap](docs/issue-roadmap.md) records priorities, dependencies, and implemented-versus-missing status. Do not resume the old series of specialized diagnostics. Next user-facing priority is #3 gradual transitions with explicit red-only semantics and immediate restoration; scheduling also requires defined semantics first, and per-monitor work remains isolated research only.
 
 Issue #27 is addressed locally with four bright monochrome tray symbols (off ring, Strict filled circle, Luma diamond, recovery/unconfirmed triangle), complete shared resource loading, cached state selection, fake-API regressions, and reproducible original pixel assets. Existing tray callbacks, identity, tooltip, menu/shortcuts, recovery priorities, and restore-before-retry behavior remain intact. Native Explorer/DPI/theme/filtered-display acceptance is pending.
 
-Issue #1 now provides whole 1–100% Magnification red brightness, unchanged coefficients at 100%, exact black/green/blue zeros, live checked writes and rollback retaining the original, tray presets/custom input, schema-4 saved preferences/profiles, and preferred/backend-selected diagnostics. Gamma independently remains fixed at 100%; its menu only changes a future Magnification preference without touching ramps/errors/verification/recovery. Schemas 1–3 pin brightness to 100%, reset uses 100%, and save failures retain the applied live value as unsaved for retry. Countdown deadlines and immediate restoration are unchanged. Native dialog/display qualification remains pending. Startup, transitions, schedules, and per-monitor implementations have not been started.
+Issue #1 provides whole 1–100% Magnification red brightness, unchanged coefficients at 100%, exact black/green/blue zeros, live checked writes and rollback retaining the original, tray presets/custom input, schema-4 saved preferences/profiles, and preferred/backend-selected diagnostics. Gamma independently remains fixed at 100%; its menu only changes a future Magnification preference without touching ramps/errors/verification/recovery. Schemas 1–3 pin brightness to 100%, reset uses 100%, and save failures retain the applied live value as unsaved for retry. Countdown deadlines and immediate restoration are unchanged. Native dialog/display qualification remains pending.
+
+Issue #17 adds Start with Windows Enable/Remove/Refresh controls. `StartupRegistration` captures the current executable and reads only during normal tray startup; no startup entry is created automatically. User confirmation binds the complete existing and proposed Run commands; mutation rechecks this copied receipt and verifies observed state afterward, including native failures. Only the named per-user Run value `RedLight` is changed. Profiles/reset/standalone actions never grant or modify consent. Quoted paths are bounded to 260 characters (258 path characters); unsupported percent/device/relative/control forms are visible and refused. Different portable copies/paths require explicit review, and readable stale entries can be removed even when the current path is unavailable. Windows/external tools can disable/delay/overwrite the entry; pre/post reads are not atomic exclusion. No automatic rollback or startup repair occurs. Native registry/sign-in/consent acceptance remains pending. Transitions, schedules, and per-monitor implementations have not been started.
 
 ## Restrictions that persist on resume
 
@@ -48,14 +50,15 @@ The focused audit is committed as `4a1dd71`. The detailed state table, ownership
 | `f882ec1` | Cached startup self process/session IDs, without owner detection |
 | `f39c0aa` | Session-hook native failure history retained after retry/cleanup; stale-error exclusion |
 | `693d204` | Issue #27 high-contrast tray symbols, fake resource/state regressions, and reviewed issue-driven roadmap |
-| This checkpoint | Issue #1 integrated 1–100% red brightness, schema-4 profiles, independent Gamma policy, and isolated failure regressions |
+| `7ced3fe` | Issue #1 integrated 1–100% red brightness, schema-4 profiles, independent Gamma policy, and isolated failure regressions |
+| This checkpoint | Issue #17 consented per-user startup, portable path/entry review and verified removal, fake-registry failure coverage |
 
 All commits are local. Each feature's evidence and unexecuted manual notes are recorded in [release validation](docs/release-validation.md#expert-feature-follow-up-validation).
 
 ## Verified checkpoint
 
 - Release and MSVC `/analyze` builds passed.
-- **416 isolated C++ scenarios passed** across two CTest targets: 393 core/fake-API and 23 fake-filesystem diagnostics scenarios. Brightness adds 15 scenarios and expands all-field preview/comparison coverage to all 128 subsets.
+- **427 isolated C++ scenarios passed** across two CTest targets: 404 core/fake-API and 23 fake-filesystem diagnostics scenarios. Brightness adds 15 scenarios and expands all-field preview/comparison coverage to all 128 subsets. Startup adds 11 consent/path/registry/menu/recovery scenarios with exact target assertions.
 - `tools/Test-TrayIcons.ps1` verifies four deterministic original monochrome resources at seven sizes, distinct shapes, transparency, bounded file layout, and Strict/Luma endpoint contrast. The off-screen asset contact sheet was inspected without launching RedLight.
 - Both test executables passed the KERNEL32-only import gate before execution. RedLight itself was never executed.
 - Static release checks passed: seven reviewed Windows DLLs, x64 GUI executable, ASLR/DEP, version/prerelease metadata, embedded `asInvoker` manifest, and SHA-256.
@@ -82,7 +85,7 @@ cpack --config build/CPackConfig.cmake -C Release -B build/packages
 
 Start with `git status --short` and this handoff. The worktree should be clean. There is no unfinished fix, active build, or required implementation follow-up from this checkpoint. Manual/native qualification remains unauthorized unless the user changes that restriction.
 
-Choose the next meaningful user-facing task from [issue roadmap](docs/issue-roadmap.md). Optional startup is next; no implementation for it is present. It must remain disabled by default, require explicit per-user consent, handle portable quoted paths/removal/verification/failures, and never be silently enabled by profile import. The old static backend-mode discovery candidate was not started and is superseded by the issue-driven priorities.
+Choose the next meaningful user-facing task from [issue roadmap](docs/issue-roadmap.md). Gradual transitions are next; no implementation is present. Define optional red-only brightness progression, cancellation/live target edits, timer failure/ownership and countdown interactions first; all Restore/Exit/environment recovery must remain immediate. Scheduling then needs manual overrides, sleep/resume, clock/DST/missed triggers, and countdown precedence defined. The old static backend-mode discovery candidate was not started and is superseded by the issue-driven priorities.
 
 Preserve these integration boundaries:
 

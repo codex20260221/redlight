@@ -47,6 +47,7 @@
 #include "SessionNotifications.h"
 #include "LumaPreference.h"
 #include "BrightnessPreference.h"
+#include "StartupRegistration.h"
 #include "BuildMetadata.h"
 #include "VerificationCache.h"
 #include <map>
@@ -70,6 +71,17 @@ struct FakeMenuData { bool alive = true; std::vector<FakeMenuItem> items; };
 struct RegistryValue { DWORD type; std::vector<char> bytes; };
 struct FakeIconRequest { HINSTANCE instance; unsigned resource, type; int width, height; unsigned flags; DWORD errorBefore; };
 struct Fake {
+    std::wstring modulePath = L"C:\\RedLight\\RedLight.exe";
+    bool modulePathAvailable = true, moduleTargetInvalid = false;
+    std::optional<DWORD> modulePathError;
+    DWORD modulePathErrorBefore = 999, modulePathCapacity = 0;
+    unsigned modulePathReads = 0, startupReads = 0, startupWrites = 0, startupDeletes = 0;
+    bool startupPresent = false, startupTargetInvalid = false;
+    DWORD startupType = REG_SZ;
+    std::vector<char> startupBytes;
+    std::deque<LSTATUS> startupReadResults;
+    Write startupWriteBehavior = Write::Apply, startupDeleteBehavior = Write::Apply;
+    LSTATUS startupMutationError = ERROR_ACCESS_DENIED;
     bool magInit = true, magGet = true, magSet = true, magUninit = true;
     std::deque<Write> magWriteResults;
     std::deque<bool> magReadResults;
@@ -6102,6 +6114,172 @@ void TrayCommandFallbackExceptionRetainsRecoveryRequest() {
         RecoveryAfterUiFailure(false, pending, true) == UiFailureRecovery::Defer,
         "fallback exceptions propagate to the native callback guard with a retained request even for a tray notification");
 }
+void PutStartupEntry(std::wstring_view command) {
+    fake.startupPresent = true; fake.startupType = REG_SZ;
+    fake.startupBytes.resize((command.size() + 1) * sizeof(wchar_t));
+    if (!command.empty()) std::memcpy(fake.startupBytes.data(), command.data(), command.size() * sizeof(wchar_t));
+    std::memset(fake.startupBytes.data() + command.size() * sizeof(wchar_t), 0, sizeof(wchar_t));
+}
+void StartupDefaultConsentAndExactParameters() {
+    StartupRegistration startup;
+    fake.modulePath = L"C:\\Portable apps\\赤 & light\\RedLight.exe";
+    Check(startup.initialize() && startup.snapshot().state == StartupEntryState::Off && startup.command() == L"\"C:\\Portable apps\\赤 & light\\RedLight.exe\"" &&
+        fake.startupWrites == 0 && fake.startupDeletes == 0 && fake.modulePathReads == 1 && fake.modulePathErrorBefore == ERROR_SUCCESS,
+        "startup only reads; quoted Unicode/spaced/metacharacter paths are literal executable commands with no activation argument");
+    const auto reviewed = startup.snapshot(); const auto reads = fake.startupReads;
+    Check(startup.change(true, reviewed, false) == StartupChangeResult::NotConfirmed && fake.startupReads == reads && fake.startupWrites == 0,
+        "canceled or missing consent cannot perform even a mutation preflight");
+    Check(startup.change(true, reviewed, true) == StartupChangeResult::Confirmed && fake.startupWrites == 1 && fake.startupDeletes == 0 &&
+        startup.snapshot().state == StartupEntryState::ThisExecutable && std::wstring_view(startup.snapshot().command.data()) == startup.command() &&
+        fake.startupBytes.size() == (startup.command().size() + 1) * sizeof(wchar_t) && !fake.startupTargetInvalid && !fake.moduleTargetInvalid,
+        "one exact per-user REG_SZ Run value is written with a terminating NUL and read back, without touching another target");
+    Check(startup.change(true, startup.snapshot(), true) == StartupChangeResult::Confirmed && fake.startupWrites == 1,
+        "already verified entry does not rewrite at every request");
+    Check(startup.change(false, startup.snapshot(), true) == StartupChangeResult::Confirmed && startup.snapshot().state == StartupEntryState::Off && fake.startupDeletes == 1,
+        "explicit removal deletes only the named value and verifies absence");
+    Check(startup.change(false, startup.snapshot(), true) == StartupChangeResult::Confirmed && fake.startupDeletes == 1, "already absent entry does not delete a key");
+}
+void StartupPathBoundsAndRefusal() {
+    for (const unsigned length : {257u, 258u, 259u, 500u}) {
+        Reset(); StartupRegistration startup;
+        fake.modulePath = L"C:\\" + std::wstring(length - 7, L'x') + L".exe";
+        Check(startup.initialize() == (length <= 258) && (length > 258 || startup.command().size() == length + 2) &&
+            fake.modulePathCapacity == 259 && fake.startupWrites == 0, "quoted commands respect the documented 260-character bound without truncation");
+        if (length > 258) Check(startup.command().empty() && startup.pathError() == ERROR_FILENAME_EXCED_RANGE &&
+            startup.change(true, startup.snapshot(), true) == StartupChangeResult::Unavailable, "overlong paths cannot silently create truncated commands");
+    }
+    for (const auto path : {L"relative.exe", L"C:relative.exe", L"C:\\bad\"name.exe", L"C:\\%TEMP%\\RedLight.exe", L"C:\\bad\nname.exe",
+        L"\\\\?\\C:\\RedLight.exe", L"\\\\.\\RedLight.exe", L"C:\\folder\\", L"\\\\server.exe", L"\\\\server\\share"}) {
+        Reset(); StartupRegistration startup; fake.modulePath = path;
+        Check(!startup.initialize() && startup.command().empty() && startup.pathError() == ERROR_INVALID_DATA && fake.startupWrites == 0,
+            "unsupported literal path forms are refused without registry mutation");
+    }
+    Reset(); StartupRegistration network; fake.modulePath = L"\\\\server\\share\\RedLight.exe";
+    Check(network.initialize() && network.command() == L"\"\\\\server\\share\\RedLight.exe\"", "fully qualified UNC paths retain their exact portable target");
+}
+void StartupNativePathErrorProvenance() {
+    for (const bool supplied : {false, true}) {
+        Reset(); StartupRegistration startup; fake.modulePathAvailable = false; fake.lastError = 0xbad;
+        fake.modulePathError = supplied ? std::optional<DWORD>(4321) : std::nullopt; fake.diagnosticsClobbersError = true;
+        Check(!startup.initialize() && startup.command().empty() && startup.pathError() == (supplied ? 4321ul : 0ul) && fake.modulePathErrorBefore == ERROR_SUCCESS &&
+            startup.snapshot().state == StartupEntryState::Off && fake.startupWrites == 0, "native executable lookup captures supplied/absent errors and still permits entry inspection");
+    }
+}
+void StartupUnreadableOrMalformedEntries() {
+    for (unsigned failure = 0; failure < 7; ++failure) {
+        Reset(); StartupRegistration startup; PutStartupEntry(L"\"C:\\old\\RedLight.exe\"");
+        switch (failure) {
+        case 0: fake.startupType = REG_BINARY; break;
+        case 1: fake.startupBytes.resize(1000, 'x'); break;
+        case 2: fake.startupBytes.pop_back(); break;
+        case 3: fake.startupBytes.back() = 'x'; break;
+        case 4: PutStartupEntry(std::wstring_view(L"x\0hidden", 8)); break;
+        case 5: PutStartupEntry(L"x\ny"); break;
+        default: fake.startupReadResults = {ERROR_ACCESS_DENIED}; break;
+        }
+        Check(startup.initialize() && !startup.snapshot().readable() && startup.snapshot().error != 0 &&
+            startup.change(true, startup.snapshot(), true) == StartupChangeResult::Unavailable &&
+            startup.change(false, startup.snapshot(), true) == StartupChangeResult::Unavailable && fake.startupWrites == 0 && fake.startupDeletes == 0,
+            "wrong type/oversize/malformed/unreadable entries cannot become an assumed disabled state or be overwritten/deleted");
+        PutStartupEntry(L"\"C:\\old\\RedLight.exe\""); startup.refresh();
+        Check(startup.snapshot().state == StartupEntryState::DifferentEntry, "a later readable entry can be reviewed for explicit recovery");
+    }
+}
+void StartupReviewChangesRequireNewConsent() {
+    StartupRegistration startup; Check(startup.initialize(), "prepare review receipt");
+    const auto absent = startup.snapshot();
+    PutStartupEntry(L"\"C:\\other\\other.exe\" --flag");
+    Check(startup.change(true, absent, true) == StartupChangeResult::ChangedSinceReview && fake.startupWrites == 0 && fake.startupDeletes == 0 &&
+        startup.snapshot().state == StartupEntryState::DifferentEntry, "a changed existing command cannot be replaced under stale consent");
+    fake.startupPresent = false;
+    Check(startup.change(true, startup.snapshot(), true) == StartupChangeResult::ChangedSinceReview && fake.startupWrites == 0,
+        "a borrowed cached snapshot is copied before refresh; aliasing cannot turn stale consent into permission to overwrite");
+    PutStartupEntry(L"\"C:\\other\\other.exe\" --flag"); startup.refresh();
+    const auto different = startup.snapshot();
+    fake.modulePath = L"D:\\moved\\RedLight.exe"; Check(startup.initialize(), "capture moved portable path");
+    Check(startup.change(true, different, true) == StartupChangeResult::ChangedSinceReview && fake.startupWrites == 0,
+        "consent is bound to the proposed executable command as well as the existing value");
+    const auto fresh = startup.snapshot();
+    Check(startup.change(true, fresh, true) == StartupChangeResult::Confirmed && startup.snapshot().state == StartupEntryState::ThisExecutable &&
+        std::wstring_view(startup.snapshot().command.data()) == L"\"D:\\moved\\RedLight.exe\"", "fresh explicit review can replace exactly the inspected named value");
+}
+void StartupMutationFailuresPreserveObservedTruth() {
+    for (const bool remove : {false, true}) for (const Write behavior : {Write::Fail, Write::FailAfterApply, Write::Ignore}) {
+        Reset(); StartupRegistration startup; Check(startup.initialize(), "prepare mutation failure matrix");
+        if (remove) { PutStartupEntry(startup.command()); startup.refresh(); fake.startupDeleteBehavior = behavior; }
+        else fake.startupWriteBehavior = behavior;
+        fake.startupMutationError = 4321; fake.lastError = 0xbad; fake.diagnosticsClobbersError = true;
+        const auto result = startup.change(!remove, startup.snapshot(), true);
+        const auto expectedResult = behavior == Write::Ignore ? StartupChangeResult::VerificationFailed : StartupChangeResult::NativeFailed;
+        const bool applied = behavior == Write::FailAfterApply;
+        Check(result == expectedResult && startup.snapshot().state == ((remove != applied) ? StartupEntryState::ThisExecutable : StartupEntryState::Off) &&
+            startup.lastChangeError() == (behavior == Write::Ignore ? static_cast<unsigned>(ERROR_INVALID_DATA) : 4321u),
+            "native failure is never promoted by matching bytes; successful ignored mutations fail verification; direct registry errors survive logging");
+        Check(fake.startupWrites == (remove ? 0u : 1u) && fake.startupDeletes == (remove ? 1u : 0u), "no rollback overwrites another writer after ambiguous mutation");
+    }
+}
+void StartupReadbackFailureAndRefreshRetry() {
+    for (const bool remove : {false, true}) {
+        Reset(); StartupRegistration startup; Check(startup.initialize(), "prepare verification read failure");
+        if (remove) { PutStartupEntry(startup.command()); startup.refresh(); }
+        fake.startupReadResults = {ERROR_SUCCESS, ERROR_ACCESS_DENIED};
+        Check(startup.change(!remove, startup.snapshot(), true) == StartupChangeResult::VerificationFailed &&
+            !startup.snapshot().readable() && startup.snapshot().error == ERROR_ACCESS_DENIED, "successful mutation plus failed read-back remains explicitly unconfirmed");
+        startup.refresh(); const auto mutations = fake.startupWrites + fake.startupDeletes;
+        Check(startup.snapshot().state == (remove ? StartupEntryState::Off : StartupEntryState::ThisExecutable) &&
+            startup.change(!remove, startup.snapshot(), true) == StartupChangeResult::Confirmed && fake.startupWrites + fake.startupDeletes == mutations,
+            "read-only refresh recovers observed state and verified no-op retry does not repeat mutation");
+    }
+}
+void StartupMovedPathRemovalAndSettingsIsolation() {
+    StartupRegistration old; Check(old.initialize() && old.change(true, old.snapshot(), true) == StartupChangeResult::Confirmed, "configure original portable path");
+    fake.modulePath = L"D:\\new folder\\RedLight.exe"; StartupRegistration moved;
+    Check(moved.initialize() && moved.snapshot().state == StartupEntryState::DifferentEntry && fake.startupWrites == 1,
+        "moving the executable never silently rewrites its prior startup entry");
+    fake.modulePathAvailable = false; StartupRegistration unavailable; unavailable.initialize();
+    Check(unavailable.command().empty() && unavailable.snapshot().state == StartupEntryState::DifferentEntry &&
+        unavailable.change(false, unavailable.snapshot(), true) == StartupChangeResult::Confirmed && fake.startupDeletes == 1 && fake.registryWrites == 0,
+        "explicitly reviewed stale entries can be removed even when this executable cannot be registered; profile storage remains separate");
+}
+void StartupAllocationAndDisplayRecoveryIsolation() {
+    GammaRampFilter filter; Check(filter.initialize() && filter.enable(), "prepare independent display ownership");
+    fake.writes = {Write::FailAfterApply}; Check(!filter.disable(), "retain original calibration for retry");
+    const auto reads = fake.gammaReads, writes = fake.gammaWrites, releases = fake.mutexReleases; const auto clocks = fake.backendClockReads;
+    const auto stats = filter.statistics(); const auto error = std::string(filter.lastError());
+    fake.startupBytes.reserve((StartupCommandMaxCharacters + 1) * sizeof(wchar_t));
+    StartupRegistration startup; bool prepared = false, configured = false, removed = false, noAllocation = false;
+    { TestMemory::FailNextAllocation failure;
+        prepared = startup.initialize(); configured = startup.change(true, startup.snapshot(), true) == StartupChangeResult::Confirmed;
+        removed = startup.change(false, startup.snapshot(), true) == StartupChangeResult::Confirmed; noAllocation = TestMemory::AllocationFailurePending(); }
+    Check(prepared && configured && removed && noAllocation && filter.statistics() == stats && error == filter.lastError() && !filter.isActive() && filter.needsRestore() &&
+        fake.mutexOwned && fake.gammaReads == reads && fake.gammaWrites == writes && fake.mutexReleases == releases && fake.backendClockReads == clocks,
+        "consented startup reads/writes/removal allocate no C++ storage and cannot change display recovery, calibration, counters, clock, or ownership");
+    Check(filter.disable(), "display recovery remains usable independently of startup preferences");
+}
+void StartupProfilesAndOfflineCommandsCannotEnable() {
+    const auto profile = *SerializePreferences({});
+    Check(profile.find("startup") == std::string::npos && !ParsePreferences(profile + "start_with_windows=true\n").preferences,
+        "portable profiles cannot carry executable-specific startup consent");
+    Check(SaveImportedPreferences({}, [] { return true; }) == PreferenceImportResult::Saved && QuerySavedSettings() == 0,
+        "normal profile import and settings inspection remain available");
+    Check(fake.startupReads == 0 && fake.startupWrites == 0 && fake.startupDeletes == 0 && fake.modulePathReads == 0,
+        "import/reset/save/settings do not look up a startup target or read/write a Run entry");
+}
+void StartupMenuAndCallbackFailurePolicy() {
+    for (const auto entry : {StartupEntryState::Unavailable, StartupEntryState::Off, StartupEntryState::ThisExecutable, StartupEntryState::DifferentEntry}) {
+        auto state = DefaultMenuState(); state.startupEntry = entry; state.startupPathAvailable = true;
+        state.canEnableStartup = entry != StartupEntryState::Unavailable; state.canRemoveStartup = entry == StartupEntryState::ThisExecutable || entry == StartupEntryState::DifferentEntry;
+        const auto root = BuildTrayMenu(state); const auto submenu = FakeMenuChild(root, "Start with &Windows");
+        const auto enable = FakeMenuCommand(submenu, ID_TRAY_STARTUP_ENABLE), remove = FakeMenuCommand(submenu, ID_TRAY_STARTUP_REMOVE);
+        Check(root && submenu && enable && remove && ((enable->flags & MF_GRAYED) != 0) == !state.canEnableStartup &&
+            ((enable->flags & MF_CHECKED) != 0) == (entry == StartupEntryState::ThisExecutable) && ((remove->flags & MF_GRAYED) != 0) == !state.canRemoveStartup,
+            "startup menu exposes read health, configured state, and safe enable/removal choices");
+        Check(DestroyMenu(root) && AliveFakeMenus() == 0, "startup submenu participates in normal parent ownership");
+    }
+    for (const unsigned command : {ID_TRAY_STARTUP_ENABLE, ID_TRAY_STARTUP_REMOVE, ID_TRAY_STARTUP_REFRESH})
+        Check(!CommandMayChangeFilter(command) && RecoveryAfterUiFailure(false, false, false) == UiFailureRecovery::None,
+            "startup preference callback failures do not rewrite display output; independently queued recovery still follows existing policy");
+}
 void BrightnessInputAndInvalidChoices() {
     for (unsigned percent = 1; percent <= 100; ++percent)
         Check(ParseRedBrightness(std::to_wstring(percent)) == percent && ParseRedBrightness(L" \t00" + std::to_wstring(percent) + L"\t ") == percent,
@@ -6760,7 +6938,32 @@ int WideCharToMultiByte(unsigned, DWORD, const wchar_t* input, int length, char*
     for (int i = 0; i < length; ++i) output[i] = static_cast<char>(input[i]);
     return length;
 }
-LSTATUS RegGetValueW(HKEY, const wchar_t*, const wchar_t* name, DWORD flags, DWORD* type, void* output, DWORD* size) {
+DWORD GetModuleFileNameW(HMODULE module, wchar_t* output, DWORD size) {
+    ++fake.modulePathReads; fake.modulePathCapacity = size; fake.modulePathErrorBefore = fake.lastError;
+    fake.moduleTargetInvalid = module != nullptr;
+    if (!fake.modulePathAvailable) { if (fake.modulePathError) fake.lastError = *fake.modulePathError; return 0; }
+    if (!size) return 0;
+    const auto count = (std::min)(fake.modulePath.size(), static_cast<std::size_t>(size - 1));
+    std::copy_n(fake.modulePath.data(), count, output); output[count] = 0;
+    fake.lastError = 0xbad; // Success/truncation must be judged by the documented returned count.
+    return fake.modulePath.size() >= size ? size : static_cast<DWORD>(count);
+}
+LSTATUS RegGetValueW(HKEY root, const wchar_t* key, const wchar_t* name, DWORD flags, DWORD* type, void* output, DWORD* size) {
+    if (std::wstring_view(key) == RedLightRunKey) {
+        ++fake.startupReads;
+        fake.startupTargetInvalid |= root != HKEY_CURRENT_USER || std::wstring_view(name) != RedLightRunValue || flags != RRF_RT_REG_SZ;
+        if (!fake.startupReadResults.empty()) {
+            const auto status = fake.startupReadResults.front(); fake.startupReadResults.pop_front();
+            if (status != ERROR_SUCCESS) return status;
+        }
+        if (!fake.startupPresent) return ERROR_FILE_NOT_FOUND;
+        if (fake.startupType != REG_SZ) return ERROR_UNSUPPORTED_TYPE;
+        if (type) *type = fake.startupType;
+        const auto needed = static_cast<DWORD>(fake.startupBytes.size());
+        if (*size < needed) { *size = needed; return ERROR_MORE_DATA; }
+        if (output && needed) std::memcpy(output, fake.startupBytes.data(), needed);
+        *size = needed; return ERROR_SUCCESS;
+    }
     ++fake.registryReads;
     if (!fake.registryRead) return ERROR_ACCESS_DENIED;
     const auto found = fake.registry.find(name);
@@ -6775,13 +6978,30 @@ LSTATUS RegGetValueW(HKEY, const wchar_t*, const wchar_t* name, DWORD flags, DWO
     *size = needed;
     return ERROR_SUCCESS;
 }
-LSTATUS RegSetKeyValueW(HKEY, const wchar_t*, const wchar_t* name, DWORD type, const void* data, DWORD bytes) {
+LSTATUS RegSetKeyValueW(HKEY root, const wchar_t* key, const wchar_t* name, DWORD type, const void* data, DWORD bytes) {
+    if (std::wstring_view(key) == RedLightRunKey) {
+        ++fake.startupWrites;
+        fake.startupTargetInvalid |= root != HKEY_CURRENT_USER || std::wstring_view(name) != RedLightRunValue || type != REG_SZ;
+        if (fake.startupWriteBehavior == Write::Apply || fake.startupWriteBehavior == Write::FailAfterApply) {
+            const auto* first = static_cast<const char*>(data);
+            fake.startupBytes.assign(first, first + bytes); fake.startupType = type; fake.startupPresent = true;
+        }
+        return fake.startupWriteBehavior == Write::Fail || fake.startupWriteBehavior == Write::FailAfterApply ? fake.startupMutationError : ERROR_SUCCESS;
+    }
     ++fake.registryWrites;
     if (fake.instanceOwned) ++fake.registryWritesWithInstanceOwner;
     if (!fake.registryWrite) return ERROR_ACCESS_DENIED;
     const auto* begin = static_cast<const char*>(data);
     fake.registry[name] = {type, std::vector<char>(begin, begin + bytes)};
     return ERROR_SUCCESS;
+}
+LSTATUS RegDeleteKeyValueW(HKEY root, const wchar_t* key, const wchar_t* name) {
+    ++fake.startupDeletes;
+    fake.startupTargetInvalid |= root != HKEY_CURRENT_USER || std::wstring_view(key) != RedLightRunKey || std::wstring_view(name) != RedLightRunValue;
+    if (fake.startupDeleteBehavior == Write::Apply || fake.startupDeleteBehavior == Write::FailAfterApply) {
+        fake.startupBytes.clear(); fake.startupPresent = false;
+    }
+    return fake.startupDeleteBehavior == Write::Fail || fake.startupDeleteBehavior == Write::FailAfterApply ? fake.startupMutationError : ERROR_SUCCESS;
 }
 BOOL RegisterHotKey(HWND, int id, unsigned modifiers, unsigned key) {
     ++fake.hotkeyRegisters;
@@ -6817,6 +7037,12 @@ std::optional<std::string> RecentLogText() noexcept {
 }
 int main() {
     const std::pair<const char*, void(*)()> tests[] = {
+        {"Startup default/consent/native targets", StartupDefaultConsentAndExactParameters}, {"Startup portable path bounds", StartupPathBoundsAndRefusal},
+        {"Startup executable error provenance", StartupNativePathErrorProvenance}, {"Startup unreadable/malformed refusal", StartupUnreadableOrMalformedEntries},
+        {"Startup stale review/proposed path", StartupReviewChangesRequireNewConsent}, {"Startup failed/ambiguous mutations", StartupMutationFailuresPreserveObservedTruth},
+        {"Startup verification/refresh retry", StartupReadbackFailureAndRefreshRetry}, {"Startup moved path/removal isolation", StartupMovedPathRemovalAndSettingsIsolation},
+        {"Startup allocation/display recovery isolation", StartupAllocationAndDisplayRecoveryIsolation}, {"Startup profile/offline consent isolation", StartupProfilesAndOfflineCommandsCannotEnable},
+        {"Startup menu/callback policy", StartupMenuAndCallbackFailurePolicy},
         {"Brightness parser/invalid choices", BrightnessInputAndInvalidChoices}, {"Brightness all levels/modes/original", BrightnessAllLevelsModesAndOriginal},
         {"Brightness retained across mode/preset", BrightnessModeAndLumaChangesRetainLevel}, {"Brightness live target failures/rollback", BrightnessLiveFailureConfirmedRollback},
         {"Brightness failed rollback/recovery", BrightnessLiveRollbackFailureAndRecovery}, {"Brightness activation rollback", BrightnessActivationRollbackAndReadError},
@@ -7043,6 +7269,7 @@ int main() {
         try {
             run();
             Check(fake.gammaUnownedWrites == 0 && fake.mutexClosesWhileOwned == 0, "all gamma writes hold ownership; owned mutex handles are never closed");
+            Check(!fake.startupTargetInvalid && !fake.moduleTargetInvalid, "startup calls target only the self module and exact per-user Run value");
             Check(!fake.sessionRegisteredOwner, "session registration is released while its fake owner remains valid");
             std::printf("PASS %s\n", name);
         }

@@ -38,6 +38,9 @@ inline bool CommandMayChangeFilter(unsigned command, bool supportsLuma = true, b
     case ID_TRAY_COPY_PREFERENCES_JSON:
     case ID_TRAY_COPY_RESTORATION_JSON:
     case ID_TRAY_COPY_VERIFICATION_JSON:
+    case ID_TRAY_STARTUP_ENABLE:
+    case ID_TRAY_STARTUP_REMOVE:
+    case ID_TRAY_STARTUP_REFRESH:
         return false;
     default:
         return true;

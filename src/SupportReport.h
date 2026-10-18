@@ -23,6 +23,10 @@ struct SupportReportState {
     std::string_view preferredRedMode = "Not reported", preferredLumaProfile = "Not reported";
     std::optional<unsigned> brightnessPercent, preferredBrightnessPercent;
     std::optional<bool> adjustableBrightness;
+    std::string_view windowsStartupEntry = "Not reported";
+    std::uint32_t windowsStartupReadError = 0, windowsStartupChangeError = 0;
+    std::string_view windowsStartupPath = "Not reported";
+    std::uint32_t windowsStartupPathError = 0;
     std::string_view buildRevision = "unversioned", sourceState = "unknown";
     std::string_view backendLifecycle = "Not reported";
     std::string_view startupFallbackReason = "Not reported";
@@ -97,6 +101,9 @@ inline std::string BuildSupportReport(const SupportReportState& state) {
     report << "\r\nState: "
         << FilterStatusDescription(state.active, state.needsRestore, !state.lastError.empty(), state.verification, state.restoreRequested)
         << "\r\nBackend verification: " << BackendVerificationName(state.verification);
+    report << "\r\nStart with Windows entry: " << state.windowsStartupEntry
+        << "\r\nStartup entry read/change errors: " << state.windowsStartupReadError << " / " << state.windowsStartupChangeError
+        << "\r\nStartup executable path: " << state.windowsStartupPath << " (error " << state.windowsStartupPathError << ")";
     report << "\r\nVerification age: ";
     if (state.verificationAgeSeconds) report << *state.verificationAgeSeconds << " seconds since check completed";
     else report << "not recorded";

@@ -37,7 +37,12 @@ UINT Checked(bool value) { return MF_STRING | (value ? MF_CHECKED : MF_UNCHECKED
 }
 
 HMENU BuildTrayMenu(const TrayMenuState& state) {
-    Menu root, session, warning, luma, backend, shortcuts, expert, diagnostics, brightness;
+    Menu root, session, warning, luma, backend, shortcuts, expert, diagnostics, brightness, startup;
+    if (!startup.add(0, StartupEntryDescription(state.startupEntry), MF_STRING | MF_GRAYED) ||
+        (!state.startupPathAvailable && !startup.add(0, "Executable path unavailable/unsupported; see README", MF_STRING | MF_GRAYED)) ||
+        !startup.add(ID_TRAY_STARTUP_ENABLE, "&Enable for this executable...", Checked(state.startupEntry == StartupEntryState::ThisExecutable) | (state.canEnableStartup ? MF_ENABLED : MF_GRAYED)) ||
+        !startup.add(ID_TRAY_STARTUP_REMOVE, "&Remove startup entry...", MF_STRING | (state.canRemoveStartup ? MF_ENABLED : MF_GRAYED)) ||
+        !startup.add(ID_TRAY_STARTUP_REFRESH, "Re&fresh startup status", MF_STRING | (state.canRefreshStartup ? MF_ENABLED : MF_GRAYED))) return NULL;
     for (const unsigned percent : {10u, 25u, 50u, 75u, 100u}) {
         char label[32];
         if (percent == 100) strcpy_s(label, "&Full (100%)");
@@ -114,6 +119,7 @@ HMENU BuildTrayMenu(const TrayMenuState& state) {
         !root.child(luma, state.supportsLuma ? "Luma color &detail" : "Preferred Luma &detail (Magnification)") ||
         !root.child(brightness, state.supportsBrightness ? "Red &brightness" : "Preferred red &brightness (Magnification)") ||
         !root.child(session, "Auto-restore &time limit") ||
+        !root.child(startup, "Start with &Windows", state.startupEntry == StartupEntryState::ThisExecutable ? MF_CHECKED : MF_ENABLED) ||
         !root.add(0, NULL, MF_SEPARATOR) || !root.child(expert, "&Expert controls") ||
         !root.add(ID_TRAY_LOGS, "Open &logs folder") || !root.add(ID_TRAY_ABOUT, "&About") ||
         !root.add(ID_TRAY_EXIT, "E&xit")) return NULL;

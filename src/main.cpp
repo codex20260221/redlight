@@ -42,6 +42,7 @@
 #include "LumaPreference.h"
 #include "BrightnessPreference.h"
 #include "BrightnessDialog.h"
+#include "StartupRegistration.h"
 #include "RecentDiagnosticsClipboard.h"
 #include "TrayCommand.h"
 #include "PreferencesClipboard.h"
@@ -49,6 +50,7 @@
 #include "StandardOutput.h"
 #include <cstdio>
 #include <optional>
+#include <cwchar>
 
 #include "Diagnostics.h"
 #include "GammaRampFilter.h"
@@ -65,6 +67,7 @@ GammaRampFilter g_gammaRampFilter;
 DisplayFilter* g_displayFilter = &g_gammaRampFilter;
 NOTIFYICONDATAA nid = {};
 TrayIcons g_trayIcons;
+StartupRegistration g_windowsStartup;
 UINT g_taskbarCreated = 0;
 bool g_trayAdded = false;
 bool g_trayVersion4 = false;
@@ -115,6 +118,8 @@ void RetrySelectedShortcuts();
 
 void SetLumaProfile(LumaProfile profile);
 void SetRedBrightness(unsigned percent);
+void ConfigureWindowsStartup(bool enable);
+void RefreshWindowsStartup();
 void LogSystemInfo();
 void RefreshDisplayContext(DisplayContextReason reason);
 bool ResetDisplay();
@@ -282,6 +287,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
 
     RefreshDisplayContext(DisplayContextReason::Startup);
     const bool preferencesApplied = ApplyInactivePreferences(g_preferences);
+    g_windowsStartup.initialize(); // Read-only; startup requires a separate explicit user confirmation.
     if (!InitializeTrayIcon(hInstance)) {
         ReportError("The tray controls could not be created. RedLight will exit with the filter off.");
         g_displayFilter->shutdown();
@@ -903,6 +909,46 @@ void SetRedBrightness(unsigned percent) {
     // A live brightness change never restarts the existing session countdown.
 }
 
+void RefreshWindowsStartup() {
+    if (g_busy || g_preferencesApplying) return;
+    { ScopedFlag busy(g_busy); g_windowsStartup.initialize(); }
+    if (g_pendingRestore) RestoreFilter(RestoreReason::DeferredRequest, false);
+    ShowTrayInfo("RedLight startup status refreshed", StartupEntryDescription(g_windowsStartup.snapshot().state));
+}
+
+void ConfigureWindowsStartup(bool enable) {
+    if (g_busy || g_preferencesApplying) return;
+    ScopedFlag transaction(g_preferencesApplying); // Keep the proposed command stable through the modal review; Restore remains available.
+    g_windowsStartup.refresh();
+    const auto reviewed = g_windowsStartup.snapshot();
+    if (!reviewed.readable() || (enable && g_windowsStartup.command().empty())) {
+        ReportError("The startup entry or executable path could not be inspected safely. Refresh startup status and retry. Quoted Run commands must fit 260 characters; paths containing percent signs or device prefixes are unsupported.");
+        return;
+    }
+    wchar_t text[1400];
+    const wchar_t* existing = reviewed.state == StartupEntryState::Off ? L"(none)" :
+        (reviewed.command[0] ? reviewed.command.data() : L"(empty command)");
+    const int formatted = swprintf_s(text,
+        enable ? L"Start RedLight when this Windows user signs in?\n\nProposed command:\n%ls\n\nExisting RedLight startup entry:\n%ls\n\nThis creates or replaces only the per-user Run value named RedLight. Review a different existing command before replacing it.\n\nRedLight will open with filtering OFF. Keep the executable in this location; after moving it, explicitly update the entry. Windows may delay or disable startup."
+            : L"Remove this Windows user's Run value named RedLight?\n\nExisting startup command:\n%ls\n\nRunning executable command:\n%ls\n\nThis removes only the reviewed startup entry. Current filtering and other startup entries are unchanged.",
+        enable ? reviewed.proposedCommand.data() : existing, enable ? existing : reviewed.proposedCommand.data());
+    if (formatted < 0) { Diagnostics::Log("Startup confirmation could not be prepared; no change attempted."); return; }
+    const int answer = MessageBoxW(nid.hWnd, text, L"RedLight - start with Windows", MB_YESNO | MB_DEFBUTTON2 | MB_ICONQUESTION);
+    if (!answer) Diagnostics::LogFormat("MessageBox(startup confirmation) failed (error %lu).", GetLastError());
+    if (answer != IDYES || g_busy || !IsWindow(nid.hWnd)) return;
+    StartupChangeResult result;
+    { ScopedFlag busy(g_busy); result = g_windowsStartup.change(enable, reviewed, true); }
+    if (g_pendingRestore) RestoreFilter(RestoreReason::DeferredRequest, false);
+    if (result != StartupChangeResult::Confirmed) {
+        ReportError(result == StartupChangeResult::ChangedSinceReview ?
+            "The startup entry changed while you reviewed it. No change was attempted. Refresh, review the current entry, and retry." :
+            "The startup change failed or could not be verified. Its observed state was refreshed; it may already have changed. Review Start with Windows and refresh before retrying. Display recovery data is retained.");
+        return;
+    }
+    ShowTrayInfo(enable ? "RedLight startup entry configured" : "RedLight startup entry removed",
+        enable ? "The per-user entry is verified. RedLight opens with filtering off. Windows may delay or disable startup." : "The reviewed startup entry is absent. Current display settings are unchanged.");
+}
+
 void SetRedModeFromTray(RedMode mode) {
     if (g_busy || g_preferencesApplying || (g_displayFilter->needsRestore() && !g_displayFilter->isActive())) return;
     Diagnostics::LogFormat("Red mode request: %s -> %s (%s)",
@@ -1018,6 +1064,11 @@ void CopySupportReport(HWND owner) {
     state.brightnessPercent = g_displayFilter->brightnessPercent();
     state.preferredBrightnessPercent = g_preferences.brightnessPercent;
     state.adjustableBrightness = g_displayFilter->supportsBrightness();
+    state.windowsStartupEntry = StartupEntryDescription(g_windowsStartup.snapshot().state);
+    state.windowsStartupReadError = g_windowsStartup.snapshot().error;
+    state.windowsStartupChangeError = g_windowsStartup.lastChangeError();
+    state.windowsStartupPath = g_windowsStartup.command().empty() ? "Unavailable or unsupported" : "Available";
+    state.windowsStartupPathError = g_windowsStartup.pathError();
     state.lastError = g_displayFilter->lastError();
     state.backendLifecycle = g_displayFilter == &g_magnificationFilter ? g_magnificationFilter.lifecycleDescription() :
         g_displayFilter == &g_gammaRampFilter ? g_gammaRampFilter.lifecycleDescription() : "Not reported";
@@ -1194,7 +1245,7 @@ void ShowAboutDialog(HWND parent) {
     else sprintf_s(sessionRecovery, "Unavailable (error %lu); retry in Expert controls", g_sessionNotifications.lastError());
     const auto logging = Diagnostics::GetStatus();
     sprintf_s(aboutText, "RedLight " REDLIGHT_VERSION "\nBuild revision: " REDLIGHT_BUILD_REVISION " (" REDLIGHT_SOURCE_STATE ")\n\nBackend: %s\nStartup selection: %s%s\nNext start: %s\nMode: %s\nLuma detail: %s\nPreferred mode/detail: %s / %s\nRed brightness: %u%% (%s)\nPreferred red brightness: %u%%\nStatus: %s\nVerification: %s\nLast check: %s\nSettings: %s\nStartup preferences: %s%s\n\n"
-        "Toggle shortcut: %s\nRestore shortcut: %s\nShortcut preference: %s\nShortcut preference applied: %s\nLast shortcut error: %s\nSession recovery: %s\nExpiry warning: %s\n\n"
+        "Start with Windows entry: %s\nToggle shortcut: %s\nRestore shortcut: %s\nShortcut preference: %s\nShortcut preference applied: %s\nLast shortcut error: %s\nSession recovery: %s\nExpiry warning: %s\n\n"
         "File logging: %s\nMissing file records: %llu\nTruncated records: %llu\nLast file error: %lu\n\n"
         "Logs: %%LOCALAPPDATA%%\\RedLight\nUnsigned release candidate\n"
         "github.com/michaelmawhinney/redlight",
@@ -1208,6 +1259,7 @@ void ShowAboutDialog(HWND parent) {
         BackendVerificationName(g_verification.result().state), verificationTiming,
         g_preferencesUnsaved ? "Unsaved changes" : "Saved/default",
         PreferenceSourceName(g_startupPreferenceSource), g_startupPreferenceWarning ? " (load warnings)" : "",
+        StartupEntryDescription(g_windowsStartup.snapshot().state),
         g_hotkeys.toggle() ? ShortcutBindingName(*g_hotkeys.toggle()) : "Unavailable/disabled",
         g_hotkeys.restore() ? ShortcutBindingName(*g_hotkeys.restore()) : "Unavailable/disabled",
         ShortcutProfileName(g_preferences.shortcuts),
@@ -1245,7 +1297,11 @@ void ShowTrayMenu(HWND hwnd) {
         !g_busy && !g_preferencesApplying && g_restorationHistory.inProgress() == 0,
         g_displayFilter->isActive(), g_pendingRestore, !g_busy && !g_preferencesApplying,
         !g_busy && !g_preferencesApplying, g_preferences.brightnessPercent, g_displayFilter->supportsBrightness(),
-        CanChangeBrightness(*g_displayFilter, g_busy, g_preferencesApplying, g_pendingRestore)};
+        CanChangeBrightness(*g_displayFilter, g_busy, g_preferencesApplying, g_pendingRestore),
+        g_windowsStartup.snapshot().state,
+        !g_busy && !g_preferencesApplying && g_windowsStartup.snapshot().readable() && !g_windowsStartup.command().empty(),
+        !g_busy && !g_preferencesApplying && g_windowsStartup.snapshot().readable() && g_windowsStartup.snapshot().state != StartupEntryState::Off,
+        !g_busy && !g_preferencesApplying, !g_windowsStartup.command().empty()};
     HMENU menu = BuildTrayMenu(state);
     if (!menu) { ReportError("Could not build the tray menu."); return; }
     if (!SetForegroundWindow(hwnd)) Diagnostics::Log("SetForegroundWindow failed for tray menu.");
@@ -1366,6 +1422,9 @@ LRESULT HandleWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         switch (LOWORD(wParam)) {
         case ID_TRAY_TOGGLE: ToggleRedlight(); break;
         case ID_TRAY_ENABLE: EnableRedlight(); break;
+        case ID_TRAY_STARTUP_ENABLE: ConfigureWindowsStartup(true); break;
+        case ID_TRAY_STARTUP_REMOVE: ConfigureWindowsStartup(false); break;
+        case ID_TRAY_STARTUP_REFRESH: RefreshWindowsStartup(); break;
         case ID_TRAY_CUSTOM_BRIGHTNESS:
             if (CanChangeBrightness(*g_displayFilter, g_busy, g_preferencesApplying, g_pendingRestore)) {
                 if (const auto percent = ShowRedBrightnessDialog(hwnd, g_preferences.brightnessPercent)) SetRedBrightness(*percent);

@@ -43,7 +43,8 @@ inline std::optional<std::string_view> FormatPreferencePreview(const AppPreferen
         "Apply these preferences?\n\n%sChanges from current choices: %s\n\nMode: %s\nLuma detail: %s\nBackend on next start: %s\n"
         "Session limit: %u minutes (0 = unlimited)\nExpiry warning: %s\nShortcut profile: %s\nRed brightness: %u%%\n\n"
         "The display will be restored and stay off, even when preference values are identical. Backend selection applies on the next start.\n"
-        "Luma and brightness preferences are retained for Magnification; Gamma uses Strict Red at 100%%.",
+        "Luma and brightness preferences are retained for Magnification; Gamma uses Strict Red at 100%%.\n"
+        "The Windows startup entry is managed separately and is unchanged.",
         provenance, changed, RedModeDisplayName(candidate.mode), LumaProfileName(candidate.luma), BackendPreferenceName(candidate.backend),
         candidate.sessionMinutes, ExpiryWarningName(candidate.expiryWarning), ShortcutProfileName(candidate.shortcuts), candidate.brightnessPercent);
     if (length < 0 || static_cast<std::size_t>(length) >= output.size()) return std::nullopt;

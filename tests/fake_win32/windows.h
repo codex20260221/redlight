@@ -11,6 +11,8 @@ using WORD = unsigned short;
 using HDC = void*;
 using HWND = void*;
 using HINSTANCE = void*;
+using HMODULE = void*;
+DWORD GetModuleFileNameW(HMODULE, wchar_t*, DWORD);
 using HICON = void*;
 #define MAKEINTRESOURCEA(id) reinterpret_cast<const char*>(static_cast<std::uintptr_t>(static_cast<WORD>(id)))
 constexpr unsigned IMAGE_ICON = 1, LR_SHARED = 0x8000;
@@ -68,6 +70,8 @@ constexpr DWORD RRF_RT_REG_BINARY = 8;
 constexpr DWORD RRF_RT_REG_DWORD = 16;
 constexpr DWORD REG_BINARY = 3;
 constexpr DWORD REG_DWORD = 4;
+constexpr DWORD REG_SZ = 1, RRF_RT_REG_SZ = 2;
+LSTATUS RegDeleteKeyValueW(HKEY, const wchar_t*, const wchar_t*);
 LSTATUS RegGetValueW(HKEY, const wchar_t*, const wchar_t*, DWORD, DWORD*, void*, DWORD*);
 LSTATUS RegSetKeyValueW(HKEY, const wchar_t*, const wchar_t*, DWORD, const void*, DWORD);
 

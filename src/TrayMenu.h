@@ -4,6 +4,7 @@
 #include "DisplayFilter.h"
 #include "ShortcutProfile.h"
 #include "ExpiryWarning.h"
+#include "StartupRegistration.h"
 
 struct TrayMenuState {
     bool needsRestore;
@@ -23,6 +24,9 @@ struct TrayMenuState {
     bool canClearRecentDiagnostics = true;
     unsigned brightnessPercent = DefaultRedBrightness;
     bool supportsBrightness = true, canChangeBrightness = true;
+    StartupEntryState startupEntry = StartupEntryState::Unavailable;
+    bool canEnableStartup = false, canRemoveStartup = false, canRefreshStartup = true;
+    bool startupPathAvailable = false;
 };
 // Ownership of the returned root menu transfers to the caller.
 HMENU BuildTrayMenu(const TrayMenuState& state);
