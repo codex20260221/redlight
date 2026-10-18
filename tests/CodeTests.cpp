@@ -4,6 +4,7 @@
 #include "GammaRampFilter.h"
 #include "CommandLine.h"
 #include "SessionTimer.h"
+#include "BackendSelection.h"
 #include <limits>
 #include <array>
 #include <cmath>
@@ -19,6 +20,7 @@ struct Fake {
     bool magInit = true, magGet = true, magSet = true, magUninit = true;
     bool dc = true, gammaGet = true, release = true;
     int magWrites = 0, gammaWrites = 0, releases = 0, uninitializes = 0;
+    int magInitializes = 0, dcRequests = 0;
     MAGCOLOREFFECT effect = {};
     WORD ramp[3][256] = {};
     std::deque<Write> writes;
@@ -226,6 +228,50 @@ void SessionTimerChangesAndClockWrap() {
     Check(timer.configure(1, nearWrap, true), "clock near wrap");
     Check(!timer.restoreDue(nearWrap + 59999) && timer.restoreDue(nearWrap + 60000), "deadline survives unsigned clock wrap");
 }
+void BackendSelectionPolicies() {
+    MagnificationFilter m;
+    GammaRampFilter g;
+    Check(InitializePreferredBackend(BackendPreference::Automatic, m, g) == &m, "automatic prefers Magnification");
+    Check(fake.dcRequests == 0 && fake.magWrites == 0 && fake.gammaWrites == 0, "selection never activates or initializes unused gamma");
+}
+void BackendSelectionStrictAndFallback() {
+    MagnificationFilter m;
+    GammaRampFilter g;
+    fake.magInit = false;
+    Check(!InitializePreferredBackend(BackendPreference::Magnification, m, g) && fake.dcRequests == 0, "Magnification-only never silently falls back");
+    Check(InitializePreferredBackend(BackendPreference::Automatic, m, g) == &g, "automatic can fall back to gamma");
+    Check(fake.magWrites == 0 && fake.gammaWrites == 0, "fallback remains off");
+    Check(m.shutdown() && g.shutdown(), "cleanup");
+    fake.magInitializes = 0;
+    Check(InitializePreferredBackend(BackendPreference::Gamma, m, g) == &g && fake.magInitializes == 0, "gamma-only never initializes Magnification");
+}
+void BackendSelectionCleanupFailure() {
+    MagnificationFilter m;
+    GammaRampFilter g;
+    fake.magGet = false;
+    fake.magUninit = false;
+    Check(!InitializePreferredBackend(BackendPreference::Automatic, m, g) && fake.dcRequests == 0, "failed cleanup prevents competing fallback ownership");
+    fake.magUninit = true;
+    Check(m.shutdown(), "cleanup retry");
+    Check(!InitializePreferredBackend(static_cast<BackendPreference>(99), m, g), "invalid selection rejected");
+}
+void BackendCommandLine() {
+    for (const auto arg : {L"--backend=auto", L"--backend=magnification", L"--backend=gamma"}) {
+        const std::wstring_view args[] = {arg};
+        const auto parsed = ParseStartupOptions(args);
+        Check(parsed.action == StartupAction::Tray && parsed.backendOverride.has_value(), "valid backend override starts inactive tray mode");
+    }
+    const std::wstring_view gamma[] = {L"--backend=gamma"};
+    Check(ParseStartupOptions(gamma).backendOverride == BackendPreference::Gamma, "gamma override");
+    for (const auto arg : {L"--backend=", L"--backend=Gamma", L"--backend=anything", L"--backend=auto "}) {
+        const std::wstring_view args[] = {arg};
+        Check(ParseStartupOptions(args).action == StartupAction::Invalid, "invalid override rejected");
+    }
+    const std::wstring_view conflict[] = {L"--restore", L"--backend=gamma"};
+    Check(ParseStartupOptions(conflict).action == StartupAction::Invalid, "recovery cannot be combined with a startup override");
+    Check(!ParseStartupOptions({}).backendOverride.has_value(), "missing override retains saved/default policy");
+    Check(IsValidBackendPreference(0) && IsValidBackendPreference(2) && !IsValidBackendPreference(3), "validate persisted backend values");
+}
 void Arguments() {
     using S = StartupAction;
     Check(ParseArguments({}) == S::Tray, "no arguments");
@@ -241,7 +287,7 @@ void Arguments() {
 } // namespace
 
 DWORD GetLastError() { return 123; }
-HDC GetDC(HWND) { return fake.dc ? &fake : nullptr; }
+HDC GetDC(HWND) { ++fake.dcRequests; return fake.dc ? &fake : nullptr; }
 int ReleaseDC(HWND, HDC) { ++fake.releases; return fake.release ? 1 : 0; }
 BOOL GetDeviceGammaRamp(HDC, void* ramp) {
     if (!fake.gammaGet) return 0;
@@ -256,7 +302,7 @@ BOOL SetDeviceGammaRamp(HDC, void* ramp) {
     if (behavior == Write::LowByteLeak) fake.ramp[1][100] = 1;
     return behavior == Write::Apply || behavior == Write::Ignore || behavior == Write::LowByteLeak;
 }
-BOOL MagInitialize() { return fake.magInit; }
+BOOL MagInitialize() { ++fake.magInitializes; return fake.magInit; }
 BOOL MagUninitialize() { ++fake.uninitializes; return fake.magUninit; }
 BOOL MagGetFullscreenColorEffect(MAGCOLOREFFECT* effect) {
     if (!fake.magGet) return 0;
@@ -283,6 +329,8 @@ int main() {
         {"Gamma read failures", GammaReadFailures}, {"Gamma resource failures", GammaResourceFailures},
         {"Session timer boundaries", SessionTimerBoundaries},
         {"Session timer retries", SessionTimerRetryAndCancellation}, {"Session timer clock", SessionTimerChangesAndClockWrap},
+        {"Backend default selection", BackendSelectionPolicies}, {"Backend strict/fallback selection", BackendSelectionStrictAndFallback},
+        {"Backend cleanup failure", BackendSelectionCleanupFailure}, {"Backend command line", BackendCommandLine},
         {"Command line", Arguments}
     };
     int failed = 0;

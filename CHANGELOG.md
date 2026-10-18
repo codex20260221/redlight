@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Added saved next-start backend preferences (Automatic, Magnification only, and legacy gamma only) with one-start command-line overrides; explicit choices never silently fall back.
 - Added optional saved auto-restore session limits (15–240 minutes), a tray countdown, and throttled recovery retries after an expired session. Sessions start only after a confirmed enable and never automatically re-enable the filter.
 - Added Ctrl+Alt+R toggle and Ctrl+Alt+Shift+R display restoration shortcuts, with availability shown in About.
 - Added a Restore display command, direct access to diagnostics, accessible tray activation, and saved red-mode selection.
@@ -25,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Support Unicode diagnostics paths and report log-write failures to the debugger.
 
 ### Fixed
+- Prevent automatic fallback when a failed Magnification initialization still cannot release its backend resources.
 - Detect silently rejected gamma writes through significant-byte read-back and attempt rollback without claiming a failed enable is active.
 - Preserve gamma restoration data even when a partial write and rollback both fail; avoid overwriting calibration on inactive shutdown.
 - Cover the full red gamma range from black to maximum red.

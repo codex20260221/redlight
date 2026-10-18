@@ -71,6 +71,18 @@ Mode selection is saved under `HKCU\Software\RedLight\RedMode`. An unavailable L
 
 On an Explorer restart, display change, sleep/wake, or session change, RedLight attempts to restore the saved state and leaves the filter off. If restoration fails, an error is logged and recovery data is kept. Use **Restore display** to retry. No automatic re-enabling occurs.
 
+### Expert backend control
+
+**Backend preference (next start)** offers **Automatic** (Magnification first, gamma fallback), **Magnification only**, and **Legacy gamma only**. The saved selection applies after restarting RedLight and never enables the filter by itself. Explicit backend choices fail visibly if unavailable; they do not silently fall back. About distinguishes the active backend, current startup policy, and saved next-start choice.
+
+Start with one of these options to override the saved preference for that launch only:
+
+    RedLight.exe --backend=auto
+    RedLight.exe --backend=magnification
+    RedLight.exe --backend=gamma
+
+Use the Automatic override if an unavailable saved backend prevents startup. Gamma is a legacy diagnostic/compatibility option with driver and multi-monitor limitations. Close the running instance before using a startup override. The override is not saved.
+
 ## Compatibility and limitations
 
 - Target: Windows 10/11 x64 desktop sessions. HDR, remote sessions, exclusive full-screen apps, protected content, and the secure desktop are not qualified for this candidate. RedLight is not a hardware blue-light guarantee.

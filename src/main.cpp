@@ -5,6 +5,7 @@
 #include "CommandLine.h"
 #include "Version.h"
 #include "SessionTimer.h"
+#include "BackendSelection.h"
 #include <cstdio>
 
 #include "Diagnostics.h"
@@ -26,6 +27,7 @@
 #define ID_TRAY_RETRY_TIMER 1
 #define ID_SESSION_TIMER 2
 #define ID_SESSION_LIMIT_BASE 1000
+#define ID_BACKEND_PREFERENCE_BASE 1300
 
 namespace {
 
@@ -44,10 +46,15 @@ bool g_pendingRestore = false;
 SessionTimer g_sessionTimer;
 bool g_sessionTimerInstalled = false;
 bool g_autoRestoreFailureNotified = false;
+BackendPreference g_backendPreference = BackendPreference::Automatic;
+BackendPreference g_startupBackendPreference = BackendPreference::Automatic;
+bool g_backendOverride = false;
 
 }
 
-StartupAction GetStartupAction();
+StartupOptions GetStartupOptions();
+BackendPreference LoadBackendPreference();
+void SetBackendPreference(BackendPreference preference);
 bool RestoreFilter(bool showError, bool notifyFailure = true);
 void StopSessionTimer();
 bool StartSessionTimer();
@@ -82,12 +89,14 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
     Diagnostics::Log("RedLight " REDLIGHT_VERSION " starting.");
     LogSystemInfo();
 
-    const StartupAction action = GetStartupAction();
+    const StartupOptions options = GetStartupOptions();
+    const StartupAction action = options.action;
     if (action == StartupAction::Help || action == StartupAction::Version || action == StartupAction::Invalid) {
         MessageBoxA(NULL, action == StartupAction::Version ? "RedLight " REDLIGHT_VERSION :
             "RedLight " REDLIGHT_VERSION "\n\nUsage: RedLight.exe [option]\n\n"
             "--restore / --reset-display: restore display colors\n"
-            "--help: show this help\n--version: show version\n\n"
+            "--help: show this help\n--version: show version\n"
+            "--backend=auto|magnification|gamma: one-start backend override\n\n"
             "Without options, start in the tray with the filter off.\n"
             "Ctrl+Alt+R: toggle. Ctrl+Alt+Shift+R: restore.",
             action == StartupAction::Invalid ? "RedLight - invalid command line" : "RedLight",
@@ -122,22 +131,20 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
         return 0;
     }
 
-    if (g_magnificationFilter.initialize()) {
-        g_displayFilter = &g_magnificationFilter;
-        Diagnostics::LogFormat("Selected backend: %s; red mode: %s", g_displayFilter->name(), RedModeDisplayName(g_displayFilter->redMode()));
-    } else {
-        Diagnostics::Log("MagnificationFilter initialization failed; falling back to GammaRampFilter.");
-        if (!g_gammaRampFilter.initialize()) {
-            Diagnostics::Log("GammaRampFilter initialization failed.");
-            ReportError("No display backend is available. See the diagnostics log in %LOCALAPPDATA%\\RedLight.");
-            CloseInstanceMutex(hMutex);
-            Diagnostics::Log("RedLight exiting.");
-            Diagnostics::Shutdown();
-            return 1;
-        }
-        g_displayFilter = &g_gammaRampFilter;
-        Diagnostics::LogFormat("Selected backend: %s; red mode: %s", g_displayFilter->name(), RedModeDisplayName(g_displayFilter->redMode()));
+    g_backendPreference = LoadBackendPreference();
+    g_backendOverride = options.backendOverride.has_value();
+    g_startupBackendPreference = options.backendOverride.value_or(g_backendPreference);
+    Diagnostics::LogFormat("Startup backend preference: %s (%s)",
+        BackendPreferenceName(g_startupBackendPreference), g_backendOverride ? "command-line override" : "saved/default");
+    g_displayFilter = InitializePreferredBackend(g_startupBackendPreference, g_magnificationFilter, g_gammaRampFilter);
+    if (!g_displayFilter) {
+        ReportError("The selected display backend could not initialize. RedLight remains off.\n"
+            "Restart with --backend=auto to override a saved preference. See the diagnostics log for details.");
+        CloseInstanceMutex(hMutex);
+        Diagnostics::Shutdown();
+        return 1;
     }
+    Diagnostics::LogFormat("Selected backend: %s; red mode: %s", g_displayFilter->name(), RedModeDisplayName(g_displayFilter->redMode()));
 
     Diagnostics::LogFormat("Monitor count: %d", GetSystemMetrics(SM_CMONITORS));
     LoadRedMode();
@@ -193,15 +200,15 @@ void DestroyTrayWindow(HWND hwnd) {
     }
 }
 
-StartupAction GetStartupAction() {
+StartupOptions GetStartupOptions() {
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    if (!argv) return StartupAction::Invalid;
+    if (!argv) return {StartupAction::Invalid, std::nullopt};
     std::vector<std::wstring_view> args;
     for (int i = 1; i < argc; ++i) args.emplace_back(argv[i]);
-    const StartupAction action = ParseArguments(args);
+    const StartupOptions options = ParseStartupOptions(args);
     if (LocalFree(argv)) Diagnostics::Log("Freeing command-line arguments failed.");
-    return action;
+    return options;
 }
 
 void LogSystemInfo() {
@@ -563,6 +570,30 @@ bool InitializeTrayIcon(HINSTANCE hInstance) {
     return true;
 }
 
+BackendPreference LoadBackendPreference() {
+    DWORD value = 0;
+    DWORD size = sizeof(value);
+    const LSTATUS result = RegGetValueW(HKEY_CURRENT_USER, L"Software\\RedLight", L"BackendPreference",
+        RRF_RT_REG_DWORD, NULL, &value, &size);
+    if (result == ERROR_SUCCESS && IsValidBackendPreference(value)) return static_cast<BackendPreference>(value);
+    if (result != ERROR_FILE_NOT_FOUND) Diagnostics::LogFormat("Invalid/unavailable saved backend preference (error %ld); using Automatic.", result);
+    return BackendPreference::Automatic;
+}
+
+void SetBackendPreference(BackendPreference preference) {
+    if (!IsValidBackendPreference(static_cast<unsigned>(preference))) return;
+    const DWORD value = static_cast<DWORD>(preference);
+    const LSTATUS result = RegSetKeyValueW(HKEY_CURRENT_USER, L"Software\\RedLight", L"BackendPreference",
+        REG_DWORD, &value, sizeof(value));
+    if (result != ERROR_SUCCESS) {
+        Diagnostics::LogFormat("Saving backend preference failed (error %ld).", result);
+        ReportError("The backend preference could not be saved. The previous selection remains in effect.");
+        return;
+    }
+    g_backendPreference = preference;
+    Diagnostics::LogFormat("Backend preference saved for next start: %s", BackendPreferenceName(preference));
+}
+
 void SaveRedMode(RedMode mode) {
     const DWORD value = mode == RedMode::LumaRed ? 1 : 0;
     const LSTATUS result = RegSetKeyValueW(HKEY_CURRENT_USER, L"Software\\RedLight", L"RedMode",
@@ -622,11 +653,13 @@ void SetRedModeFromTray(RedMode mode) {
 
 void ShowAboutDialog(HWND parent) {
     char aboutText[1024];
-    sprintf_s(aboutText, "RedLight " REDLIGHT_VERSION "\n\nBackend: %s\nMode: %s\nStatus: %s\n\n"
+    sprintf_s(aboutText, "RedLight " REDLIGHT_VERSION "\n\nBackend: %s\nStartup selection: %s%s\nNext start: %s\nMode: %s\nStatus: %s\n\n"
         "Ctrl+Alt+R: %s\nCtrl+Alt+Shift+R: %s\nSession recovery: %s\n\n"
         "Logs: %%LOCALAPPDATA%%\\RedLight\nUnsigned release candidate\n"
         "github.com/michaelmawhinney/redlight",
-        g_displayFilter->name(), RedModeDisplayName(g_displayFilter->redMode()),
+        g_displayFilter->name(), BackendPreferenceName(g_startupBackendPreference),
+        g_backendOverride ? " (command line)" : "", BackendPreferenceName(g_backendPreference),
+        RedModeDisplayName(g_displayFilter->redMode()),
         g_displayFilter->needsRestore() && g_displayFilter->lastError()[0] ? "Recovery needed" :
         (g_displayFilter->isActive() ? "ON" : "off"),
         g_toggleHotkey ? "Toggle filter" : "Unavailable (shortcut in use)",
@@ -671,6 +704,19 @@ void ShowTrayMenu(HWND hwnd) {
         if (!DestroyMenu(sessionMenu)) Diagnostics::Log("DestroyMenu(session) failed.");
         if (!DestroyMenu(menu)) Diagnostics::Log("DestroyMenu failed after submenu failure.");
         ReportError("Could not build the session menu.");
+        return;
+    }
+    HMENU backendMenu = CreatePopupMenu();
+    bool backendBuilt = backendMenu != NULL;
+    for (const auto preference : {BackendPreference::Automatic, BackendPreference::Magnification, BackendPreference::Gamma}) {
+        backendBuilt = backendBuilt && AppendMenuA(backendMenu,
+            MF_STRING | (g_backendPreference == preference ? MF_CHECKED : MF_UNCHECKED),
+            ID_BACKEND_PREFERENCE_BASE + static_cast<unsigned>(preference), BackendPreferenceName(preference));
+    }
+    if (!backendBuilt || !AppendMenuA(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(backendMenu), "Backend preference (next start)")) {
+        if (backendMenu && !DestroyMenu(backendMenu)) Diagnostics::Log("DestroyMenu(backend) failed.");
+        if (!DestroyMenu(menu)) Diagnostics::Log("DestroyMenu failed after backend menu failure.");
+        ReportError("Could not build the backend preference menu.");
         return;
     }
     const UINT strictFlags = MF_STRING | (g_displayFilter->redMode() == RedMode::StrictRed ? MF_CHECKED : MF_UNCHECKED);
@@ -729,6 +775,10 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         else if (wParam == ID_HOTKEY_RESTORE) RestoreFilter(true);
         return 0;
     case WM_COMMAND:
+        if (LOWORD(wParam) >= ID_BACKEND_PREFERENCE_BASE && LOWORD(wParam) <= ID_BACKEND_PREFERENCE_BASE + 2) {
+            SetBackendPreference(static_cast<BackendPreference>(LOWORD(wParam) - ID_BACKEND_PREFERENCE_BASE));
+            return 0;
+        }
         if (LOWORD(wParam) >= ID_SESSION_LIMIT_BASE &&
             LOWORD(wParam) <= ID_SESSION_LIMIT_BASE + SessionTimer::maxMinutes) {
             SetSessionLimit(LOWORD(wParam) - ID_SESSION_LIMIT_BASE);

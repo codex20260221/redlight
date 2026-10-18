@@ -58,6 +58,8 @@ Auto-restore session limits: pure code tests cover disabled/default behavior, ex
 
 Manual notes (pending; not executed): choose each session limit while off/on, verify a confirmed enable starts the countdown, verify expiration restores on each backend, inject a restoration failure to check retry throttling and retained recovery data, cancel through manual restore/exit/power/session/display changes, and verify a failed Win32 timer registration attempts immediate restoration. Reconfirm red-only output on all monitors while a session is active. No automatic activation should occur.
 
+Backend preferences: code tests cover Automatic priority/fallback, strict choices without fallback, no filter activation during selection, failed initialization cleanup blocking fallback, stored value validation, and command-line override rejection/precedence. Manual notes (pending; not executed): restart under each saved preference and override, verify the selected backend and inactive startup state, verify an unavailable strict choice fails visibly, and confirm an Automatic override recovers from a bad saved preference without changing the saved value. Recheck both red modes where supported, restoration, and all attached displays.
+
 ## Known limitations and promotion gate
 
 Target Windows 10/11 x64 SDR desktop sessions first. HDR, remote sessions, secure desktop, exclusive full-screen applications, protected content, gamma multi-adapter coverage, and interaction with other color tools remain unqualified. Do not promise hardware blue-light elimination. Gamma read-back checks the driver-reported ramp and cannot measure panel output. See [Microsoft's documented gamma limitations](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/nf-wingdi-setdevicegammaramp).
