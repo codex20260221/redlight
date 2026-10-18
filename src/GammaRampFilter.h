@@ -8,6 +8,8 @@ class GammaRampFilter final : public DisplayFilter {
 public:
     GammaRampFilter();
     ~GammaRampFilter() override;
+    GammaRampFilter(const GammaRampFilter&) = delete;
+    GammaRampFilter& operator=(const GammaRampFilter&) = delete;
 
     bool initialize() override;
     bool enable() override;
@@ -25,6 +27,8 @@ public:
     const char* name() const override;
 
 private:
+    bool AcquireOwnership();
+    bool ReleaseOwnership();
     void SetError(const char* action, DWORD error);
     bool SetGammaRamp(WORD ramp[3][256], const char* action, bool requireZeroGreenBlue = false);
     void BuildRedRamp();
@@ -34,6 +38,10 @@ private:
     bool initialized_;
     bool active_;
     bool restorePending_;
+    // Gamma operations and mutex ownership stay on the tray's UI thread.
+    HANDLE ownershipMutex_;
+    bool ownershipAcquired_;
+    bool ownershipAbandoned_;
     WORD originalGammaRamp_[3][256];
     WORD redGammaRamp_[3][256];
     char lastError_[256];

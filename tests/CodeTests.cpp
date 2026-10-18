@@ -62,6 +62,12 @@ struct Fake {
     unsigned statusSends = 0, statusMessageId = 0, statusFlags = 0, statusTimeout = 0;
     WPARAM statusWparam = 0;
     LPARAM statusLparam = 0;
+    bool mutexCreate = true, mutexRelease = true, mutexClose = true, mutexOwned = false, mutexOpen = false;
+    DWORD mutexWaitResult = WAIT_OBJECT_0, mutexWaitMilliseconds = 999;
+    int mutexCreates = 0, mutexWaits = 0, mutexReleases = 0, mutexCloses = 0;
+    int mutexClosesWhileOwned = 0, gammaUnownedWrites = 0, gammaWritesAtMutexRelease = -1;
+    const wchar_t* mutexName = nullptr;
+    BOOL mutexInitialOwner = -1;
 } fake;
 
 void Reset() {
@@ -197,9 +203,11 @@ void GammaPartialFailureRecovery() {
     Check(f.initialize(), "initialize");
     fake.writes = {Write::FailAfterApply, Write::Fail, Write::Fail};
     Check(!f.enable() && !f.isActive() && f.needsRestore(), "partial failure keeps recovery pending without claiming active");
+    Check(fake.mutexOwned && fake.mutexReleases == 0 && fake.mutexCloses == 0, "failed partial-write rollback retains global ownership");
     const int releases = fake.releases;
     Check(!f.shutdown() && fake.releases == releases, "failed restore retains DC");
     Check(f.disable() && !f.needsRestore() && f.shutdown(), "recovery retry succeeds");
+    Check(!fake.mutexOwned && !fake.mutexOpen && fake.mutexReleases == 1, "recovery retry releases ownership only after restoring the original ramp");
 }
 void GammaFailedDisable() {
     GammaRampFilter f;
@@ -233,6 +241,116 @@ void GammaResourceFailures() {
     Check(!f.enable() && !f.shutdown(), "release failure does not silently discard DC");
     fake.release = true;
     Check(f.shutdown(), "release retry");
+}
+void GammaOwnershipLifecycle() {
+    GammaRampFilter filter;
+    Check(filter.initialize() && fake.mutexCreates == 0, "inactive initialization does not hold global ownership");
+    Check(filter.enable() && filter.enable() && fake.mutexCreates == 1 && fake.mutexWaits == 1 && fake.mutexOwned,
+        "activation acquires once and idempotent enable never recursively waits");
+    Check(std::wstring_view(fake.mutexName) == L"Global\\RedLight.GammaRampOwner.v1" && !fake.mutexInitialOwner && fake.mutexWaitMilliseconds == 0,
+        "cross-session name, explicit wait ownership, and nonblocking wait");
+    Check(filter.disable() && !fake.mutexOwned && !fake.mutexOpen && fake.mutexReleases == 1 && fake.mutexCloses == 1 && fake.gammaWritesAtMutexRelease == 2,
+        "ownership released only after confirmed restoration");
+    Check(filter.disable() && fake.gammaWrites == 2 && fake.mutexReleases == 1, "inactive restore has no duplicate writes or releases");
+    fake.ramp[0][80] = 4321;
+    Check(filter.enable() && filter.disable() && fake.ramp[0][80] == 4321 && fake.mutexCreates == 2 && fake.mutexReleases == 2,
+        "new activation captures current calibration under a new ownership cycle");
+}
+void GammaOwnershipConflictAndWaitFailure() {
+    GammaRampFilter filter;
+    Check(filter.initialize(), "initialize");
+    const int reads = fake.gammaReads, dcRequests = fake.dcRequests;
+    fake.mutexWaitResult = WAIT_TIMEOUT;
+    Check(!filter.enable() && !filter.isActive() && !filter.needsRestore() && !fake.mutexOpen && fake.mutexReleases == 0,
+        "busy other session does not grant or release ownership");
+    Check(fake.gammaReads == reads && fake.gammaWrites == 0 && fake.dcRequests == dcRequests && std::string_view(filter.lastError()).find("another RedLight session") != std::string_view::npos,
+        "conflict does not capture or write calibration and explains recovery");
+    fake.mutexWaitResult = WAIT_FAILED;
+    Check(!filter.enable() && !filter.needsRestore() && fake.gammaWrites == 0, "wait error stays off and closes unowned handle");
+    fake.mutexWaitResult = 99;
+    Check(!filter.enable() && !filter.needsRestore(), "unexpected wait response is not treated as acquired");
+    fake.mutexWaitResult = WAIT_OBJECT_0;
+    Check(filter.enable() && filter.disable(), "activation can retry after conflict is resolved");
+}
+void GammaOwnershipCreationFailure() {
+    GammaRampFilter filter;
+    Check(filter.initialize(), "initialize");
+    const auto reads = fake.gammaReads;
+    fake.mutexCreate = false;
+    Check(!filter.enable() && !filter.isActive() && !filter.needsRestore() && fake.gammaReads == reads && fake.gammaWrites == 0 && fake.mutexWaits == 0,
+        "access-denied/name-collision guard creation fails before calibration capture");
+    fake.mutexCreate = true;
+    Check(filter.enable() && filter.disable(), "create failure can retry");
+}
+void GammaOwnershipCaptureFailuresReleaseGuard() {
+    GammaRampFilter filter;
+    Check(filter.initialize(), "initialize");
+    fake.release = false;
+    Check(!filter.enable() && !filter.needsRestore() && !fake.mutexOwned && !fake.mutexOpen && fake.gammaWrites == 0,
+        "DC release failure before capture gives up unused ownership");
+    fake.release = true; fake.dc = false;
+    Check(!filter.enable() && !filter.needsRestore() && !fake.mutexOwned && fake.gammaWrites == 0, "DC acquisition failure gives up unused ownership");
+    fake.dc = true; fake.gammaGet = false;
+    Check(!filter.enable() && !filter.needsRestore() && !fake.mutexOwned && fake.gammaWrites == 0, "capture failure gives up unused ownership");
+    fake.gammaGet = true;
+    Check(filter.enable() && filter.disable(), "capture can retry under new guard");
+}
+void GammaOwnershipRestoreFailureRetainsGuard() {
+    GammaRampFilter filter;
+    Check(filter.initialize() && filter.enable(), "activate");
+    fake.writes = {Write::Fail, Write::Fail};
+    Check(!filter.disable() && !filter.shutdown() && filter.isActive() && filter.needsRestore() && fake.mutexOwned && fake.mutexReleases == 0 && fake.mutexCloses == 0,
+        "failed restoration/shutdown retain ownership, DC, and original calibration");
+    Check(filter.disable() && !filter.needsRestore() && !fake.mutexOwned && fake.mutexReleases == 1, "successful retry finally releases ownership");
+}
+void GammaOwnershipCleanupRetryDoesNotRewrite() {
+    GammaRampFilter filter;
+    Check(filter.initialize() && filter.enable(), "activate");
+    fake.mutexRelease = false;
+    Check(!filter.disable() && !filter.isActive() && filter.needsRestore() && fake.mutexOwned && fake.mutexCloses == 0 && fake.gammaWrites == 2,
+        "successful display restoration with failed ownership release remains recoverable off");
+    const auto reads = fake.gammaReads;
+    Check(filter.verifyState() == BackendVerification::Inactive && fake.gammaReads == reads, "cleanup-only state does not inspect another tool's calibration");
+    fake.ramp[0][100] = 1234;
+    Check(!filter.enable() && fake.gammaWrites == 2, "cleanup pending blocks a new capture/activation");
+    fake.mutexRelease = true; fake.mutexClose = false;
+    Check(!filter.disable() && filter.needsRestore() && !fake.mutexOwned && fake.mutexOpen && fake.gammaWrites == 2,
+        "failed handle close retains handle after a single successful release");
+    const auto releases = fake.mutexReleases;
+    fake.mutexClose = true;
+    Check(filter.disable() && !filter.needsRestore() && fake.mutexReleases == releases && fake.gammaWrites == 2 && fake.ramp[0][100] == 1234 && !filter.lastError()[0],
+        "cleanup retry does not release twice, rewrite external calibration, or retain a stale failure");
+}
+void GammaOwnershipRejectedWaitCleanupRetry() {
+    GammaRampFilter filter;
+    Check(filter.initialize(), "initialize");
+    fake.mutexWaitResult = WAIT_TIMEOUT; fake.mutexClose = false;
+    Check(!filter.enable() && !filter.isActive() && filter.needsRestore() && fake.gammaWrites == 0 && fake.mutexReleases == 0,
+        "failed close after busy wait remains visible and tracked");
+    fake.mutexClose = true;
+    Check(filter.disable() && !filter.needsRestore() && fake.gammaWrites == 0 && fake.mutexReleases == 0, "unowned cleanup retries without display writes or releasing another owner");
+}
+void GammaOwnershipAbandonmentRefusesCapture() {
+    GammaRampFilter filter;
+    Check(filter.initialize(), "initialize");
+    const auto reads = fake.gammaReads;
+    fake.mutexWaitResult = WAIT_ABANDONED;
+    Check(!filter.enable() && !filter.needsRestore() && !fake.mutexOwned && fake.mutexReleases == 1 && fake.gammaReads == reads && fake.gammaWrites == 0,
+        "abandoned ownership is released but uncertain calibration is not captured/written");
+    fake.mutexWaitResult = WAIT_OBJECT_0;
+    const auto creates = fake.mutexCreates;
+    Check(!filter.enable() && fake.mutexCreates == creates && fake.gammaReads == reads && std::string_view(filter.lastError()).find("recover display calibration") != std::string_view::npos,
+        "abandonment is latched for process lifetime, not bypassed by another enable");
+    Check(filter.shutdown() && filter.initialize() && !filter.enable(), "backend reinitialization cannot clear the abandonment latch");
+}
+void GammaOwnershipAbandonmentCleanupFailure() {
+    GammaRampFilter filter;
+    Check(filter.initialize(), "initialize");
+    fake.mutexWaitResult = WAIT_ABANDONED; fake.mutexRelease = false;
+    Check(!filter.enable() && filter.needsRestore() && fake.mutexOwned && fake.gammaWrites == 0 && fake.mutexCloses == 0, "failed abandoned-owner release retains actual ownership");
+    fake.mutexRelease = true;
+    Check(filter.disable() && !filter.needsRestore() && !fake.mutexOwned && !filter.enable() && fake.gammaWrites == 0,
+        "cleanup can recover without authorizing uncertain calibration capture");
 }
 void SessionTimerBoundaries() {
     SessionTimer timer;
@@ -903,6 +1021,30 @@ void StatusQueryFailures() {
 
 DWORD GetLastError() { return fake.lastError; }
 void SetLastError(DWORD value) { fake.lastError = value; }
+HANDLE CreateMutexW(void*, BOOL initialOwner, const wchar_t* name) {
+    ++fake.mutexCreates; fake.mutexName = name; fake.mutexInitialOwner = initialOwner;
+    if (!fake.mutexCreate) return nullptr;
+    fake.mutexOpen = true;
+    return &fake.mutexOpen;
+}
+DWORD WaitForSingleObject(HANDLE, DWORD milliseconds) {
+    ++fake.mutexWaits; fake.mutexWaitMilliseconds = milliseconds;
+    if (fake.mutexWaitResult == WAIT_OBJECT_0 || fake.mutexWaitResult == WAIT_ABANDONED) fake.mutexOwned = true;
+    return fake.mutexWaitResult;
+}
+BOOL ReleaseMutex(HANDLE) {
+    ++fake.mutexReleases; fake.gammaWritesAtMutexRelease = fake.gammaWrites;
+    if (!fake.mutexRelease || !fake.mutexOwned) return FALSE;
+    fake.mutexOwned = false;
+    return 1;
+}
+BOOL CloseHandle(HANDLE) {
+    ++fake.mutexCloses;
+    if (fake.mutexOwned) ++fake.mutexClosesWhileOwned;
+    if (!fake.mutexClose) return FALSE;
+    fake.mutexOpen = false;
+    return 1;
+}
 HANDLE GetStdHandle(DWORD) {
     ++fake.stdoutLookups;
     const bool valid = fake.consoleAttaches ? fake.attachedOutputValid : fake.stdoutValid;
@@ -933,6 +1075,7 @@ BOOL GetDeviceGammaRamp(HDC, void* ramp) {
 }
 BOOL SetDeviceGammaRamp(HDC, void* ramp) {
     ++fake.gammaWrites;
+    if (!fake.mutexOwned) ++fake.gammaUnownedWrites;
     auto behavior = Write::Apply;
     if (!fake.writes.empty()) { behavior = fake.writes.front(); fake.writes.pop_front(); }
     if (behavior == Write::Apply || behavior == Write::FailAfterApply || behavior == Write::LowByteLeak)
@@ -1028,6 +1171,11 @@ int main() {
         {"Gamma low-byte leakage", GammaLowByteLeak}, {"Inactive shutdown", OffShutdownDoesNotWrite},
         {"Gamma partial-write recovery", GammaPartialFailureRecovery}, {"Gamma failed disable", GammaFailedDisable},
         {"Gamma read failures", GammaReadFailures}, {"Gamma resource failures", GammaResourceFailures},
+        {"Gamma ownership lifecycle", GammaOwnershipLifecycle}, {"Gamma ownership conflict/wait failure", GammaOwnershipConflictAndWaitFailure},
+        {"Gamma ownership creation failure", GammaOwnershipCreationFailure}, {"Gamma ownership capture cleanup", GammaOwnershipCaptureFailuresReleaseGuard},
+        {"Gamma ownership failed restoration", GammaOwnershipRestoreFailureRetainsGuard}, {"Gamma ownership cleanup retry", GammaOwnershipCleanupRetryDoesNotRewrite},
+        {"Gamma rejected-wait cleanup", GammaOwnershipRejectedWaitCleanupRetry}, {"Gamma abandoned ownership", GammaOwnershipAbandonmentRefusesCapture},
+        {"Gamma abandoned-owner cleanup", GammaOwnershipAbandonmentCleanupFailure},
         {"Session timer boundaries", SessionTimerBoundaries},
         {"Session timer retries", SessionTimerRetryAndCancellation}, {"Session timer clock", SessionTimerChangesAndClockWrap},
         {"Backend default selection", BackendSelectionPolicies}, {"Backend strict/fallback selection", BackendSelectionStrictAndFallback},
@@ -1061,7 +1209,11 @@ int main() {
     int failed = 0;
     for (const auto& [name, run] : tests) {
         Reset();
-        try { run(); std::printf("PASS %s\n", name); }
+        try {
+            run();
+            Check(fake.gammaUnownedWrites == 0 && fake.mutexClosesWhileOwned == 0, "all gamma writes hold ownership; owned mutex handles are never closed");
+            std::printf("PASS %s\n", name);
+        }
         catch (const std::exception& e) { ++failed; std::printf("FAIL %s: %s\n", name, e.what()); }
     }
     return failed ? 1 : 0;

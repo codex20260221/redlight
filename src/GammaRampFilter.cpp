@@ -15,6 +15,9 @@ GammaRampFilter::GammaRampFilter()
       initialized_(false),
       active_(false),
       restorePending_(false),
+      ownershipMutex_(NULL),
+      ownershipAcquired_(false),
+      ownershipAbandoned_(false),
       originalGammaRamp_{},
       redGammaRamp_{},
       lastError_{} {}
@@ -28,7 +31,7 @@ bool GammaRampFilter::initialize() {
         return true;
     }
 
-    if (hdc_ && !shutdown()) return false;
+    if ((hdc_ || ownershipMutex_) && !shutdown()) return false;
     hdc_ = GetDC(NULL);
     if (!hdc_) {
         SetError("GetDC", GetLastError());
@@ -65,18 +68,21 @@ bool GammaRampFilter::enable() {
         return true;
     }
 
-    if (restorePending_) {
+    if (needsRestore()) {
         SetError("enable while recovery pending", ERROR_INVALID_STATE);
         return false;
     }
+    if (!AcquireOwnership()) return false;
     // Reacquire after topology changes and save the latest calibration on each enable.
     if (hdc_ && !ReleaseDC(NULL, hdc_)) {
         SetError("ReleaseDC before enable", GetLastError());
+        ReleaseOwnership();
         return false;
     }
     hdc_ = GetDC(NULL);
     if (!hdc_ || !GetDeviceGammaRamp(hdc_, originalGammaRamp_)) {
         SetError("capture before enable", GetLastError());
+        ReleaseOwnership();
         return false;
     }
     restorePending_ = true;
@@ -100,17 +106,14 @@ bool GammaRampFilter::disable() {
         return false;
     }
 
-    if (!needsRestore()) {
-        return true;
+    if (active_ || restorePending_) {
+        if (!SetGammaRamp(originalGammaRamp_, "SetDeviceGammaRamp(restore)")) return false;
+        active_ = false;
+        restorePending_ = false;
+        Diagnostics::LogFormat("%s display restoration succeeded.", kFilterName);
     }
-
-    if (!SetGammaRamp(originalGammaRamp_, "SetDeviceGammaRamp(restore)")) {
-        return false;
-    }
-
-    active_ = false;
-    restorePending_ = false;
-    Diagnostics::LogFormat("%s disable succeeded.", kFilterName);
+    if (!ReleaseOwnership()) return false;
+    lastError_[0] = '\0';
     return true;
 }
 
@@ -118,13 +121,13 @@ bool GammaRampFilter::isActive() const {
     return active_;
 }
 
-bool GammaRampFilter::needsRestore() const { return active_ || restorePending_; }
+bool GammaRampFilter::needsRestore() const { return active_ || restorePending_ || ownershipMutex_ != NULL; }
 
 const char* GammaRampFilter::lastError() const { return lastError_; }
 
 BackendVerification GammaRampFilter::verifyState() const {
     if (!initialized_) return BackendVerification::Unavailable;
-    if (!needsRestore()) return BackendVerification::Inactive;
+    if (!active_ && !restorePending_) return BackendVerification::Inactive;
     WORD actual[3][256] = {};
     if (!hdc_ || !GetDeviceGammaRamp(hdc_, actual)) {
         Diagnostics::LogFormat("Gamma verification read failed (error %lu).", GetLastError());
@@ -162,7 +165,7 @@ bool GammaRampFilter::supportsRedMode(RedMode mode) const {
 
 bool GammaRampFilter::shutdown() {
     if (needsRestore() && !disable()) {
-        Diagnostics::Log("GammaRampFilter: restore failed; retaining DC and recovery state.");
+        Diagnostics::Log("GammaRampFilter: recovery/ownership cleanup failed; retaining resources for retry.");
         return false;
     }
     if (hdc_ && !ReleaseDC(NULL, hdc_)) {
@@ -178,6 +181,55 @@ const char* GammaRampFilter::name() const {
     return kFilterName;
 }
 
+bool GammaRampFilter::AcquireOwnership() {
+    if (ownershipAbandoned_) {
+        SetError("gamma ownership was abandoned; recover display calibration before restarting RedLight", ERROR_ABANDONED_WAIT_0);
+        return false;
+    }
+    if (ownershipAcquired_) return true; // Never recursively acquire the named mutex.
+    ownershipMutex_ = CreateMutexW(NULL, FALSE, L"Global\\RedLight.GammaRampOwner.v1");
+    if (!ownershipMutex_) {
+        SetError("CreateMutex(gamma ownership; unavailable or access denied)", GetLastError());
+        return false;
+    }
+    const DWORD result = WaitForSingleObject(ownershipMutex_, 0); // Never block the tray or wait out another session.
+    if (result == WAIT_OBJECT_0) {
+        ownershipAcquired_ = true;
+        Diagnostics::Log("GammaRampFilter: acquired global gamma ownership before calibration capture.");
+        return true;
+    }
+    if (result == WAIT_ABANDONED) {
+        ownershipAcquired_ = true; // Windows grants ownership even on abandonment.
+        ownershipAbandoned_ = true;
+        SetError("abandoned gamma ownership; calibration recovery required before restarting RedLight", ERROR_ABANDONED_WAIT_0);
+    } else if (result == WAIT_TIMEOUT) {
+        SetError("gamma is owned by another RedLight session; restore it there first", ERROR_BUSY);
+    } else {
+        SetError("WaitForSingleObject(gamma ownership)", result == WAIT_FAILED ? GetLastError() : ERROR_INVALID_DATA);
+    }
+    ReleaseOwnership();
+    return false;
+}
+
+bool GammaRampFilter::ReleaseOwnership() {
+    if (ownershipAcquired_) {
+        if (!ReleaseMutex(ownershipMutex_)) {
+            SetError("ReleaseMutex(gamma ownership)", GetLastError());
+            return false;
+        }
+        ownershipAcquired_ = false;
+        Diagnostics::Log("GammaRampFilter: released global gamma ownership.");
+    }
+    if (ownershipMutex_) {
+        if (!CloseHandle(ownershipMutex_)) {
+            SetError("CloseHandle(gamma ownership)", GetLastError());
+            return false;
+        }
+        ownershipMutex_ = NULL;
+    }
+    return true;
+}
+
 void GammaRampFilter::SetError(const char* action, DWORD error) {
     std::snprintf(lastError_, sizeof(lastError_), "%s: %s failed (GetLastError=%lu)\n",
         kFilterName,
@@ -187,6 +239,10 @@ void GammaRampFilter::SetError(const char* action, DWORD error) {
 }
 
 bool GammaRampFilter::SetGammaRamp(WORD ramp[3][256], const char* action, bool requireZeroGreenBlue) {
+    if (!ownershipAcquired_) {
+        SetError("gamma write without exclusive ownership", ERROR_INVALID_STATE);
+        return false;
+    }
     if (!hdc_) {
         SetError(action, ERROR_INVALID_HANDLE);
         return false;

@@ -44,7 +44,7 @@ public:
     virtual bool enable() = 0;
     virtual bool disable() = 0;
     virtual bool isActive() const = 0;
-    // A failed/partial write can require recovery without a confirmed active filter.
+    // A failed/partial write or pending ownership cleanup can require recovery while inactive.
     virtual bool needsRestore() const = 0;
     virtual const char* lastError() const = 0;
     virtual BackendVerification verifyState() const = 0;

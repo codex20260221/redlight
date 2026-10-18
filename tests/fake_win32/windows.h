@@ -109,3 +109,9 @@ using LRESULT = std::intptr_t;
 constexpr unsigned SMTO_BLOCK = 1, SMTO_ABORTIFHUNG = 2;
 HWND FindWindowA(const char*, const char*);
 LRESULT SendMessageTimeoutA(HWND, unsigned, WPARAM, LPARAM, unsigned, unsigned, DWORD_PTR*);
+
+constexpr DWORD WAIT_OBJECT_0 = 0, WAIT_ABANDONED = 128, WAIT_TIMEOUT = 258, WAIT_FAILED = 0xfffffffful;
+constexpr DWORD ERROR_BUSY = 170, ERROR_ABANDONED_WAIT_0 = 735;
+HANDLE CreateMutexW(void*, BOOL, const wchar_t*);
+DWORD WaitForSingleObject(HANDLE, DWORD);
+BOOL ReleaseMutex(HANDLE);

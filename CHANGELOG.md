@@ -28,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added command-line help/version dialogs and explicit rejection of unknown or conflicting options.
 
 ### Changed
+- Hold a nonblocking cross-session ownership guard around legacy gamma capture, activation, and restoration; conflicts/access failures stay off, detected abandoned ownership blocks activation until recovery/restart, and failed cleanup remains tracked without rewriting already-restored calibration.
 - Rotate logs during long sessions at the 1 MiB target with up to three archives; use fixed record buffers/cached paths and serialize writes, rotation, status reads, and shutdown. Logging failures fall back to debugger output without allowing failed rotation to grow the file indefinitely.
 - Grouped backend policy, verification, reports, and profile transfer under Expert controls while keeping toggle/restore/modes first; added distinct menu accelerators, visible shortcut-conflict labels, and explicit submenu ownership cleanup.
 - Persist preferences in one validated, versioned record to avoid partial multi-key saves; migrate prior values read-only until the next save, report invalid storage, and show unsaved changes in About/support reports.
