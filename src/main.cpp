@@ -84,6 +84,7 @@ void ShowTrayMenu(HWND hwnd);
 void SaveRedMode(RedMode mode);
 void SaveCurrentPreferences();
 void RetrySessionRecovery();
+void RetrySelectedShortcuts();
 
 void SetLumaProfile(LumaProfile profile);
 void LogSystemInfo();
@@ -619,6 +620,20 @@ void RetrySessionRecovery() {
     }
 }
 
+void RetrySelectedShortcuts() {
+    if (g_busy || g_preferencesApplying) return;
+    bool ready = false;
+    { ScopedFlag busy(g_busy); ready = g_hotkeys.change(g_preferences.shortcuts); }
+    const bool restored = !g_pendingRestore || RestoreFilter(false);
+    if (!ready) {
+        ReportError("The selected shortcut profile is not fully applied. About shows the available combinations. See the log and retry after resolving conflicts or registration errors.");
+    } else if (restored) {
+        ShowTrayInfo("RedLight shortcuts checked", "The selected profile is applied. About lists the current toggle and restore combinations.");
+    }
+    Diagnostics::LogFormat("Selected shortcut retry: %s (%s); preference storage unchanged.",
+        ShortcutProfileName(g_preferences.shortcuts), ready ? "applied" : "incomplete");
+}
+
 void ScheduleTrayRecovery() {
     if (!SetTimer(nid.hWnd, ID_TRAY_RETRY_TIMER, 2000, NULL)) {
         Diagnostics::LogFormat("SetTimer for tray recovery failed (error %lu).", GetLastError());
@@ -822,6 +837,7 @@ void CopySupportReport(HWND owner) {
     state.toggleHotkey = g_hotkeys.toggle().has_value();
     state.restoreHotkey = g_hotkeys.restore().has_value();
     state.shortcutProfile = ShortcutProfileName(g_preferences.shortcuts);
+    state.shortcutProfileApplied = g_hotkeys.matches(g_preferences.shortcuts);
     if (g_hotkeys.toggle()) state.toggleBinding = ShortcutBindingName(*g_hotkeys.toggle());
     if (g_hotkeys.restore()) state.restoreBinding = ShortcutBindingName(*g_hotkeys.restore());
     state.sessionNotifications = g_sessionNotifications.isRegistered();
@@ -950,7 +966,7 @@ void ShowAboutDialog(HWND parent) {
     else sprintf_s(sessionRecovery, "Unavailable (error %lu); retry in Expert controls", g_sessionNotifications.lastError());
     const auto logging = Diagnostics::GetStatus();
     sprintf_s(aboutText, "RedLight " REDLIGHT_VERSION "\nBuild revision: " REDLIGHT_BUILD_REVISION " (" REDLIGHT_SOURCE_STATE ")\n\nBackend: %s\nStartup selection: %s%s\nNext start: %s\nMode: %s\nLuma detail: %s\nPreferred mode/detail: %s / %s\nStatus: %s\nSettings: %s\nStartup preferences: %s%s\n\n"
-        "Toggle shortcut: %s\nRestore shortcut: %s\nShortcut preference: %s\nSession recovery: %s\nExpiry warning: %s\n\n"
+        "Toggle shortcut: %s\nRestore shortcut: %s\nShortcut preference: %s\nShortcut preference applied: %s\nSession recovery: %s\nExpiry warning: %s\n\n"
         "File logging: %s\nMissing file records: %llu\nTruncated records: %llu\nLast file error: %lu\n\n"
         "Logs: %%LOCALAPPDATA%%\\RedLight\nUnsigned release candidate\n"
         "github.com/michaelmawhinney/redlight",
@@ -965,6 +981,7 @@ void ShowAboutDialog(HWND parent) {
         g_hotkeys.toggle() ? ShortcutBindingName(*g_hotkeys.toggle()) : "Unavailable/disabled",
         g_hotkeys.restore() ? ShortcutBindingName(*g_hotkeys.restore()) : "Unavailable/disabled",
         ShortcutProfileName(g_preferences.shortcuts),
+        g_hotkeys.matches(g_preferences.shortcuts) ? "Yes" : "No; retry in Expert controls",
         sessionRecovery,
         ExpiryWarningName(g_preferences.expiryWarning),
         Diagnostics::FileStateName(logging.file), static_cast<unsigned long long>(logging.droppedLines),
@@ -1135,6 +1152,7 @@ LRESULT HandleWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         case ID_TRAY_COPY_REPORT: CopySupportReport(hwnd); break;
         case ID_TRAY_SAVE_PREFERENCES: SaveCurrentPreferences(); break;
         case ID_TRAY_RETRY_SESSION: RetrySessionRecovery(); break;
+        case ID_TRAY_RETRY_SHORTCUTS: RetrySelectedShortcuts(); break;
         case ID_TRAY_RESET_BACKEND_COUNTS:
             if (!g_busy && !g_preferencesApplying) {
                 if (g_displayFilter->resetStatistics()) {

@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Added Retry selected shortcuts without preference writes or backend changes, plus explicit selected-profile registration health in About, support reports, and status JSON, including partial/mixed/disabled states.
 - Added Restart current countdown for healthy, active, unexpired timed sessions, reusing the configured duration and rearming one warning without saving preferences or changing the display backend.
 - Allow preferred Luma-detail edits during gamma fallback without backend calls, output/error/snapshot changes, or verification invalidation; distinguish effective and preferred selections in About/support reports and add explicit Luma-profile scope to status JSON.
 - Added an Expert retry for Windows session-recovery notifications, checked registration ownership and cleanup, idempotent/reentrant-call protection, and cached last-error details in About/support reports; deferred restore requests remain honored.

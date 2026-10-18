@@ -71,6 +71,7 @@ HMENU BuildTrayMenu(const TrayMenuState& state) {
         !expert.add(ID_TRAY_COPY_REPORT, "&Copy support report") ||
         !expert.add(ID_TRAY_RETRY_LOGGING, "&Retry file logging") ||
         !expert.add(ID_TRAY_RETRY_SESSION, "Retry session rec&overy") ||
+        !expert.add(ID_TRAY_RETRY_SHORTCUTS, "Retry selected s&hortcuts") ||
         !expert.add(ID_TRAY_RESET_BACKEND_COUNTS, "Reset backend cou&nters") ||
         !expert.add(0, NULL, MF_SEPARATOR) ||
         !expert.add(ID_TRAY_SAVE_PREFERENCES, state.preferencesUnsaved ? "Retry saving current &preferences" : "Save current &preferences") ||

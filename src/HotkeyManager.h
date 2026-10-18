@@ -11,6 +11,9 @@ public:
     const std::optional<ShortcutBinding>& toggle() const { return actual_[0]; }
     const std::optional<ShortcutBinding>& restore() const { return actual_[1]; }
     bool accepts(unsigned id, unsigned modifiers, unsigned key) const;
+    bool matches(ShortcutProfile profile) const noexcept {
+        return IsValidShortcutProfile(static_cast<unsigned>(profile)) && actual_ == ShortcutBindings(profile);
+    }
 private:
     bool set(unsigned slot, const std::optional<ShortcutBinding>& target);
     HWND owner_ = NULL;

@@ -99,6 +99,8 @@ On an Explorer restart, display change, sleep/wake, or session change, RedLight 
 
 A rejected change attempts to restore the previous registrations and keeps the prior preference. If rollback also fails, the actual remaining bindings are shown rather than assuming success. Retry the desired profile to recover. Stale queued messages from old or disabled combinations are ignored. A successful change is saved; storage failures are shown as unsaved changes. Imported profiles apply shortcut choices after restoring the display and keep the filter off.
 
+**Expert controls → Retry selected shortcuts** retries incomplete registrations for the existing choice after a conflict or registration error is resolved. It preserves preferences, unsaved-change status, filtering, countdowns, and recovery data; independently queued restore requests are still honored. A healthy retry avoids duplicate native registration. About, support reports, and `shortcut_profile_applied` in status JSON indicate whether tracked toggle/restore bindings match the selected profile. Disabled is applied when both bindings are absent; mixed or missing required bindings are incomplete.
+
 ### Expert backend control
 
 **Expert controls → Backend preference (next start)** offers **Automatic** (Magnification first, gamma fallback), **Magnification only**, and **Legacy gamma only**. The saved selection applies after restarting RedLight and never enables the filter by itself. Explicit backend choices fail visibly if unavailable; they do not silently fall back. About distinguishes the active backend, current startup policy, and saved next-start choice.

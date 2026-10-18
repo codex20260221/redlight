@@ -75,6 +75,11 @@ inline const char* StatusShortcutName(StatusShortcut key, bool restore) {
     const unsigned vk = key == StatusShortcut::R ? 'R' : (key == StatusShortcut::F9 ? 0x78 : 0x79);
     return ShortcutBindingName({restore ? 7u : 3u, vk});
 }
+inline bool StatusShortcutProfileApplied(const TrayStatus& s) {
+    if (!IsValidShortcutProfile(static_cast<unsigned>(s.shortcutProfile))) return false;
+    const auto wanted = ShortcutBindings(s.shortcutProfile);
+    return StatusShortcutKey(wanted[0]) == s.toggle && StatusShortcutKey(wanted[1]) == s.restore;
+}
 inline const char* TrayStatusToken(const TrayStatus& s) {
     if (s.busy) return "busy";
     if (s.restorePending && (s.backendError || !s.backendActive)) return "recovery-needed";
@@ -99,7 +104,7 @@ inline std::optional<std::string> TrayStatusJson(const TrayStatus& s) {
     const int length = std::snprintf(text, sizeof(text),
         "{\n  \"protocol\":1,\n  \"status\":\"%s\",\n  \"active\":%s,\n  \"backend_active\":%s,\n  \"restore_pending\":%s,\n  \"backend_error\":%s,\n  \"verification\":\"%s\",\n"
         "  \"backend\":\"%s\",\n  \"red_mode\":\"%s\",\n  \"luma_profile\":\"%s\",\n  \"luma_profile_scope\":\"%s\",\n"
-        "  \"session_limit_minutes\":%u,\n  \"remaining_seconds\":%s,\n  \"shortcut_profile\":\"%s\",\n"
+        "  \"session_limit_minutes\":%u,\n  \"remaining_seconds\":%s,\n  \"shortcut_profile\":\"%s\",\n  \"shortcut_profile_applied\":%s,\n"
         "  \"toggle_shortcut\":\"%s\",\n  \"restore_shortcut\":\"%s\",\n  \"settings_unsaved\":%s,\n"
         "  \"session_notifications\":%s,\n  \"file_logging\":\"%s\",\n  \"file_records_missing\":%s,\n"
         "  \"records_truncated\":%s,\n  \"file_error\":%s\n}\n",
@@ -107,7 +112,7 @@ inline std::optional<std::string> TrayStatusJson(const TrayStatus& s) {
         s.backend == StatusBackend::Magnification ? "magnification" : "gamma", s.mode == RedMode::LumaRed ? "luma" : "strict",
         s.luma == LumaProfile::Classic ? "classic" : (s.luma == LumaProfile::GreenDetail ? "green" : "equal"),
         s.supportsLuma ? "backend-selection" : "magnification-preference",
-        s.sessionMinutes, remaining, ShortcutProfileToken(s.shortcutProfile), StatusShortcutName(s.toggle, false), StatusShortcutName(s.restore, true),
+        s.sessionMinutes, remaining, ShortcutProfileToken(s.shortcutProfile), boolean(StatusShortcutProfileApplied(s)), StatusShortcutName(s.toggle, false), StatusShortcutName(s.restore, true),
         boolean(s.settingsUnsaved), boolean(s.sessionNotifications), fileState, boolean(s.missingFileRecords), boolean(s.truncatedRecords), boolean(s.fileError));
     if (length < 0 || static_cast<std::size_t>(length) >= sizeof(text)) return std::nullopt;
     return std::string(text, static_cast<std::size_t>(length));

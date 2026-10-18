@@ -1750,6 +1750,48 @@ void NonFiniteCaptureCleanupBlocksFallback() {
     fake.magUninit = true;
     Check(magnification.shutdown(), "cleanup can retry after invalid capture");
 }
+void SelectedShortcutRetryRecoversConflictWithoutSaving() {
+    MagnificationFilter filter;
+    Check(filter.initialize() && filter.enable() && SavePreferences(AppPreferences{}), "active filter with saved preferences");
+    HotkeyManager manager;
+    fake.hotkeyRegisterResults = {false, true};
+    Check(!manager.initialize(nullptr, ShortcutProfile::Default) && !manager.matches(ShortcutProfile::Default) && manager.restore(), "startup conflict retains restore binding and incomplete health");
+    const auto writes = fake.magWrites, reads = fake.magReads, registryWrites = fake.registryWrites;
+    Check(manager.change(ShortcutProfile::Default) && manager.matches(ShortcutProfile::Default) && manager.toggle() == ShortcutBinding{3, 'R'} && manager.restore() == ShortcutBinding{7, 'R'},
+        "retry fills missing registration after conflict clears");
+    const auto registrations = fake.hotkeyRegisters, unregistrations = fake.hotkeyUnregisters;
+    Check(manager.change(ShortcutProfile::Default) && manager.matches(ShortcutProfile::Default) && fake.hotkeyRegisters == registrations && fake.hotkeyUnregisters == unregistrations,
+        "already healthy retry does not duplicate or disturb registrations");
+    Check(fake.registryWrites == registryWrites && fake.magWrites == writes && fake.magReads == reads && filter.isActive() && filter.needsRestore(), "retry has no settings or display API effects");
+    Check(manager.release(), "release test registrations");
+}
+void SelectedShortcutRetryFailureAndDisabledHealth() {
+    HotkeyManager manager;
+    fake.hotkeyRegisterResults = {false, true};
+    Check(!manager.initialize(nullptr, ShortcutProfile::Default), "partial startup");
+    fake.hotkeyRegisterResults = {false};
+    Check(!manager.change(ShortcutProfile::Default) && !manager.matches(ShortcutProfile::Default) && !manager.toggle() && manager.restore() == ShortcutBinding{7, 'R'} && fake.hotkeyUnregisters == 0,
+        "failed retry preserves existing restore registration and actual partial state");
+    Check(manager.change(ShortcutProfile::Default) && manager.matches(ShortcutProfile::Default), "later retry recovers the exact desired pair");
+    Check(manager.change(ShortcutProfile::Disabled) && manager.matches(ShortcutProfile::Disabled) && !manager.matches(ShortcutProfile::Default) &&
+        !manager.matches(static_cast<ShortcutProfile>(99)) && !manager.accepts(ID_HOTKEY_TOGGLE, 3, 'R'), "disabled profile is applied, invalid profiles are not, and old queued keys remain rejected");
+    Check(fake.registryWrites == 0 && fake.magWrites == 0 && fake.gammaWrites == 0 && !CommandMayChangeFilter(ID_TRAY_RETRY_SHORTCUTS), "retry failure policy is read-only for display state");
+    Check(manager.release(), "release disabled manager");
+}
+void ShortcutRegistrationHealthReports() {
+    constexpr StatusShortcut expected[] = {StatusShortcut::R, StatusShortcut::F9, StatusShortcut::F10, StatusShortcut::None};
+    for (unsigned profile = 0; profile < 4; ++profile) for (unsigned toggle = 0; toggle < 4; ++toggle) for (unsigned restore = 0; restore < 4; ++restore) {
+        TrayStatus status; status.shortcutProfile = static_cast<ShortcutProfile>(profile);
+        status.toggle = static_cast<StatusShortcut>(toggle); status.restore = static_cast<StatusShortcut>(restore);
+        const bool applied = status.toggle == expected[profile] && status.restore == expected[profile];
+        Check(StatusShortcutProfileApplied(status) == applied, "registration health distinguishes complete, absent, mixed and disabled combinations");
+        Check(TrayStatusJson(status)->find(applied ? "\"shortcut_profile_applied\":true" : "\"shortcut_profile_applied\":false") != std::string::npos,
+            "JSON reports registration health from existing cached protocol fields");
+    }
+    SupportReportState state; state.shortcutProfileApplied = true;
+    Check(BuildSupportReport(state).find("Shortcut preference applied: yes") != std::string::npos, "support report carries selected-profile registration health");
+    Check(fake.hotkeyRegisters == 0 && fake.hotkeyUnregisters == 0 && fake.magReads == 0 && fake.gammaReads == 0, "health reporting performs no native registration or display read");
+}
 } // namespace
 
 DWORD GetLastError() { return fake.lastError; }
@@ -2024,6 +2066,8 @@ int main() {
         {"Countdown backend eligibility", CountdownControlBackendEligibility}, {"Countdown partial-recovery guard", CountdownControlsPreservePartialRecovery},
         {"Nonfinite initial restoration snapshots", MagnificationRejectsNonFiniteInitialSnapshots}, {"Nonfinite activation restoration snapshot", MagnificationRejectsNonFiniteActivationSnapshot},
         {"Nonfinite snapshot cleanup/fallback gate", NonFiniteCaptureCleanupBlocksFallback},
+        {"Selected shortcut retry without persistence", SelectedShortcutRetryRecoversConflictWithoutSaving}, {"Selected shortcut retry failure/disabled", SelectedShortcutRetryFailureAndDisabledHealth},
+        {"Shortcut registration health reports", ShortcutRegistrationHealthReports},
         {"Command line", Arguments}
     };
     int failed = 0;

@@ -19,6 +19,7 @@ struct SupportReportState {
     std::string_view startupPreferenceSource = "Not reported";
     bool startupPreferenceWarning = false;
     std::string_view shortcutProfile = "Default", toggleBinding = "none", restoreBinding = "none";
+    bool shortcutProfileApplied = false;
     std::string_view fileLogging = "Not reported";
     std::uint64_t droppedLogLines = 0, truncatedLogLines = 0;
     std::uint32_t lastFileError = 0;
@@ -59,6 +60,7 @@ inline std::string BuildSupportReport(const SupportReportState& state) {
         << "\r\nRecovery data pending: " << (state.needsRestore ? "yes" : "no")
         << "\r\nControl restore requested: " << (state.restoreRequested ? "yes" : "no")
         << "\r\nShortcut preference: " << state.shortcutProfile
+        << "\r\nShortcut preference applied: " << (state.shortcutProfileApplied ? "yes" : "no")
         << "\r\nToggle shortcut: " << (state.toggleHotkey ? "registered" : "unavailable") << " (" << state.toggleBinding << ")"
         << "\r\nRestore shortcut: " << (state.restoreHotkey ? "registered" : "unavailable") << " (" << state.restoreBinding << ")"
         << "\r\nSession notifications: " << (state.sessionNotifications ? "registered" : "unavailable")
