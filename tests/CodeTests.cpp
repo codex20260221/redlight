@@ -6,6 +6,7 @@
 #include "SessionTimer.h"
 #include "BackendSelection.h"
 #include "SupportReport.h"
+#include "Preferences.h"
 #include "Clipboard.h"
 #include <limits>
 #include <array>
@@ -372,6 +373,52 @@ void ClipboardConversionFailure() {
     Check(!CopyUtf8TextToClipboard(nullptr, "report") && fake.clipFrees == 1 && fake.clipOpens == 0, "second conversion failure cleans up before clipboard mutation");
     Check(!CopyUtf8TextToClipboard(nullptr, "") && fake.clipOpens == 0, "empty reports rejected without mutation");
 }
+void PreferenceProfileRoundTrip() {
+    for (const auto mode : {RedMode::StrictRed, RedMode::LumaRed})
+    for (const auto luma : {LumaProfile::Classic, LumaProfile::GreenDetail, LumaProfile::EqualDetail})
+    for (const auto backend : {BackendPreference::Automatic, BackendPreference::Magnification, BackendPreference::Gamma})
+    for (const unsigned minutes : {0u, 1u, 15u, 240u}) {
+        const AppPreferences original{mode, luma, backend, minutes};
+        const auto text = SerializePreferences(original);
+        Check(text.has_value(), "serialize supported preferences");
+        const auto parsed = ParsePreferences(*text);
+        Check(parsed.preferences == original && !parsed.error, "all supported combinations round-trip");
+    }
+    auto bad = AppPreferences{};
+    bad.sessionMinutes = 241;
+    Check(!SerializePreferences(bad), "never export an out-of-range session");
+    bad = {};
+    bad.luma = static_cast<LumaProfile>(99);
+    Check(!SerializePreferences(bad), "never export an invalid preset");
+}
+void PreferenceProfileStrictValidation() {
+    const auto text = *SerializePreferences(AppPreferences{});
+    Check(text.find("version=1") != std::string::npos && text.find("mode=luma") != std::string::npos && text.find("backend=auto") != std::string::npos, "stable human-readable versioned format");
+    Check(!ParsePreferences(text + "mode=strict\n").preferences, "duplicate fields rejected");
+    Check(!ParsePreferences(text + "mdoe=strict\n").preferences, "unknown fields rejected instead of ignored");
+    Check(!ParsePreferences(text + "[RedLightProfile]\n").preferences, "duplicate sections rejected");
+    for (const auto replacement : {"session_minutes=-1", "session_minutes=241", "session_minutes=42949672960", "session_minutes=1x", "session_minutes="}) {
+        auto bad = text;
+        const auto at = bad.find("session_minutes=0");
+        bad.replace(at, std::strlen("session_minutes=0"), replacement);
+        const auto parsed = ParsePreferences(bad);
+        Check(!parsed.preferences && parsed.error && parsed.line > 0, "invalid numeric input has a line diagnostic");
+    }
+    auto newer = text;
+    newer.replace(newer.find("version=1"), 9, "version=2");
+    Check(!ParsePreferences(newer).preferences, "future schemas cannot silently reinterpret settings");
+    Check(!ParsePreferences("[RedLightProfile]\nversion=1\n").preferences, "missing settings rejected");
+    Check(!ParsePreferences(std::string(4097, ' ')).preferences, "bounded input size");
+    auto nul = text; nul.push_back('\0');
+    Check(!ParsePreferences(nul).preferences, "embedded NUL rejected");
+}
+void PreferenceProfileWhitespaceAndOrder() {
+    const std::string text = "# profile\n [RedLightProfile] \n; note\n backend = gamma \n session_minutes = 15 \n luma = equal \n mode = strict \n version = 1 \n";
+    const auto parsed = ParsePreferences(text);
+    Check(parsed.preferences == AppPreferences{RedMode::StrictRed, LumaProfile::EqualDetail, BackendPreference::Gamma, 15}, "comments, whitespace and field order accepted");
+    const std::string bom{static_cast<char>(0xef), static_cast<char>(0xbb), static_cast<char>(0xbf)};
+    Check(ParsePreferences(bom + text).preferences == parsed.preferences, "UTF-8 BOM accepted");
+}
 void Arguments() {
     using S = StartupAction;
     Check(ParseArguments({}) == S::Tray, "no arguments");
@@ -455,6 +502,8 @@ int main() {
         {"Luma preset strict/gamma behavior", LumaPresetInStrictModeAndGamma},
         {"Support report states", SupportReportStates}, {"Clipboard allocation/open failures", ClipboardAllocationAndOpenFailures},
         {"Clipboard ownership transfer", ClipboardTransferOwnership}, {"Clipboard conversion failure", ClipboardConversionFailure},
+        {"Preference profile round trip", PreferenceProfileRoundTrip}, {"Preference profile validation", PreferenceProfileStrictValidation},
+        {"Preference profile text conventions", PreferenceProfileWhitespaceAndOrder},
         {"Command line", Arguments}
     };
     int failed = 0;

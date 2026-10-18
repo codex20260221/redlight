@@ -95,6 +95,12 @@ Start with one of these options to override the saved preference for that launch
 
 Use the Automatic override if an unavailable saved backend prevents startup. Gamma is a legacy diagnostic/compatibility option with driver and multi-monitor limitations. Close the running instance before using a startup override. The override is not saved.
 
+### Portable settings profiles
+
+**Copy settings profile** copies a small versioned text profile containing preferred red mode, luma detail, next-start backend preference, and session limit. Paste it into a text file to keep or share the configuration. It preserves preferred Luma Red settings even while gamma fallback is running, and includes no enabled state, countdown, recovery snapshot, account identity, or file path. A command-line backend override does not replace the saved next-start preference in the export.
+
+The format uses a RedLightProfile section, version 1, and explicit mode/luma/backend/session_minutes fields. Blank lines, whole-line comments, whitespace around fields, and UTF-8 BOMs are accepted by the parser; duplicates, unknown fields, missing fields, unsupported versions, and invalid ranges are rejected. Profiles are data and contain no commands to execute.
+
 ## Compatibility and limitations
 
 - Target: Windows 10/11 x64 desktop sessions. HDR, remote sessions, exclusive full-screen apps, protected content, and the secure desktop are not qualified for this candidate. RedLight is not a hardware blue-light guarantee.

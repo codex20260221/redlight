@@ -8,6 +8,7 @@
 #include "BackendSelection.h"
 #include "SupportReport.h"
 #include "Clipboard.h"
+#include "Preferences.h"
 #include <cstdio>
 
 #include "Diagnostics.h"
@@ -25,6 +26,7 @@
 #define ID_TRAY_RESTORE 205
 #define ID_TRAY_LOGS 206
 #define ID_TRAY_COPY_REPORT 207
+#define ID_TRAY_COPY_PROFILE 208
 #define ID_HOTKEY_TOGGLE 1
 #define ID_HOTKEY_RESTORE 2
 #define ID_TRAY_RETRY_TIMER 1
@@ -53,6 +55,8 @@ bool g_autoRestoreFailureNotified = false;
 BackendPreference g_backendPreference = BackendPreference::Automatic;
 BackendPreference g_startupBackendPreference = BackendPreference::Automatic;
 bool g_backendOverride = false;
+RedMode g_preferredRedMode = RedMode::LumaRed;
+LumaProfile g_preferredLumaProfile = LumaProfile::Classic;
 
 }
 
@@ -85,6 +89,8 @@ bool InitializeTrayIcon(HINSTANCE hInstance);
 void SetRedModeFromTray(RedMode mode);
 void ShowAboutDialog(HWND parent);
 void CopySupportReport(HWND owner);
+void CopySettingsProfile(HWND owner);
+void ConfirmClipboardCopy(const char* title, const char* message);
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
 int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPSTR lpCmdLine, _In_ int nShowCmd) {
@@ -607,6 +613,7 @@ void SetBackendPreference(BackendPreference preference) {
 }
 
 void SaveRedMode(RedMode mode) {
+    g_preferredRedMode = mode;
     const DWORD value = mode == RedMode::LumaRed ? 1 : 0;
     const LSTATUS result = RegSetKeyValueW(HKEY_CURRENT_USER, L"Software\\RedLight", L"RedMode",
         REG_DWORD, &value, sizeof(value));
@@ -627,13 +634,13 @@ void LoadRedMode() {
         return;
     }
     const RedMode mode = value == 1 ? RedMode::LumaRed : RedMode::StrictRed;
+    g_preferredRedMode = mode;
     if (g_displayFilter->supportsRedMode(mode) && !g_displayFilter->setRedMode(mode)) {
         Diagnostics::LogFormat("Loading saved mode failed: %s", g_displayFilter->lastError());
     }
 }
 
 void LoadLumaProfile() {
-    if (!g_displayFilter->supportsRedMode(RedMode::LumaRed)) return;
     DWORD value = 0;
     DWORD size = sizeof(value);
     const LSTATUS result = RegGetValueW(HKEY_CURRENT_USER, L"Software\\RedLight", L"LumaProfile",
@@ -643,7 +650,9 @@ void LoadLumaProfile() {
         Diagnostics::LogFormat("Invalid/unavailable luma profile (error %ld); using Classic.", result);
         return;
     }
-    if (!g_displayFilter->setLumaProfile(static_cast<LumaProfile>(value))) Diagnostics::Log(g_displayFilter->lastError());
+    g_preferredLumaProfile = static_cast<LumaProfile>(value);
+    if (g_displayFilter->supportsRedMode(RedMode::LumaRed) &&
+        !g_displayFilter->setLumaProfile(g_preferredLumaProfile)) Diagnostics::Log(g_displayFilter->lastError());
 }
 
 void SetLumaProfile(LumaProfile profile) {
@@ -659,6 +668,7 @@ void SetLumaProfile(LumaProfile profile) {
         ReportError(error);
         return;
     }
+    g_preferredLumaProfile = profile;
     const DWORD value = static_cast<DWORD>(profile);
     const LSTATUS saved = RegSetKeyValueW(HKEY_CURRENT_USER, L"Software\\RedLight", L"LumaProfile",
         REG_DWORD, &value, sizeof(value));
@@ -725,12 +735,27 @@ void CopySupportReport(HWND owner) {
         return;
     }
     Diagnostics::Log("Support report copied to clipboard at user request.");
+    ConfirmClipboardCopy("RedLight support report copied", "Paste the report into a support request or save it in a text editor.");
+}
+
+void ConfirmClipboardCopy(const char* title, const char* message) {
     NOTIFYICONDATAA notification = nid;
     notification.uFlags = NIF_INFO;
-    strcpy_s(notification.szInfoTitle, "RedLight support report copied");
-    strcpy_s(notification.szInfo, "Paste the report into a support request or save it in a text editor.");
+    strncpy_s(notification.szInfoTitle, title, _TRUNCATE);
+    strncpy_s(notification.szInfo, message, _TRUNCATE);
     notification.dwInfoFlags = NIIF_INFO;
-    if (!Shell_NotifyIconA(NIM_MODIFY, &notification)) Diagnostics::Log("Support report confirmation notification failed.");
+    if (!Shell_NotifyIconA(NIM_MODIFY, &notification)) Diagnostics::Log("Clipboard confirmation notification failed.");
+}
+
+void CopySettingsProfile(HWND owner) {
+    const AppPreferences preferences{g_preferredRedMode, g_preferredLumaProfile, g_backendPreference, g_sessionTimer.minutes()};
+    const auto profile = SerializePreferences(preferences);
+    if (!profile || !CopyUtf8TextToClipboard(owner, *profile)) {
+        ReportError("The settings profile could not be copied. Please retry when the clipboard is available.");
+        return;
+    }
+    Diagnostics::Log("Settings profile copied to clipboard at user request.");
+    ConfirmClipboardCopy("RedLight settings profile copied", "Paste into a text file to keep or share your red-only filter preferences.");
 }
 
 void ShowAboutDialog(HWND parent) {
@@ -828,6 +853,7 @@ void ShowTrayMenu(HWND hwnd) {
         AppendMenuA(menu, MF_SEPARATOR, 0, NULL) &&
         AppendMenuA(menu, MF_STRING, ID_TRAY_LOGS, "Open &logs folder") &&
         AppendMenuA(menu, MF_STRING, ID_TRAY_COPY_REPORT, "Copy support &report") &&
+        AppendMenuA(menu, MF_STRING, ID_TRAY_COPY_PROFILE, "Copy settings &profile") &&
         AppendMenuA(menu, MF_STRING, ID_TRAY_ABOUT, "&About") &&
         AppendMenuA(menu, MF_STRING, ID_TRAY_EXIT, "E&xit");
     if (!built) {
@@ -893,6 +919,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         case ID_TRAY_MODE_LUMA_RED: SetRedModeFromTray(RedMode::LumaRed); break;
         case ID_TRAY_ABOUT: ShowAboutDialog(hwnd); break;
         case ID_TRAY_COPY_REPORT: CopySupportReport(hwnd); break;
+        case ID_TRAY_COPY_PROFILE: CopySettingsProfile(hwnd); break;
         case ID_TRAY_EXIT:
             if (!PostMessageA(hwnd, WM_CLOSE, 0, 0)) ReportError("The exit request could not be queued. Please retry.");
             break;
