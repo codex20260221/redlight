@@ -5,6 +5,7 @@
 #include "ShortcutProfile.h"
 #include "ExpiryWarning.h"
 #include "StartupRegistration.h"
+#include "FadeInDuration.h"
 
 struct TrayMenuState {
     bool needsRestore;
@@ -27,6 +28,8 @@ struct TrayMenuState {
     StartupEntryState startupEntry = StartupEntryState::Unavailable;
     bool canEnableStartup = false, canRemoveStartup = false, canRefreshStartup = true;
     bool startupPathAvailable = false;
+    FadeInDuration fadeIn = FadeInDuration::Off;
+    bool canChangeFadeIn = true;
 };
 // Ownership of the returned root menu transfers to the caller.
 HMENU BuildTrayMenu(const TrayMenuState& state);

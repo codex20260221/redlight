@@ -37,7 +37,11 @@ UINT Checked(bool value) { return MF_STRING | (value ? MF_CHECKED : MF_UNCHECKED
 }
 
 HMENU BuildTrayMenu(const TrayMenuState& state) {
-    Menu root, session, warning, luma, backend, shortcuts, expert, diagnostics, brightness, startup;
+    Menu root, session, warning, luma, backend, shortcuts, expert, diagnostics, brightness, startup, fade;
+    constexpr const char* fadeLabels[] = {"&Off (immediate)", "&5 seconds", "&15 seconds", "&30 seconds", "1 &minute"};
+    static_assert(std::size(fadeLabels) == FadeInOptions.size());
+    for (unsigned index = 0; index < FadeInOptions.size(); ++index)
+        if (!fade.add(ID_FADE_IN_BASE + index, fadeLabels[index], Checked(state.fadeIn == FadeInOptions[index]) | (state.canChangeFadeIn ? MF_ENABLED : MF_GRAYED))) return NULL;
     if (!startup.add(0, StartupEntryDescription(state.startupEntry), MF_STRING | MF_GRAYED) ||
         (!state.startupPathAvailable && !startup.add(0, "Executable path unavailable/unsupported; see README", MF_STRING | MF_GRAYED)) ||
         !startup.add(ID_TRAY_STARTUP_ENABLE, "&Enable for this executable...", Checked(state.startupEntry == StartupEntryState::ThisExecutable) | (state.canEnableStartup ? MF_ENABLED : MF_GRAYED)) ||
@@ -118,6 +122,7 @@ HMENU BuildTrayMenu(const TrayMenuState& state) {
         !root.add(ID_TRAY_MODE_LUMA_RED, "L&uma Red", Checked(state.mode == RedMode::LumaRed) | (state.supportsLuma ? MF_ENABLED : MF_GRAYED)) ||
         !root.child(luma, state.supportsLuma ? "Luma color &detail" : "Preferred Luma &detail (Magnification)") ||
         !root.child(brightness, state.supportsBrightness ? "Red &brightness" : "Preferred red &brightness (Magnification)") ||
+        !root.child(fade, state.supportsBrightness ? "Fade-&in (next activation)" : "Preferred fade-&in (Magnification)") ||
         !root.child(session, "Auto-restore &time limit") ||
         !root.child(startup, "Start with &Windows", state.startupEntry == StartupEntryState::ThisExecutable ? MF_CHECKED : MF_ENABLED) ||
         !root.add(0, NULL, MF_SEPARATOR) || !root.child(expert, "&Expert controls") ||

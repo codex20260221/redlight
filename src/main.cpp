@@ -43,6 +43,8 @@
 #include "BrightnessPreference.h"
 #include "BrightnessDialog.h"
 #include "StartupRegistration.h"
+#include "FadeInControl.h"
+#include "TrayTooltip.h"
 #include "RecentDiagnosticsClipboard.h"
 #include "TrayCommand.h"
 #include "PreferencesClipboard.h"
@@ -77,6 +79,8 @@ bool g_busy = false;
 bool g_pendingRestore = false;
 SessionTimer g_sessionTimer;
 CountdownTimerRegistration g_countdownRegistration;
+CountdownTimerRegistration g_fadeRegistration;
+RedFadeIn g_fade;
 bool g_autoRestoreFailureNotified = false;
 BackendPreference g_backendPreference = BackendPreference::Automatic;
 BackendPreference g_startupBackendPreference = BackendPreference::Automatic;
@@ -118,6 +122,11 @@ void RetrySelectedShortcuts();
 
 void SetLumaProfile(LumaProfile profile);
 void SetRedBrightness(unsigned percent);
+void StopFadeIn();
+void StartFadeInTimer();
+void OnFadeInTimer();
+bool CompleteFadeForSelection();
+void SetFadeInDuration(FadeInDuration duration);
 void ConfigureWindowsStartup(bool enable);
 void RefreshWindowsStartup();
 void LogSystemInfo();
@@ -316,6 +325,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
             if (error) Diagnostics::LogFormat("GetMessage failed (error %lu); attempting display restoration before exit.", error);
             else Diagnostics::Log("GetMessage failed without a native error code; attempting display restoration before exit.");
         }
+        StopFadeIn();
         if (!g_busy) g_verification = {};
         const auto disposition = TryLoopShutdown(*g_displayFilter, messageResult, g_busy, [] { return IsWindow(nid.hWnd) != FALSE; });
         if (disposition == LoopShutdownDisposition::ResumeControls) {
@@ -535,7 +545,9 @@ void ReportError(const char* message, bool modal) {
 
 bool RestoreFilter(RestoreReason reason, bool showError, bool notifyFailure, bool updateTray) {
     RecordRestorationRequest request(g_restorationHistory, reason, GetTickCount64(), []() noexcept -> std::uint64_t { return GetTickCount64(); });
+    g_fade.cancel(); // Even a deferred restoration request must prevent another automatic color step.
     if (g_busy) { request.finish(RestoreOutcome::Deferred); g_pendingRestore = true; return false; }
+    StopFadeIn();
     g_pendingRestore = false;
     g_verification = {};
     bool restored = false;
@@ -549,6 +561,8 @@ bool RestoreFilter(RestoreReason reason, bool showError, bool notifyFailure, boo
     if (restored) {
         g_pendingRestore = false;
         StopSessionTimer();
+        if (g_displayFilter->supportsBrightness() && !g_displayFilter->setBrightnessPercent(g_preferences.brightnessPercent))
+            Diagnostics::Log("Restored display, but off-state preferred brightness could not be selected.");
     }
     if (updateTray) RefreshTrayIconTip();
     if (!restored && notifyFailure) {
@@ -574,19 +588,20 @@ void RefreshTrayIconTip() {
     nid.hIcon = g_trayIcons.get(SelectTraySymbol(g_displayFilter->isActive(), g_displayFilter->needsRestore(),
         g_displayFilter->lastError()[0] != 0, g_displayFilter->redMode(), g_verification.result().state, g_pendingRestore));
     char tip[sizeof(nid.szTip)];
-    char remaining[32] = {};
+    TrayTooltipState state;
+    state.active = g_displayFilter->isActive(); state.needsRestore = g_displayFilter->needsRestore();
+    state.hasError = g_displayFilter->lastError()[0] != 0; state.restoreRequested = g_pendingRestore;
+    state.gammaBackend = g_displayFilter == &g_gammaRampFilter; state.verification = g_verification.result().state;
+    state.mode = g_displayFilter->redMode(); state.luma = g_displayFilter->lumaProfile(); state.brightness = g_displayFilter->brightnessPercent();
     if (g_sessionTimer.armed()) {
         const auto seconds = (g_sessionTimer.remainingMilliseconds(GetTickCount64()) + 999) / 1000;
-        sprintf_s(remaining, " - %llu:%02llu left",
-            static_cast<unsigned long long>(seconds / 60), static_cast<unsigned long long>(seconds % 60));
+        state.remainingSeconds = static_cast<unsigned>(seconds);
     }
-    char profile[48] = {};
-    if (g_displayFilter->redMode() == RedMode::LumaRed) {
-        sprintf_s(profile, " [%s]", LumaProfileName(g_displayFilter->lumaProfile()));
+    if (g_fade.active()) state.fadeTarget = g_fade.target();
+    if (!FormatTrayTooltip(state, tip)) {
+        strcpy_s(tip, "RedLight - Restore display / About");
+        Diagnostics::Log("Tray tooltip could not be prepared completely; using recovery guidance.");
     }
-    sprintf_s(tip, "RedLight %s - %s - %s%s - %u%% red%s",
-        FilterStatusText(),
-        g_displayFilter->name(), RedModeDisplayName(g_displayFilter->redMode()), profile, g_displayFilter->brightnessPercent(), remaining);
     UpdateTrayIconTip(tip);
 }
 
@@ -607,11 +622,11 @@ void ControlRedlight(bool toggle) {
         {
             ScopedFlag busy(g_busy);
             g_verification = {};
-            enabled = g_displayFilter->enable();
+            enabled = PrepareFadeInActivation(*g_displayFilter, g_preferences.brightnessPercent, g_preferences.fadeIn) && g_displayFilter->enable();
             if (!enabled) strcpy_s(enableError, g_displayFilter->lastError());
         }
         if (g_pendingRestore) RestoreFilter(RestoreReason::DeferredRequest, false);
-        if (enabled && g_displayFilter->isActive()) StartSessionTimer();
+        if (enabled && g_displayFilter->isActive() && StartSessionTimer() && g_displayFilter->isActive()) StartFadeInTimer();
         if (!enabled) {
             char message[768];
             sprintf_s(message, "The red filter could not be enabled.\n\n%s", enableError);
@@ -623,6 +638,66 @@ void ControlRedlight(bool toggle) {
 
 void ToggleRedlight() { ControlRedlight(true); }
 void EnableRedlight() { ControlRedlight(false); }
+
+void StopFadeIn() {
+    g_fade.cancel();
+    g_fadeRegistration.remove(); // Failed cleanup retains ownership; stale ticks cannot write color.
+}
+
+void StartFadeInTimer() {
+    if (!WantsFadeIn(*g_displayFilter, g_preferences.brightnessPercent, g_preferences.fadeIn)) return;
+    bool started = StartFadeInAfterEnable(g_fade, *g_displayFilter, g_preferences.brightnessPercent, g_preferences.fadeIn, GetTickCount64());
+    if (started) { ScopedFlag busy(g_busy); started = g_fadeRegistration.install(nid.hWnd, ID_FADE_TIMER, 100); }
+    if (g_pendingRestore) { RestoreFilter(RestoreReason::DeferredRequest, false); return; }
+    if (!started) {
+        StopFadeIn();
+        const bool restored = RestoreFilter(RestoreReason::TimerFailure, false);
+        ReportError(restored ? "Fade-in could not be started. The display was restored." : "Fade-in could not be started and restoration needs attention. Use Restore display to retry.");
+    }
+}
+
+void OnFadeInTimer() {
+    if (!g_fade.active() || g_busy) return;
+    FadeInStep step;
+    char error[256] = {};
+    {
+        ScopedFlag busy(g_busy);
+        step = AdvanceFadeIn(g_fade, *g_displayFilter, g_verification, g_sessionTimer, GetTickCount64(), false, g_pendingRestore);
+        if (step == FadeInStep::BackendFailed) strcpy_s(error, g_displayFilter->lastError());
+    }
+    if (!g_fade.active()) g_fadeRegistration.remove();
+    if (step == FadeInStep::BackendFailed) {
+        RestoreFilter(RestoreReason::TimerFailure, false);
+        ReportError(error, false);
+    } else if (step == FadeInStep::Expired) OnSessionTimer();
+    if (g_pendingRestore) RestoreFilter(RestoreReason::DeferredRequest, false);
+    if (step != FadeInStep::Waiting && step != FadeInStep::Idle) RefreshTrayIconTip();
+}
+
+bool CompleteFadeForSelection() {
+    StopFadeIn();
+    bool applied = false; char error[256] = {};
+    {
+        ScopedFlag busy(g_busy);
+        applied = CompleteFadeInForSelection(g_fade, *g_displayFilter, g_verification, g_preferences.brightnessPercent);
+        if (!applied) strcpy_s(error, g_displayFilter->lastError());
+    }
+    if (g_pendingRestore) { RestoreFilter(RestoreReason::DeferredRequest, false); return false; }
+    if (!applied) {
+        RestoreFilter(RestoreReason::TimerFailure, false);
+        ReportError(error);
+        return false;
+    }
+    return true;
+}
+
+void SetFadeInDuration(FadeInDuration duration) {
+    if (g_busy || g_preferencesApplying || !ValidFadeInDuration(duration)) return;
+    g_preferences.fadeIn = duration; // Applies at next activation; current plan/deadline/cache are unchanged.
+    g_preferencesUnsaved = !SavePreferences(g_preferences);
+    if (g_preferencesUnsaved) ReportError("The next-activation fade-in preference changed but could not be saved. Retry saving current preferences.");
+    Diagnostics::LogFormat("Fade-in preference: %s (next Magnification activation only).", FadeInName(duration));
+}
 
 void StopSessionTimer() {
     g_sessionTimer.cancel();
@@ -859,6 +934,9 @@ void SaveRedMode(RedMode mode) {
 
 void SetLumaProfile(LumaProfile profile) {
     if (g_busy || g_preferencesApplying || !IsValidLumaProfile(static_cast<unsigned>(profile))) return;
+    if (g_pendingRestore) { RestoreFilter(RestoreReason::DeferredRequest, false); return; }
+    if (g_displayFilter->supportsRedMode(RedMode::LumaRed) && g_displayFilter->redMode() == RedMode::LumaRed &&
+        profile != g_displayFilter->lumaProfile() && !CompleteFadeForSelection()) return;
     LumaPreferenceResult result = LumaPreferenceResult::Rejected;
     char error[256] = {};
     {
@@ -888,6 +966,8 @@ void SetLumaProfile(LumaProfile profile) {
 void SetRedBrightness(unsigned percent) {
     if (g_busy || g_preferencesApplying || !ValidRedBrightness(percent)) return;
     if (g_pendingRestore) { RestoreFilter(RestoreReason::DeferredRequest, false); return; }
+    const bool interruptedFade = g_fade.active();
+    StopFadeIn();
     BrightnessPreferenceResult result;
     char error[256] = {};
     {
@@ -896,6 +976,7 @@ void SetRedBrightness(unsigned percent) {
         result = UpdateBrightnessPreference(*g_displayFilter, g_preferences, percent);
         if (result == BrightnessPreferenceResult::BackendFailed) strcpy_s(error, g_displayFilter->lastError());
     }
+    if (result == BrightnessPreferenceResult::BackendFailed && interruptedFade) RestoreFilter(RestoreReason::TimerFailure, false);
     const bool restored = !g_pendingRestore || RestoreFilter(RestoreReason::DeferredRequest, false);
     RefreshTrayIconTip();
     if (result == BrightnessPreferenceResult::BackendFailed) { ReportError(error); return; }
@@ -951,6 +1032,7 @@ void ConfigureWindowsStartup(bool enable) {
 
 void SetRedModeFromTray(RedMode mode) {
     if (g_busy || g_preferencesApplying || (g_displayFilter->needsRestore() && !g_displayFilter->isActive())) return;
+    if (g_pendingRestore) { RestoreFilter(RestoreReason::DeferredRequest, false); return; }
     Diagnostics::LogFormat("Red mode request: %s -> %s (%s)",
         RedModeDisplayName(g_displayFilter->redMode()),
         RedModeDisplayName(mode),
@@ -965,6 +1047,7 @@ void SetRedModeFromTray(RedMode mode) {
         return;
     }
 
+    if (mode != g_displayFilter->redMode() && !CompleteFadeForSelection()) return;
     bool changed = false;
     char modeError[256] = {};
     {
@@ -1064,6 +1147,11 @@ void CopySupportReport(HWND owner) {
     state.brightnessPercent = g_displayFilter->brightnessPercent();
     state.preferredBrightnessPercent = g_preferences.brightnessPercent;
     state.adjustableBrightness = g_displayFilter->supportsBrightness();
+    state.preferredFadeIn = FadeInName(g_preferences.fadeIn);
+    state.fadeActive = g_fade.active();
+    if (g_fade.active()) { state.fadeTarget = g_fade.target(); state.fadeDuration = FadeInName(g_fade.duration()); }
+    state.fadeTimerInstalled = g_fadeRegistration.installed();
+    state.fadeTimerFailure = g_fadeRegistration.lastFailure();
     state.windowsStartupEntry = StartupEntryDescription(g_windowsStartup.snapshot().state);
     state.windowsStartupReadError = g_windowsStartup.snapshot().error;
     state.windowsStartupChangeError = g_windowsStartup.lastChangeError();
@@ -1226,7 +1314,10 @@ void VerifyBackendState(HWND owner) {
 }
 
 void ShowAboutDialog(HWND parent) {
-    char aboutText[2048];
+    char aboutText[2304];
+    char fadeProgress[96];
+    if (g_fade.active()) sprintf_s(fadeProgress, "%u%% -> %u%% (%s)", g_displayFilter->brightnessPercent(), g_fade.target(), FadeInName(g_fade.duration()));
+    else strcpy_s(fadeProgress, "Not running");
     char sessionRecovery[96];
     char shortcutError[160];
     char verificationTiming[128];
@@ -1245,7 +1336,7 @@ void ShowAboutDialog(HWND parent) {
     else sprintf_s(sessionRecovery, "Unavailable (error %lu); retry in Expert controls", g_sessionNotifications.lastError());
     const auto logging = Diagnostics::GetStatus();
     sprintf_s(aboutText, "RedLight " REDLIGHT_VERSION "\nBuild revision: " REDLIGHT_BUILD_REVISION " (" REDLIGHT_SOURCE_STATE ")\n\nBackend: %s\nStartup selection: %s%s\nNext start: %s\nMode: %s\nLuma detail: %s\nPreferred mode/detail: %s / %s\nRed brightness: %u%% (%s)\nPreferred red brightness: %u%%\nStatus: %s\nVerification: %s\nLast check: %s\nSettings: %s\nStartup preferences: %s%s\n\n"
-        "Start with Windows entry: %s\nToggle shortcut: %s\nRestore shortcut: %s\nShortcut preference: %s\nShortcut preference applied: %s\nLast shortcut error: %s\nSession recovery: %s\nExpiry warning: %s\n\n"
+        "Fade-in next activation: %s (Magnification)\nFade progress: %s\nStart with Windows entry: %s\nToggle shortcut: %s\nRestore shortcut: %s\nShortcut preference: %s\nShortcut preference applied: %s\nLast shortcut error: %s\nSession recovery: %s\nExpiry warning: %s\n\n"
         "File logging: %s\nMissing file records: %llu\nTruncated records: %llu\nLast file error: %lu\n\n"
         "Logs: %%LOCALAPPDATA%%\\RedLight\nUnsigned release candidate\n"
         "github.com/michaelmawhinney/redlight",
@@ -1259,7 +1350,7 @@ void ShowAboutDialog(HWND parent) {
         BackendVerificationName(g_verification.result().state), verificationTiming,
         g_preferencesUnsaved ? "Unsaved changes" : "Saved/default",
         PreferenceSourceName(g_startupPreferenceSource), g_startupPreferenceWarning ? " (load warnings)" : "",
-        StartupEntryDescription(g_windowsStartup.snapshot().state),
+        FadeInName(g_preferences.fadeIn), fadeProgress, StartupEntryDescription(g_windowsStartup.snapshot().state),
         g_hotkeys.toggle() ? ShortcutBindingName(*g_hotkeys.toggle()) : "Unavailable/disabled",
         g_hotkeys.restore() ? ShortcutBindingName(*g_hotkeys.restore()) : "Unavailable/disabled",
         ShortcutProfileName(g_preferences.shortcuts),
@@ -1301,7 +1392,8 @@ void ShowTrayMenu(HWND hwnd) {
         g_windowsStartup.snapshot().state,
         !g_busy && !g_preferencesApplying && g_windowsStartup.snapshot().readable() && !g_windowsStartup.command().empty(),
         !g_busy && !g_preferencesApplying && g_windowsStartup.snapshot().readable() && g_windowsStartup.snapshot().state != StartupEntryState::Off,
-        !g_busy && !g_preferencesApplying, !g_windowsStartup.command().empty()};
+        !g_busy && !g_preferencesApplying, !g_windowsStartup.command().empty(),
+        g_preferences.fadeIn, !g_busy && !g_preferencesApplying};
     HMENU menu = BuildTrayMenu(state);
     if (!menu) { ReportError("Could not build the tray menu."); return; }
     if (!SetForegroundWindow(hwnd)) Diagnostics::Log("SetForegroundWindow failed for tray menu.");
@@ -1323,12 +1415,14 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 (uMsg == WM_REDLIGHT_UI_ERROR ? wParam != 0 : uMsg != WM_TRAYICON);
             const auto recovery = RecoveryAfterUiFailure(mayChangeFilter, g_pendingRestore, g_busy);
             if (recovery == UiFailureRecovery::Defer) {
+                g_fade.cancel();
                 g_pendingRestore = true;
                 g_restorationHistory.record({RestoreReason::CallbackFailure, RestoreOutcome::Deferred, GetTickCount64()});
             }
             else if (recovery == UiFailureRecovery::Restore) {
                 try { RestoreFilter(RestoreReason::CallbackFailure, false); }
                 catch (...) {
+                    g_fade.cancel();
                     g_pendingRestore = true;
                     Diagnostics::Log("C++ failure during emergency restoration; restore request and recovery data retained.");
                 }
@@ -1370,6 +1464,7 @@ LRESULT HandleWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         return 0;
     }
     case WM_TIMER:
+        if (wParam == ID_FADE_TIMER) { OnFadeInTimer(); return 0; }
         if (wParam == ID_SESSION_TIMER) { OnSessionTimer(); return 0; }
         if (wParam == ID_TRAY_RETRY_TIMER && (g_trayAdded || AddTrayIcon())) {
             if (!KillTimer(hwnd, ID_TRAY_RETRY_TIMER)) Diagnostics::Log("Could not stop tray recovery timer.");
@@ -1394,6 +1489,10 @@ LRESULT HandleWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         else if (wParam == ID_HOTKEY_RESTORE) RestoreFilter(RestoreReason::Manual, true);
         return 0;
     case WM_COMMAND:
+        if (LOWORD(wParam) >= ID_FADE_IN_BASE && LOWORD(wParam) < ID_FADE_IN_BASE + FadeInOptions.size()) {
+            SetFadeInDuration(FadeInOptions[LOWORD(wParam) - ID_FADE_IN_BASE]);
+            return 0;
+        }
         if (LOWORD(wParam) >= ID_RED_BRIGHTNESS_BASE + 1 && LOWORD(wParam) <= ID_RED_BRIGHTNESS_BASE + 100) {
             SetRedBrightness(LOWORD(wParam) - ID_RED_BRIGHTNESS_BASE);
             return 0;
@@ -1566,6 +1665,7 @@ LRESULT HandleWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         if (RestoreFilter(RestoreReason::Exit, true)) DestroyTrayWindow(hwnd);
         return 0;
     case WM_DESTROY:
+        StopFadeIn();
         StopSessionTimer();
         if (!g_hotkeys.release()) Diagnostics::Log("Some shortcut registrations could not be released before window destruction.");
         if (!g_sessionNotifications.release()) Diagnostics::Log("Session-notification cleanup failed during window destruction; last registration remains tracked.");

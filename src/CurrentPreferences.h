@@ -29,10 +29,12 @@ inline std::optional<std::uint64_t> PackCurrentPreferences(const CurrentPreferen
     put(static_cast<unsigned>(value.expiryWarning), 15); put(snapshot.settingsUnsaved, 24); put(snapshot.busy, 25);
     put(static_cast<unsigned>(snapshot.startupSource), 26); put(snapshot.startupLoadWarning, 28); put(PreferencesProfileVersion, 29);
     put(value.brightnessPercent, 37); // Schema 4; older clients already reject a differing profile schema.
+    // Schema 5 uses bits 44-46 for an option index, leaving bit 47 reserved.
+    for (unsigned index = 0; index < FadeInOptions.size(); ++index) if (value.fadeIn == FadeInOptions[index]) put(index, 44);
     return word;
 }
 inline std::optional<CurrentPreferencesSnapshot> UnpackCurrentPreferences(std::uint64_t word) noexcept {
-    constexpr auto payloadMask = (1ull << 44) - 1;
+    constexpr auto payloadMask = (1ull << 47) - 1;
     if ((word >> 48) != 0x5202 || (word & 0x0000ffffffffffffull & ~payloadMask) != 0 ||
         ((word >> 29) & 255) != PreferencesProfileVersion) return std::nullopt;
     const auto get = [&](unsigned shift, unsigned mask) { return static_cast<unsigned>((word >> shift) & mask); };
@@ -44,5 +46,8 @@ inline std::optional<CurrentPreferencesSnapshot> UnpackCurrentPreferences(std::u
     result.settingsUnsaved = get(24, 1) != 0; result.busy = get(25, 1) != 0;
     result.startupSource = static_cast<PreferenceSource>(get(26, 3)); result.startupLoadWarning = get(28, 1) != 0;
     result.preferences.brightnessPercent = get(37, 127);
+    const auto fadeIndex = get(44, 7);
+    if (fadeIndex >= FadeInOptions.size()) return std::nullopt;
+    result.preferences.fadeIn = FadeInOptions[fadeIndex];
     return ValidCurrentPreferences(result) ? std::optional<CurrentPreferencesSnapshot>(result) : std::nullopt;
 }

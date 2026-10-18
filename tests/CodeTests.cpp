@@ -49,6 +49,7 @@
 #include "BrightnessPreference.h"
 #include "StartupRegistration.h"
 #include "FadeInControl.h"
+#include "TrayTooltip.h"
 #include "BuildMetadata.h"
 #include "VerificationCache.h"
 #include <map>
@@ -1355,7 +1356,7 @@ void SupportReportDiagnosticRetentionSnapshot() {
 void SharedPreferencesJsonCanonicalAndBounds() {
     char text[PreferencesJsonBufferSize];
     Check(FormatPreferencesJson({}, text) ==
-        "{\"mode\":\"luma\",\"luma\":\"classic\",\"backend\":\"auto\",\"session_minutes\":0,\"hotkeys\":\"default\",\"expiry_warning\":\"off\",\"brightness_percent\":100}",
+        "{\"mode\":\"luma\",\"luma\":\"classic\",\"backend\":\"auto\",\"session_minutes\":0,\"hotkeys\":\"default\",\"expiry_warning\":\"off\",\"brightness_percent\":100,\"fade_in\":\"off\"}",
         "shared preference JSON preserves existing keys and adds numeric brightness and scalar types");
     const AppPreferences largest{RedMode::StrictRed, LumaProfile::EqualDetail, BackendPreference::Magnification, 240, ShortcutProfile::Disabled, ExpiryWarning::FiveMinutes};
     const auto value = FormatPreferencesJson(largest, text);
@@ -1374,7 +1375,7 @@ void CurrentPreferencesJsonScopeAndClipboard() {
         ShortcutProfile::Disabled, ExpiryWarning::FiveMinutes}, true, true, PreferenceSource::VersionedRecord, true};
     char output[CurrentPreferencesJsonBufferSize];
     const auto text = FormatCurrentPreferencesJson(snapshot, output);
-    Check(text && text->find("\"status\":\"current-preferences\",\"source\":\"current-session\",\"profile_schema\":4") != std::string_view::npos &&
+    Check(text && text->find("\"status\":\"current-preferences\",\"source\":\"current-session\",\"profile_schema\":5") != std::string_view::npos &&
         text->find("\"settings_unsaved\":true,\"busy\":true") != std::string_view::npos &&
         text->find("\"startup_source\":\"versioned-record\",\"startup_load_warning\":true") != std::string_view::npos &&
         text->find("\"mode\":\"strict\"") != std::string_view::npos && text->find("\"session_minutes\":240") != std::string_view::npos,
@@ -1513,7 +1514,7 @@ void PreferenceProfileRoundTrip() {
 }
 void PreferenceProfileStrictValidation() {
     const auto text = *SerializePreferences(AppPreferences{});
-    Check(text.find("version=4") != std::string::npos && text.find("mode=luma") != std::string::npos && text.find("backend=auto") != std::string::npos, "stable human-readable versioned format");
+    Check(text.find("version=5") != std::string::npos && text.find("mode=luma") != std::string::npos && text.find("backend=auto") != std::string::npos, "stable human-readable versioned format");
     Check(!ParsePreferences(text + "mode=strict\n").preferences, "duplicate fields rejected");
     Check(!ParsePreferences(text + "mdoe=strict\n").preferences, "unknown fields rejected instead of ignored");
     Check(!ParsePreferences(text + "[RedLightProfile]\n").preferences, "duplicate sections rejected");
@@ -1525,7 +1526,7 @@ void PreferenceProfileStrictValidation() {
         Check(!parsed.preferences && parsed.error && parsed.line > 0, "invalid numeric input has a line diagnostic");
     }
     auto newer = text;
-    newer.replace(newer.find("version=4"), 9, "version=999");
+    newer.replace(newer.find("version=5"), 9, "version=999");
     Check(!ParsePreferences(newer).preferences, "future schemas cannot silently reinterpret settings");
     Check(!ParsePreferences("[RedLightProfile]\nversion=1\n").preferences, "missing settings rejected");
     Check(!ParsePreferences(std::string(4097, ' ')).preferences, "bounded input size");
@@ -2072,8 +2073,8 @@ void CurrentPreferencesPacketFamilySchemaAndReservedBits() {
     const auto packet = *PackCurrentPreferences({});
     Check(!UnpackCurrentPreferences(0) && !UnpackCurrentPreferences(packet ^ (1ull << 48)) &&
         !UnpackCurrentPreferences(*PackTrayStatus({})) && !UnpackTrayStatus(packet), "status and preference packet families cannot be confused");
-    for (unsigned bit = 44; bit < 48; ++bit) Check(!UnpackCurrentPreferences(packet | (1ull << bit)), "every unused preference payload bit must be zero");
-    for (const unsigned schema : {0u, 2u, 3u, 5u, 255u})
+    for (unsigned bit = 47; bit < 48; ++bit) Check(!UnpackCurrentPreferences(packet | (1ull << bit)), "every unused preference payload bit must be zero");
+    for (const unsigned schema : {0u, 2u, 3u, 4u, 6u, 255u})
         Check(!UnpackCurrentPreferences((packet & ~(255ull << 29)) | (static_cast<std::uint64_t>(schema) << 29)), "incompatible canonical schema cannot be presented as this binary's complete preferences");
 }
 void CurrentPreferencesQueryExistingAndMissing() {
@@ -2409,11 +2410,12 @@ void ProfileFileValidationOutputFailures() {
 }
 void ProfileParserValidatedSchemaProvenance() {
     const std::string common = "\xef\xbb\xbf# Unicode \xe2\x82\xac\n[RedLightProfile]\nmode=strict\nluma=equal\nbackend=gamma\nsession_minutes=240\n";
-    for (unsigned version = 1; version <= 4; ++version) {
+    for (unsigned version = 1; version <= 5; ++version) {
         auto input = common + "version = " + std::to_string(version) + "\n";
         if (version >= 2) input += "hotkeys=disabled\n";
         if (version >= 3) input += "expiry_warning=5m\n";
         if (version >= 4) input += "brightness_percent=100\n";
+        if (version >= 5) input += "fade_in=off\n";
         const auto parsed = ParsePreferences(input);
         Check(parsed.preferences && parsed.inputSchema == version && !parsed.error && parsed.line == 0 &&
             parsed.preferences->shortcuts == (version >= 2 ? ShortcutProfile::Disabled : ShortcutProfile::Default) &&
@@ -2425,18 +2427,19 @@ void ProfileParserValidatedSchemaProvenance() {
 }
 void ProfileValidationResolvedMetadata() {
     const std::string base = "[RedLightProfile]\nmode=strict\nluma=equal\nbackend=magnification\nsession_minutes=240\n";
-    constexpr std::string_view defaults[] = {"[\"hotkeys\",\"expiry_warning\",\"brightness_percent\"]", "[\"expiry_warning\",\"brightness_percent\"]", "[\"brightness_percent\"]", "[]"};
-    for (unsigned version = 1; version <= 4; ++version) {
+    constexpr std::string_view defaults[] = {"[\"hotkeys\",\"expiry_warning\",\"brightness_percent\",\"fade_in\"]", "[\"expiry_warning\",\"brightness_percent\",\"fade_in\"]", "[\"brightness_percent\",\"fade_in\"]", "[\"fade_in\"]", "[]"};
+    for (unsigned version = 1; version <= 5; ++version) {
         Reset();
         fake.profileData = base + "version=" + std::to_string(version) + "\n";
         if (version >= 2) fake.profileData += "hotkeys=disabled\n";
         if (version >= 3) fake.profileData += "expiry_warning=5m\n";
         if (version >= 4) fake.profileData += "brightness_percent=100\n";
+        if (version >= 5) fake.profileData += "fade_in=off\n";
         fake.profileChunk = 7;
         Check(ValidateSettingsProfileFile(L"schema.profile") == 0 &&
             fake.stdoutText.find("\"input_schema\":" + std::to_string(version)) != std::string::npos &&
-            fake.stdoutText.find("\"profile_schema\":4") != std::string::npos &&
-            fake.stdoutText.find(version < 4 ? "\"schema_upgrade_required\":true" : "\"schema_upgrade_required\":false") != std::string::npos &&
+            fake.stdoutText.find("\"profile_schema\":5") != std::string::npos &&
+            fake.stdoutText.find(version < 5 ? "\"schema_upgrade_required\":true" : "\"schema_upgrade_required\":false") != std::string::npos &&
             fake.stdoutText.find(std::string("\"defaulted_fields\":") + std::string(defaults[version - 1])) != std::string::npos,
             "valid JSON reports input/current schemas and exactly the fields supplied by version defaults");
         Check(fake.stdoutText.find("\"preferences\":{\"mode\":\"strict\",\"luma\":\"equal\",\"backend\":\"magnification\",\"session_minutes\":240") != std::string::npos &&
@@ -2552,7 +2555,7 @@ void SavedProfileExportDefaultsAndMigration() {
     Reset();
     const std::string v2 = "[RedLightProfile]\nversion=2\nmode=luma\nluma=green\nbackend=auto\nsession_minutes=31\nhotkeys=f10\n";
     fake.registry[L"SettingsProfile"] = {REG_BINARY, std::vector<char>(v2.begin(), v2.end())};
-    Check(ExportSavedSettingsProfile() == 0 && fake.stdoutText.find("version=4") != std::string::npos && ParsePreferences(fake.stdoutText).preferences ==
+    Check(ExportSavedSettingsProfile() == 0 && fake.stdoutText.find("version=5") != std::string::npos && ParsePreferences(fake.stdoutText).preferences ==
         AppPreferences{RedMode::LumaRed, LumaProfile::GreenDetail, BackendPreference::Automatic, 31, ShortcutProfile::F10, ExpiryWarning::Off} && fake.registryWrites == 0,
         "older saved profiles export current complete schema without changing stored record");
     Check(fake.profileOpens == 0 && fake.clipOpens == 0 && fake.hotkeyRegisters == 0 && fake.magInitializes == 0 && fake.dcRequests == 0 && fake.statusSends == 0,
@@ -3187,7 +3190,7 @@ void PreferenceSerializationSingleAllocation() {
     Check(text && spareAllocation && text->size() < 256 && ParsePreferences(*text).preferences == preferences,
         "complete maximum-field profile requires only its owned output allocation");
     const auto versionLine = std::string("version=") + std::to_string(PreferencesProfileVersion) + "\r\n";
-    Check(text->find(versionLine) != std::string::npos && text->ends_with("expiry_warning=5m\r\nbrightness_percent=100\r\n"), "schema metadata and canonical output remain consistent");
+    Check(text->find(versionLine) != std::string::npos && text->ends_with("expiry_warning=5m\r\nbrightness_percent=100\r\nfade_in=off\r\n"), "schema metadata and canonical output remain consistent");
 }
 void BuildInfoJsonAndIsolation() {
     fake.stdoutChunk = 7;
@@ -3195,7 +3198,7 @@ void BuildInfoJsonAndIsolation() {
     const auto& text = fake.stdoutText;
     Check(text.starts_with("{\"protocol\":1,\"product\":\"RedLight\",\"version\":\"0.6.0-rc.1\"") &&
         text.find("\"build_revision\":\"0123456789ab\",\"source_state\":\"clean\",\"platform\":\"windows-x64\"") != std::string::npos &&
-        text.ends_with("\"profile_schema\":4,\"status_protocol\":1,\"current_settings_protocol\":1,\"restoration_history_protocol\":1,\"verification_protocol\":1,\"profile_input_schemas\":[1,2,3,4],"
+        text.ends_with("\"profile_schema\":5,\"status_protocol\":1,\"current_settings_protocol\":1,\"restoration_history_protocol\":1,\"verification_protocol\":1,\"profile_input_schemas\":[1,2,3,4,5],"
             "\"limits\":{\"profile_bytes\":4096,\"session_minutes\":240}}\n"), "build info carries complete identity, supported protocols/schemas, and authoritative limits");
     Check(fake.magInitializes == 0 && fake.dcRequests == 0 && fake.magReads == 0 && fake.gammaReads == 0 &&
         fake.magWrites == 0 && fake.gammaWrites == 0 && fake.mutexCreates == 0 && fake.statusSends == 0 && fake.profileOpens == 0 &&
@@ -3240,7 +3243,7 @@ void BuildInfoOutputFailures() {
     Check(WriteBuildInfo("v", "r", "s") == 1 && fake.stdoutText.empty(), "no inherited output or parent console is a noninteractive failure");
 }
 void BuildInfoSupportedSchemasMatchParser() {
-    Check(WriteBuildInfo("v", "r", "s") == 0 && fake.stdoutText.find("\"profile_input_schemas\":[1,2,3,4]") != std::string::npos,
+    Check(WriteBuildInfo("v", "r", "s") == 0 && fake.stdoutText.find("\"profile_input_schemas\":[1,2,3,4,5]") != std::string::npos,
         "accepted input schemas are exposed as an ordered JSON number array");
     unsigned previous = 0;
     for (const auto schema : PreferencesInputSchemas) {
@@ -3253,6 +3256,7 @@ void BuildInfoSupportedSchemasMatchParser() {
         if (schema >= 2) profile += "hotkeys=default\n";
         if (schema >= 3) profile += "expiry_warning=off\n";
         if (schema >= 4) profile += "brightness_percent=100\n";
+        if (schema >= 5) profile += "fade_in=off\n";
         const bool advertised = std::find(PreferencesInputSchemas.begin(), PreferencesInputSchemas.end(), schema) != PreferencesInputSchemas.end();
         const auto parsed = ParsePreferences(profile);
         Check(parsed.preferences.has_value() == advertised && (!advertised || parsed.inputSchema == schema),
@@ -3509,6 +3513,7 @@ void ProfileNormalizationUpgradeAndCanonical() {
         if (version >= 2) fake.profileData += "hotkeys = f10\n";
         if (version >= 3) fake.profileData += "expiry_warning = 1m\n";
         if (version >= 4) fake.profileData += "brightness_percent = 100\n";
+        if (version >= 5) fake.profileData += "fade_in = off\n";
         AppPreferences expected{RedMode::StrictRed, LumaProfile::EqualDetail, BackendPreference::Gamma, 17,
             version >= 2 ? ShortcutProfile::F10 : ShortcutProfile::Default, version >= 3 ? ExpiryWarning::OneMinute : ExpiryWarning::Off};
         const auto canonical = *SerializePreferences(expected);
@@ -3958,14 +3963,15 @@ AppPreferences ComparisonCandidate(unsigned mask) {
     if (mask & 16) value.shortcuts = ShortcutProfile::Disabled;
     if (mask & 32) value.expiryWarning = ExpiryWarning::FiveMinutes;
     if (mask & 64) value.brightnessPercent = 1;
+    if (mask & 128) value.fadeIn = FadeInDuration::Minute;
     return value;
 }
 void ProfileComparisonAllFieldsAndMasks() {
     constexpr std::string_view pairs[] = {"\"mode\":{\"saved\":\"luma\",\"candidate\":\"strict\"}", "\"luma\":{\"saved\":\"classic\",\"candidate\":\"equal\"}",
         "\"backend\":{\"saved\":\"auto\",\"candidate\":\"gamma\"}", "\"session_minutes\":{\"saved\":0,\"candidate\":240}",
         "\"hotkeys\":{\"saved\":\"default\",\"candidate\":\"disabled\"}", "\"expiry_warning\":{\"saved\":\"off\",\"candidate\":\"5m\"}",
-        "\"brightness_percent\":{\"saved\":100,\"candidate\":1}"};
-    for (unsigned mask = 0; mask < 128; ++mask) {
+        "\"brightness_percent\":{\"saved\":100,\"candidate\":1}", "\"fade_in\":{\"saved\":\"off\",\"candidate\":\"1m\"}"};
+    for (unsigned mask = 0; mask < 256; ++mask) {
         const auto candidate = ComparisonCandidate(mask);
         Check(ProfileDifferenceMask(candidate, {}) == mask && ProfileDifferenceMask({}, candidate) == mask && ProfileDifferenceMask(candidate, candidate) == 0u,
             "all field combinations compare symmetrically without differences for identical preferences");
@@ -4126,16 +4132,16 @@ void ProfileComparisonOwnedPathArguments() {
     }
 }
 void PreferencePreviewChangedFields() {
-    constexpr const char* labels[] = {"Red mode", "Luma detail", "Next-start backend", "Session limit", "Shortcuts", "Expiry warning", "Red brightness"};
+    constexpr const char* labels[] = {"Red mode", "Luma detail", "Next-start backend", "Session limit", "Shortcuts", "Expiry warning", "Red brightness", "Fade-in duration"};
     char text[1024];
-    for (unsigned mask = 1; mask < 128; ++mask) {
+    for (unsigned mask = 1; mask < 256; ++mask) {
         const auto preview = FormatPreferencePreview({}, ComparisonCandidate(mask), text);
         Check(preview.has_value(), "all valid combinations produce a complete confirmation preview");
         const auto start = preview->find("Changes from current choices: ");
         const auto end = preview->find("\n\nMode:", start);
         Check(start != std::string_view::npos && end != std::string_view::npos, "changed choices have a distinct review line before full candidate values");
         const auto changes = preview->substr(start, end - start);
-        for (unsigned index = 0; index < 7; ++index)
+        for (unsigned index = 0; index < 8; ++index)
             Check((changes.find(labels[index]) != std::string_view::npos) == ((mask & (1u << index)) != 0),
                 "preview names exactly the fields differing from current choices");
     }
@@ -4189,10 +4195,10 @@ void PreferencePreviewPreservesCurrentBackendAndStorage() {
     Check(filter.disable(), "preview leaves original restoration data intact");
 }
 void ProfileSchemaDefaultPolicyAndParsing() {
-    const auto first = DefaultsForProfileSchema(1), second = DefaultsForProfileSchema(2), third = DefaultsForProfileSchema(3), current = DefaultsForProfileSchema(4);
+    const auto first = DefaultsForProfileSchema(1), second = DefaultsForProfileSchema(2), third = DefaultsForProfileSchema(3), fourth = DefaultsForProfileSchema(4), current = DefaultsForProfileSchema(5);
     Check(first && first->shortcuts && first->expiryWarning && second && !second->shortcuts && second->expiryWarning &&
         first->brightness && second->brightness && third && third->brightness && !third->expiryWarning &&
-        current && !current->shortcuts && !current->expiryWarning && !current->brightness && !DefaultsForProfileSchema(0) && !DefaultsForProfileSchema(5) &&
+        current && !current->shortcuts && !current->expiryWarning && !current->brightness && fourth && fourth->fadeIn && first->fadeIn && second->fadeIn && third->fadeIn && !current->fadeIn && !DefaultsForProfileSchema(0) && !DefaultsForProfileSchema(6) &&
         !DefaultsForProfileSchema((std::numeric_limits<unsigned>::max)()), "shared schema policy names exactly the defined historical defaults and refuses unknown versions");
     const std::string older = "[RedLightProfile]\nversion=1\nmode=strict\nluma=equal\nbackend=gamma\nsession_minutes=17\n";
     const auto parsed1 = ParsePreferences(older);
@@ -4207,16 +4213,17 @@ void ProfileSchemaDefaultPolicyAndParsing() {
 void PreferencePreviewSchemaProvenance() {
     const std::string base = "[RedLightProfile]\nmode=luma\nluma=green\nbackend=magnification\nsession_minutes=31\n";
     char text[1024];
-    constexpr const char* expected[] = {"Defaults supplied: Shortcuts = Default; Expiry warning = Off; Red brightness = 100%", "Defaults supplied: Expiry warning = Off; Red brightness = 100%", "Defaults supplied: Red brightness = 100%", "Defaults supplied: None; all fields explicit"};
-    for (unsigned schema = 1; schema <= 4; ++schema) {
+    constexpr const char* expected[] = {"Defaults supplied: Shortcuts = Default; Expiry warning = Off; Red brightness = 100%; Fade-in = Off", "Defaults supplied: Expiry warning = Off; Red brightness = 100%; Fade-in = Off", "Defaults supplied: Red brightness = 100%; Fade-in = Off", "Defaults supplied: Fade-in = Off", "Defaults supplied: None; all fields explicit"};
+    for (unsigned schema = 1; schema <= 5; ++schema) {
         auto input = base + "version=" + std::to_string(schema) + "\n";
         if (schema >= 2) input += "hotkeys=f10\n";
         if (schema >= 3) input += "expiry_warning=1m\n";
         if (schema >= 4) input += "brightness_percent=100\n";
+        if (schema >= 5) input += "fade_in=off\n";
         const auto parsed = ParsePreferences(input);
         Check(parsed.preferences.has_value(), "prepare a validated source profile");
         const auto preview = FormatPreferencePreview(ComparisonCandidate(63), *parsed.preferences, text, parsed.inputSchema);
-        Check(preview && preview->find("Input profile version: " + std::to_string(schema) + "; canonical export version: 4") != std::string_view::npos &&
+        Check(preview && preview->find("Input profile version: " + std::to_string(schema) + "; canonical export version: 5") != std::string_view::npos &&
             preview->find(expected[schema - 1]) != std::string_view::npos && preview->find("Mode: Luma Red") != std::string_view::npos &&
             preview->find("Session limit: 31 minutes") != std::string_view::npos && preview->find("display will be restored and stay off") != std::string_view::npos,
             "source schema/default disclosure supplements complete candidate choices and the existing restoration consent");
@@ -4233,7 +4240,7 @@ void PreferencePreviewSchemaValidationAndBounds() {
     const auto length = preview->size();
     Check(FormatPreferencePreview({}, candidate, std::span<char>(text, length + 1), 3)->size() == length && text[length] == '\0' &&
         !FormatPreferencePreview({}, candidate, std::span<char>(text, length), 3), "provenance participates in exact output/terminator bounds without exposing truncated previews");
-    Check(!FormatPreferencePreview({}, {}, text, 0) && !FormatPreferencePreview({}, {}, text, 5) &&
+    Check(!FormatPreferencePreview({}, {}, text, 0) && !FormatPreferencePreview({}, {}, text, 6) &&
         !FormatPreferencePreview({}, candidate, text, 1) && !FormatPreferencePreview({}, candidate, text, 2),
         "unknown schemas and candidates contradicting historical defaults cannot produce a trusted source preview");
     candidate.expiryWarning = ExpiryWarning::Off;
@@ -4933,7 +4940,7 @@ void DisplayContextSignedReportPreservesRecovery() {
 void SavedSettingsDefaultsAndReadOnlyIsolation() {
     fake.stdoutChunk = 7;
     Check(QuerySavedSettings() == 0 && fake.stdoutText ==
-        "{\"protocol\":1,\"status\":\"saved-settings\",\"source\":\"defaults\",\"profile_schema\":4,\"preferences\":{\"mode\":\"luma\",\"luma\":\"classic\",\"backend\":\"auto\",\"session_minutes\":0,\"hotkeys\":\"default\",\"expiry_warning\":\"off\",\"brightness_percent\":100}}\n",
+        "{\"protocol\":1,\"status\":\"saved-settings\",\"source\":\"defaults\",\"profile_schema\":5,\"preferences\":{\"mode\":\"luma\",\"luma\":\"classic\",\"backend\":\"auto\",\"session_minutes\":0,\"hotkeys\":\"default\",\"expiry_warning\":\"off\",\"brightness_percent\":100,\"fade_in\":\"off\"}}\n",
         "absent storage produces exact complete default JSON using canonical tokens and partial output writes");
     Check(fake.registryWrites == 0 && fake.instanceCreates == 0 && fake.mutexCreates == 0 && fake.profileOpens == 0 && fake.metricReads == 0 &&
         fake.magInitializes == 0 && fake.dcRequests == 0 && fake.magReads == 0 && fake.gammaReads == 0 && fake.magWrites == 0 && fake.gammaWrites == 0 &&
@@ -4947,15 +4954,15 @@ void SavedSettingsCanonicalVariants() {
         {RedMode::StrictRed, LumaProfile::GreenDetail, BackendPreference::Magnification, 17, ShortcutProfile::F10, ExpiryWarning::OneMinute, 7}
     };
     const char* expected[] = {
-        "\"preferences\":{\"mode\":\"strict\",\"luma\":\"equal\",\"backend\":\"gamma\",\"session_minutes\":240,\"hotkeys\":\"disabled\",\"expiry_warning\":\"5m\",\"brightness_percent\":1}}\n",
-        "\"preferences\":{\"mode\":\"luma\",\"luma\":\"green\",\"backend\":\"magnification\",\"session_minutes\":1,\"hotkeys\":\"f9\",\"expiry_warning\":\"30s\",\"brightness_percent\":50}}\n",
-        "\"preferences\":{\"mode\":\"strict\",\"luma\":\"green\",\"backend\":\"magnification\",\"session_minutes\":17,\"hotkeys\":\"f10\",\"expiry_warning\":\"1m\",\"brightness_percent\":7}}\n"
+        "\"preferences\":{\"mode\":\"strict\",\"luma\":\"equal\",\"backend\":\"gamma\",\"session_minutes\":240,\"hotkeys\":\"disabled\",\"expiry_warning\":\"5m\",\"brightness_percent\":1,\"fade_in\":\"off\"}}\n",
+        "\"preferences\":{\"mode\":\"luma\",\"luma\":\"green\",\"backend\":\"magnification\",\"session_minutes\":1,\"hotkeys\":\"f9\",\"expiry_warning\":\"30s\",\"brightness_percent\":50,\"fade_in\":\"off\"}}\n",
+        "\"preferences\":{\"mode\":\"strict\",\"luma\":\"green\",\"backend\":\"magnification\",\"session_minutes\":17,\"hotkeys\":\"f10\",\"expiry_warning\":\"1m\",\"brightness_percent\":7,\"fade_in\":\"off\"}}\n"
     };
     for (unsigned index = 0; index < std::size(variants); ++index) {
         Reset();
         Check(SavePreferences(variants[index]), "seed each canonical settings variant");
         const auto writes = fake.registryWrites;
-        Check(QuerySavedSettings() == 0 && fake.stdoutText.find("\"source\":\"versioned-record\",\"profile_schema\":4") != std::string::npos &&
+        Check(QuerySavedSettings() == 0 && fake.stdoutText.find("\"source\":\"versioned-record\",\"profile_schema\":5") != std::string::npos &&
             fake.stdoutText.ends_with(expected[index]) && fake.registryWrites == writes, "JSON preserves every supported mode/detail/backend/shortcut/warning token and configured minute value");
     }
 }
@@ -4967,7 +4974,7 @@ void SavedSettingsLegacyAndOlderSchema() {
     Reset();
     const std::string old = "[RedLightProfile]\nversion=2\nmode=strict\nluma=green\nbackend=gamma\nsession_minutes=30\nhotkeys=f10\n";
     fake.registry[L"SettingsProfile"] = {REG_BINARY, std::vector<char>(old.begin(), old.end())};
-    Check(QuerySavedSettings() == 0 && fake.stdoutText.find("\"source\":\"versioned-record\",\"profile_schema\":4") != std::string::npos &&
+    Check(QuerySavedSettings() == 0 && fake.stdoutText.find("\"source\":\"versioned-record\",\"profile_schema\":5") != std::string::npos &&
         fake.stdoutText.find("\"hotkeys\":\"f10\",\"expiry_warning\":\"off\"") != std::string::npos && fake.registryWrites == 0,
         "older stored schema reports defined defaults and current export schema without rewriting storage");
 }
@@ -6260,6 +6267,213 @@ void FadeProgressAndTimersWithoutAllocation() {
     Check(advanced && timer && noAllocation && filter.brightnessPercent() == 50 && fade.confirmedPercent() == 50, "checked progress and window timer ownership require no C++ heap allocation");
     fade.cancel(); Check(filter.disable(), "original restoration remains independent of progress storage");
 }
+void FadePreferencesPersistenceAndStrictInput() {
+    for (const auto duration : FadeInOptions) for (const unsigned target : {1u, 37u, 100u}) {
+        Reset(); auto value = ComparisonCandidate(63); value.brightnessPercent = target; value.fadeIn = duration;
+        const auto serialized = SerializePreferences(value);
+        Check(serialized && ParsePreferences(*serialized).preferences == value && SavePreferences(value) && LoadPreferences().preferences == value,
+            "every duration and representative target persist together in complete schema 5");
+        auto invalid = *serialized;
+        const auto position = invalid.find("fade_in=");
+        invalid.erase(position);
+        Check(!ParsePreferences(invalid).preferences && !ParsePreferences(*serialized + "fade_in=off\n").preferences,
+            "missing or duplicate duration cannot silently select an animation");
+        for (const auto bad : {"", "5", "0", "60s", "1M", "OFF", "+5s", "5s extra", "100m"})
+            Check(!ParsePreferences(invalid + "fade_in=" + bad + "\n").preferences, "only explicit canonical duration tokens are accepted");
+        auto changed = value; changed.fadeIn = duration == FadeInDuration::Off ? FadeInDuration::Minute : FadeInDuration::Off;
+        fake.registryWrite = false;
+        Check(!SavePreferences(changed) && LoadPreferences().preferences == value, "a failed duration save preserves the stored choice for retry");
+        fake.registryWrite = true;
+        Check(SavePreferences(changed) && LoadPreferences().preferences == changed, "duration save retry needs no activation");
+    }
+    auto invalid = AppPreferences{}; invalid.fadeIn = static_cast<FadeInDuration>(2);
+    const auto writes = fake.registryWrites;
+    Check(!ValidPreferences(invalid) && !SerializePreferences(invalid) && !SavePreferences(invalid) && fake.registryWrites == writes,
+        "invalid duration is rejected before persistence");
+}
+void FadeHistoricalProfilesDefaultOff() {
+    for (unsigned schema = 1; schema <= 4; ++schema) {
+        Reset(); std::string old = "[RedLightProfile]\nversion=" + std::to_string(schema) + "\nmode=strict\nluma=green\nbackend=gamma\nsession_minutes=17\n";
+        if (schema >= 2) old += "hotkeys=f10\n";
+        if (schema >= 3) old += "expiry_warning=1m\n";
+        if (schema >= 4) old += "brightness_percent=37\n";
+        const auto parsed = ParsePreferences(old);
+        Check(parsed.preferences && parsed.preferences->fadeIn == FadeInDuration::Off && parsed.preferences->brightnessPercent == (schema == 4 ? 37u : 100u) &&
+            !ParsePreferences(old + "fade_in=off\n").preferences, "historical fields retain their meaning and cannot opt into fade-in");
+        fake.registry[L"SettingsProfile"] = {REG_BINARY, std::vector<char>(old.begin(), old.end())};
+        const auto writes = fake.registryWrites;
+        Check(LoadPreferences().preferences == *parsed.preferences && fake.registryWrites == writes, "older storage loads duration Off without a migration write");
+    }
+    Check(AppPreferences{}.fadeIn == FadeInDuration::Off, "preference reset and missing-storage defaults use immediate activation");
+}
+void FadePreferencePacketsAndPreviewBounds() {
+    for (const auto duration : FadeInOptions) {
+        CurrentPreferencesSnapshot snapshot; snapshot.preferences = ComparisonCandidate(255); snapshot.preferences.fadeIn = duration;
+        snapshot.preferences.backend = BackendPreference::Magnification; snapshot.settingsUnsaved = snapshot.busy = snapshot.startupLoadWarning = true;
+        snapshot.startupSource = PreferenceSource::LegacyValues;
+        const auto packet = PackCurrentPreferences(snapshot);
+        Check(packet && UnpackCurrentPreferences(*packet) == snapshot, "duration index, all settings, and state flags round-trip without bit overlap");
+        for (unsigned index = 5; index <= 7; ++index)
+            Check(!UnpackCurrentPreferences((*packet & ~(7ull << 44)) | (static_cast<std::uint64_t>(index) << 44)), "undefined fade indices are rejected");
+        char json[CurrentPreferencesJsonBufferSize], preview[1024];
+        const auto text = FormatCurrentPreferencesJson(snapshot, json);
+        const auto review = FormatPreferencePreview({}, snapshot.preferences, preview, 5);
+        Check(text && text->find(std::string("\"fade_in\":\"") + FadeInToken(duration) + "\"") != std::string_view::npos && review &&
+            review->find(std::string("Fade-in on activation: ") + FadeInName(duration)) != std::string_view::npos,
+            "current settings and native import review disclose duration within their bounded buffers");
+        const auto length = review->size();
+        Check(!FormatPreferencePreview({}, snapshot.preferences, std::span<char>(preview, length), 5) &&
+            FormatPreferencePreview({}, snapshot.preferences, std::span<char>(preview, length + 1), 5), "duration review refuses a truncated confirmation");
+        snapshot.preferences.fadeIn = static_cast<FadeInDuration>(999);
+        Check(!PackCurrentPreferences(snapshot) && !FormatCurrentPreferencesJson(snapshot, json), "invalid duration never crosses IPC or JSON boundaries");
+    }
+    auto nondefault = AppPreferences{}; nondefault.fadeIn = FadeInDuration::Seconds5;
+    char preview[1024];
+    for (unsigned schema = 1; schema <= 4; ++schema)
+        Check(!FormatPreferencePreview({}, nondefault, preview, schema), "older provenance cannot claim an explicit nondefault duration");
+}
+void FadeTrayChoicesAndRecoveryControls() {
+    for (const bool gamma : {false, true}) for (const bool allowed : {false, true}) for (unsigned index = 0; index < FadeInOptions.size(); ++index) {
+        Reset(); auto state = DefaultMenuState(); state.supportsBrightness = !gamma; state.fadeIn = FadeInOptions[index]; state.canChangeFadeIn = allowed;
+        state.needsRestore = true; state.restoreRequested = true;
+        const auto root = BuildTrayMenu(state);
+        const auto submenu = FakeMenuChild(root, gamma ? "Preferred fade-&in (Magnification)" : "Fade-&in (next activation)");
+        Check(root && submenu && !(FakeMenuCommand(root, ID_TRAY_RESTORE)->flags & MF_GRAYED), "fade preference stays separate from available recovery controls");
+        for (unsigned choice = 0; choice < FadeInOptions.size(); ++choice) {
+            const auto item = FakeMenuCommand(submenu, ID_FADE_IN_BASE + choice);
+            Check(item && ((item->flags & MF_CHECKED) != 0) == (choice == index) && ((item->flags & MF_GRAYED) != 0) == !allowed &&
+                !CommandMayChangeFilter(ID_FADE_IN_BASE + choice, !gamma, !gamma), "all five next-activation choices have exact checked and enabled states and no color-failure policy");
+        }
+        for (const auto& menu : fake.menus) Check(UniqueMenuAccelerators(*menu), "fade shortcuts do not collide with existing recovery/menu accelerators");
+        Check(DestroyMenu(root) && AliveFakeMenus() == 0, "fade submenu follows existing checked menu ownership");
+    }
+}
+void FadeTooltipBoundsAndTruthfulProgress() {
+    char tip[128];
+    for (unsigned variant = 0; variant < 32; ++variant) for (unsigned checked = 0; checked <= 4; ++checked)
+        for (const auto mode : {RedMode::StrictRed, RedMode::LumaRed}) for (unsigned profile = 0; profile < 3; ++profile) {
+            TrayTooltipState state; state.active = (variant & 1) != 0; state.needsRestore = state.active || (variant & 2) != 0;
+            state.hasError = (variant & 4) != 0; state.restoreRequested = (variant & 8) != 0; state.mode = mode; state.luma = static_cast<LumaProfile>(profile);
+            state.verification = static_cast<BackendVerification>(checked); state.brightness = 99;
+            state.remainingSeconds = variant & 16 ? 14400u : 0u;
+            if (state.active) state.fadeTarget = 100;
+            const auto text = FormatTrayTooltip(state, tip);
+            Check(text && text->size() < sizeof(tip) && tip[text->size()] == 0 &&
+                text->find(state.active ? "99->100% red fade" : "99% red") != std::string_view::npos &&
+                text->find(FilterStatusDescription(state.active, state.needsRestore, state.hasError, state.verification, state.restoreRequested)) != std::string_view::npos,
+                "every status/mode/preset retains actual progress, recovery priority, and countdown in the native tooltip limit");
+        }
+    TrayTooltipState state; state.active = state.needsRestore = true; state.brightness = 1; state.fadeTarget = 37;
+    const auto length = FormatTrayTooltip(state, tip)->size();
+    Check(!FormatTrayTooltip(state, std::span<char>(tip, length)) && FormatTrayTooltip(state, std::span<char>(tip, length + 1)), "tooltip boundary includes the native terminator");
+    bool complete = false, noAllocation = false;
+    { TestMemory::FailNextAllocation failure; complete = FormatTrayTooltip(state, tip).has_value(); noAllocation = TestMemory::AllocationFailurePending(); }
+    Check(complete && noAllocation, "fade progress formatting performs no heap allocation or backend work");
+    state.fadeTarget = 1; Check(!FormatTrayTooltip(state, tip), "already-applied target cannot masquerade as a running fade");
+    state.fadeTarget.reset(); state.gammaBackend = true; state.mode = RedMode::StrictRed; state.brightness = 100;
+    Check(FormatTrayTooltip(state, tip)->find("Gamma - Strict Red - 100% red") != std::string_view::npos, "Gamma status reports its actual fixed intensity");
+    state.fadeTarget = 100; Check(!FormatTrayTooltip(state, tip), "Gamma cannot advertise fade progress");
+}
+void FadeSelectionCompletionAndFailureRecovery() {
+    for (unsigned failure = 0; failure < 4; ++failure) {
+        Reset(); MagnificationFilter filter; RedFadeIn fade; BackendVerificationCache verification; SessionTimer session;
+        Check(filter.initialize() && PrepareFadeInActivation(filter, 80, FadeInDuration::Seconds5), "prepare mode-selection completion");
+        fake.effect.transform[3][0] = 0.07f; const auto original = fake.effect;
+        Check(filter.enable() && StartFadeInAfterEnable(fade, filter, 80, FadeInDuration::Seconds5, 0) &&
+            AdvanceFadeIn(fade, filter, verification, session, 2500, false, false) == FadeInStep::Applied, "retain original through an intermediate step");
+        if (failure == 1) fake.magWriteResults = {Write::FailAfterApply, Write::Apply};
+        if (failure == 2) fake.magWriteResults = {Write::Ignore, Write::Fail};
+        if (failure == 3) fake.magReadResults = {false, true};
+        Check(CompleteFadeInForSelection(fade, filter, verification, 80) == (failure == 0) && !fade.active(), "selection completion commits only checked target output and never resumes the animation");
+        if (failure == 0) {
+            Check(filter.brightnessPercent() == 80 && filter.setRedMode(RedMode::StrictRed) && filter.setLumaProfile(LumaProfile::GreenDetail) &&
+                filter.brightnessPercent() == 80 && fake.effect.transform[0][0] == 0.8f, "subsequent mapping selection keeps the completed target");
+        } else Check(filter.redMode() == RedMode::LumaRed && filter.brightnessPercent() == 40, "failed completion does not commit the requested mode or target");
+        fake.magWriteResults = {Write::FailAfterApply};
+        Check(!filter.disable() && filter.needsRestore() && !filter.isActive(), "failed immediate restoration keeps recovery ownership after selection cancellation");
+        const auto writes = fake.magWrites;
+        Check(AdvanceFadeIn(fade, filter, verification, session, 5000, false, false) == FadeInStep::Idle && fake.magWrites == writes &&
+            filter.disable() && Same(fake.effect, original), "stale progress cannot interfere with original restoration retry");
+    }
+}
+void FadeManualBrightnessAndImportCancellation() {
+    MagnificationFilter filter; RedFadeIn fade; BackendVerificationCache verification; SessionTimer session; AppPreferences preferences;
+    preferences.brightnessPercent = 80; preferences.fadeIn = FadeInDuration::Seconds5;
+    Check(filter.initialize() && PrepareFadeInActivation(filter, 80, preferences.fadeIn), "prepare manual cancellation");
+    const auto original = fake.effect;
+    Check(filter.enable() && StartFadeInAfterEnable(fade, filter, 80, preferences.fadeIn, 0) && session.configure(2, 0, true) &&
+        AdvanceFadeIn(fade, filter, verification, session, 2500, false, false) == FadeInStep::Applied, "start countdown at initial activation");
+    fade.cancel(); verification.beforeBrightnessSelection(filter, 7);
+    Check(UpdateBrightnessPreference(filter, preferences, 7) == BrightnessPreferenceResult::Applied && filter.brightnessPercent() == 7 &&
+        preferences.fadeIn == FadeInDuration::Seconds5 && session.remainingMilliseconds(2500) == 117500, "manual brightness is immediate and retains next-activation duration and deadline");
+    const auto writes = fake.magWrites;
+    Check(AdvanceFadeIn(fade, filter, verification, session, 5000, false, false) == FadeInStep::Idle && fake.magWrites == writes, "a manual value is never overwritten by stale animation progress");
+    Check(SavePreferences(preferences), "seed import baseline");
+    fake.magWriteResults = {Write::FailAfterApply}; const auto registryWrites = fake.registryWrites;
+    Check(SaveImportedPreferences({}, [&] { fade.cancel(); return filter.disable(); }) == PreferenceImportResult::RestoreFailed &&
+        fake.registryWrites == registryWrites && filter.needsRestore() && !fade.active(), "failed import restoration retains the original and blocks preference reset");
+    Check(SaveImportedPreferences({}, [&] { fade.cancel(); return filter.disable(); }) == PreferenceImportResult::Saved &&
+        Same(fake.effect, original) && LoadPreferences().preferences.fadeIn == FadeInDuration::Off && !filter.isActive(), "reset retries restoration first, saves Off, and never reactivates");
+}
+void FadeTimerFailureAndRecoveryIsolation() {
+    MagnificationFilter filter; RedFadeIn fade; BackendVerificationCache verification; SessionTimer session; CountdownTimerRegistration registration;
+    const auto owner = reinterpret_cast<HWND>(std::uintptr_t{0x1234});
+    Check(filter.initialize() && PrepareFadeInActivation(filter, 100, FadeInDuration::Minute), "prepare timer-failure recovery");
+    const auto original = fake.effect;
+    Check(filter.enable() && StartFadeInAfterEnable(fade, filter, 100, FadeInDuration::Minute, 0), "confirm initial low red stage");
+    fake.countdownSet = false;
+    Check(!registration.install(owner, ID_FADE_TIMER, 100), "failure arming fade timer is visible");
+    fade.cancel(); fake.magWriteResults = {Write::FailAfterApply};
+    Check(!filter.disable() && filter.needsRestore() && !fade.active(), "timer-start recovery retains the original when restoration fails");
+    fake.countdownSet = true;
+    Check(registration.install(owner, ID_FADE_TIMER, 100), "model retained timer after a later installation");
+    fake.countdownKill = false;
+    Check(!registration.remove() && registration.installed() && filter.disable() && Same(fake.effect, original), "timer cleanup failure cannot block immediate display restoration");
+    const auto writes = fake.magWrites;
+    Check(AdvanceFadeIn(fade, filter, verification, session, 60000, false, false) == FadeInStep::Idle && fake.magWrites == writes,
+        "stale native callbacks after cancellation/restoration do no color work");
+    fake.countdownKill = true;
+    Check(registration.remove() && !registration.installed() && registration.lastFailure()->operation == CountdownTimerApi::Remove, "cleanup retry releases only its timer and retains failure evidence");
+}
+void FadeFailedManualBrightnessPreservesPreferenceAndOriginal() {
+    for (const bool failedRollback : {false, true}) {
+        Reset(); MagnificationFilter filter; RedFadeIn fade; BackendVerificationCache verification; SessionTimer session; AppPreferences preferences;
+        preferences.brightnessPercent = 80; preferences.fadeIn = FadeInDuration::Minute;
+        Check(filter.initialize() && PrepareFadeInActivation(filter, 80, preferences.fadeIn), "prepare interrupted manual brightness failure");
+        const auto original = fake.effect;
+        Check(filter.enable() && StartFadeInAfterEnable(fade, filter, 80, preferences.fadeIn, 0) &&
+            AdvanceFadeIn(fade, filter, verification, session, 30000, false, false) == FadeInStep::Applied, "confirm an intermediate level without changing the preferred target");
+        fade.cancel(); fake.magWriteResults = {Write::FailAfterApply, failedRollback ? Write::Fail : Write::Apply};
+        Check(UpdateBrightnessPreference(filter, preferences, 7) == BrightnessPreferenceResult::BackendFailed &&
+            preferences.brightnessPercent == 80 && filter.brightnessPercent() == 40 && filter.needsRestore() && !fade.active(),
+            "failed manual selection keeps the preferred target, last confirmed selection, and original even if rollback fails");
+        fake.magWriteResults = {Write::FailAfterApply};
+        Check(!filter.disable() && filter.needsRestore() && !filter.isActive(), "failed immediate recovery remains retryable after interrupted animation");
+        const auto writes = fake.magWrites;
+        Check(AdvanceFadeIn(fade, filter, verification, session, 60000, false, false) == FadeInStep::Idle && fake.magWrites == writes &&
+            filter.disable() && Same(fake.effect, original), "no automatic target is reapplied while recovery retries the same original");
+    }
+}
+void FadeCachedDiagnosticsAndGammaIsolation() {
+    GammaRampFilter filter; RedFadeIn fade; BackendVerificationCache verification; AppPreferences preferences;
+    Check(filter.initialize() && filter.enable(), "prepare independent Gamma ownership");
+    const auto reads = fake.gammaReads, writes = fake.gammaWrites, releases = fake.mutexReleases;
+    const auto error = std::string(filter.lastError()); const auto stats = filter.statistics();
+    preferences.fadeIn = FadeInDuration::Minute;
+    Check(SavePreferences(preferences) && CompleteFadeInForSelection(fade, filter, verification, 37), "Gamma retains a portable duration preference without live changes");
+    SupportReportState state; state.brightnessPercent = filter.brightnessPercent(); state.preferredBrightnessPercent = 37;
+    state.adjustableBrightness = false; state.preferredFadeIn = FadeInName(preferences.fadeIn); state.fadeTimerInstalled = false;
+    auto report = BuildSupportReport(state);
+    Check(report.find("Fade-in next activation (Magnification only): 1 minute") != std::string::npos && report.find("Fade progress: not running") != std::string::npos,
+        "Gamma diagnostics distinguish the future preference from applied output");
+    state.fadeActive = true; state.fadeTarget = 80; state.fadeDuration = "5 seconds"; state.brightnessPercent = 40;
+    state.fadeTimerInstalled = true; state.fadeTimerFailure = CountdownTimerFailure{CountdownTimerApi::Remove, 0xffffffffu};
+    report = BuildSupportReport(state);
+    Check(report.find("Red brightness selection: 40%") != std::string::npos && report.find("running toward 80% over 5 seconds") != std::string::npos &&
+        report.find("KillTimer (error 4294967295)") != std::string::npos && fake.gammaReads == reads && fake.gammaWrites == writes &&
+        fake.mutexReleases == releases && error == filter.lastError() && stats == filter.statistics(), "cached progress and timer failure reporting never inspect or disturb the display owner");
+    Check(filter.disable(), "Gamma restoration remains unchanged");
+}
 void PutStartupEntry(std::wstring_view command) {
     fake.startupPresent = true; fake.startupType = REG_SZ;
     fake.startupBytes.resize((command.size() + 1) * sizeof(wchar_t));
@@ -6555,8 +6769,8 @@ void BrightnessProfileRangeAndMigration() {
     for (unsigned percent = 1; percent <= 100; ++percent) {
         AppPreferences value; value.brightnessPercent = percent;
         const auto serialized = SerializePreferences(value); const auto parsed = ParsePreferences(*serialized);
-        Check(parsed.preferences == value && parsed.inputSchema == 4 && SavePreferences(value) && LoadPreferences().preferences == value,
-            "every brightness persists and round-trips through canonical schema 4");
+        Check(parsed.preferences == value && parsed.inputSchema == 5 && SavePreferences(value) && LoadPreferences().preferences == value,
+            "every brightness persists and round-trips through canonical schema 5");
     }
     const auto current = *SerializePreferences({});
     for (const unsigned percent : {0u, 101u, (std::numeric_limits<unsigned>::max)()}) {
@@ -6620,7 +6834,7 @@ void BrightnessPacketJsonAndDiagnostics() {
     for (unsigned percent = 1; percent <= 100; ++percent) {
         CurrentPreferencesSnapshot value; value.preferences.brightnessPercent = percent;
         const auto packed = PackCurrentPreferences(value);
-        Check(packed && UnpackCurrentPreferences(*packed) == value, "all brightness values round-trip with schema-4 packet ownership/flags intact");
+        Check(packed && UnpackCurrentPreferences(*packed) == value, "all brightness values round-trip with schema-5 packet ownership/flags intact");
     }
     const auto word = *PackCurrentPreferences({});
     Check(!UnpackCurrentPreferences(word & ~(127ull << 37)) && !UnpackCurrentPreferences((word & ~(127ull << 37)) | (101ull << 37)),
@@ -7200,6 +7414,12 @@ int main() {
         {"Fade expiry/Gamma isolation", FadeExpiryAndGammaPreferenceIsolation}, {"Fade step failures/original retention", FadeStepFailuresRetainOriginal},
         {"Fade cancellation during native write", FadeCancellationDuringNativeWrite}, {"Fade/countdown timer ownership coexistence", FadeTimerPeriodAndCountdownCoexistence},
         {"Fade progress/timers without allocation", FadeProgressAndTimersWithoutAllocation},
+        {"Fade preferences persistence/strict input", FadePreferencesPersistenceAndStrictInput}, {"Fade historical profiles default off", FadeHistoricalProfilesDefaultOff},
+        {"Fade preference packet/preview bounds", FadePreferencePacketsAndPreviewBounds}, {"Fade tray choices/recovery controls", FadeTrayChoicesAndRecoveryControls},
+        {"Fade tooltip progress/bounds", FadeTooltipBoundsAndTruthfulProgress}, {"Fade selection completion/failure recovery", FadeSelectionCompletionAndFailureRecovery},
+        {"Fade manual brightness/import cancellation", FadeManualBrightnessAndImportCancellation}, {"Fade timer failure/recovery isolation", FadeTimerFailureAndRecoveryIsolation},
+        {"Fade failed manual brightness/original retention", FadeFailedManualBrightnessPreservesPreferenceAndOriginal},
+        {"Fade cached diagnostics/Gamma isolation", FadeCachedDiagnosticsAndGammaIsolation},
         {"Startup default/consent/native targets", StartupDefaultConsentAndExactParameters}, {"Startup portable path bounds", StartupPathBoundsAndRefusal},
         {"Startup executable error provenance", StartupNativePathErrorProvenance}, {"Startup unreadable/malformed refusal", StartupUnreadableOrMalformedEntries},
         {"Startup stale review/proposed path", StartupReviewChangesRequireNewConsent}, {"Startup failed/ambiguous mutations", StartupMutationFailuresPreserveObservedTruth},

@@ -102,8 +102,9 @@ int WriteValidatedProfile(const PreferencesParseResult& parsed) noexcept {
     char preferences[PreferencesJsonBufferSize];
     const auto value = FormatPreferencesJson(*parsed.preferences, preferences);
     if (!value) return 1;
-    const char* defaulted = defaults->shortcuts ? "\"hotkeys\",\"expiry_warning\",\"brightness_percent\"" :
-        (defaults->expiryWarning ? "\"expiry_warning\",\"brightness_percent\"" : (defaults->brightness ? "\"brightness_percent\"" : ""));
+    const char* defaulted = defaults->shortcuts ? "\"hotkeys\",\"expiry_warning\",\"brightness_percent\",\"fade_in\"" :
+        (defaults->expiryWarning ? "\"expiry_warning\",\"brightness_percent\",\"fade_in\"" :
+            (defaults->brightness ? "\"brightness_percent\",\"fade_in\"" : (defaults->fadeIn ? "\"fade_in\"" : "")));
     char output[1024];
     const int length = std::snprintf(output, sizeof(output),
         "{\"protocol\":1,\"status\":\"valid-profile\",\"valid\":true,\"input_schema\":%u,\"profile_schema\":%u,"

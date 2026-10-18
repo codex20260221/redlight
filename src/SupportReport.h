@@ -23,6 +23,11 @@ struct SupportReportState {
     std::string_view preferredRedMode = "Not reported", preferredLumaProfile = "Not reported";
     std::optional<unsigned> brightnessPercent, preferredBrightnessPercent;
     std::optional<bool> adjustableBrightness;
+    std::string_view preferredFadeIn = "Not reported", fadeDuration = "Not reported";
+    bool fadeActive = false;
+    std::optional<unsigned> fadeTarget;
+    std::optional<bool> fadeTimerInstalled;
+    std::optional<CountdownTimerFailure> fadeTimerFailure;
     std::string_view windowsStartupEntry = "Not reported";
     std::uint32_t windowsStartupReadError = 0, windowsStartupChangeError = 0;
     std::string_view windowsStartupPath = "Not reported";
@@ -98,6 +103,15 @@ inline std::string BuildSupportReport(const SupportReportState& state) {
     report << "\r\nAdjustable brightness on current backend: ";
     if (state.adjustableBrightness) report << (*state.adjustableBrightness ? "yes" : "no; fixed at 100% (preference retained for Magnification)");
     else report << "not reported";
+    report << "\r\nFade-in next activation (Magnification only): " << state.preferredFadeIn
+        << "\r\nFade progress: " << (state.fadeActive ? "running" : "not running");
+    if (state.fadeActive && state.fadeTarget) report << " toward " << *state.fadeTarget << "% over " << state.fadeDuration;
+    report << "\r\nNative fade timer: ";
+    if (state.fadeTimerInstalled) report << (*state.fadeTimerInstalled ? "installed (may remain after failed cleanup)" : "not installed");
+    else report << "not reported";
+    report << "\r\nLast fade timer API failure (retained after retry): ";
+    if (state.fadeTimerFailure) report << CountdownTimerApiName(state.fadeTimerFailure->operation) << " (error " << state.fadeTimerFailure->errorCode << ")";
+    else report << "none recorded";
     report << "\r\nState: "
         << FilterStatusDescription(state.active, state.needsRestore, !state.lastError.empty(), state.verification, state.restoreRequested)
         << "\r\nBackend verification: " << BackendVerificationName(state.verification);

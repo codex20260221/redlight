@@ -15,6 +15,7 @@ private:
     bool previous_;
 };
 inline bool CommandMayChangeFilter(unsigned command, bool supportsLuma = true, bool supportsBrightness = true) noexcept {
+    if (command >= ID_FADE_IN_BASE && command < ID_FADE_IN_BASE + 5) return false; // Next activation preference only.
     if (command >= ID_EXPIRY_WARNING_BASE && command <= ID_EXPIRY_WARNING_BASE + 3) return false;
     if (!supportsLuma && command >= ID_LUMA_PROFILE_BASE && command <= ID_LUMA_PROFILE_BASE + 2) return false;
     if (!supportsBrightness && ((command >= ID_RED_BRIGHTNESS_BASE + 1 && command <= ID_RED_BRIGHTNESS_BASE + 100) ||

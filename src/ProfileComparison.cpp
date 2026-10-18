@@ -46,7 +46,7 @@ int CompareSavedSettingsProfile(const AppPreferences& candidate) noexcept {
         used += static_cast<std::size_t>(length);
         const auto tokens = [](const AppPreferences& value) {
             return std::array<const char*, ProfileDifferenceFieldNames.size()>{PreferenceModeToken(value.mode), PreferenceLumaToken(value.luma),
-                PreferenceBackendToken(value.backend), nullptr, ShortcutProfileToken(value.shortcuts), ExpiryWarningToken(value.expiryWarning), nullptr};
+                PreferenceBackendToken(value.backend), nullptr, ShortcutProfileToken(value.shortcuts), ExpiryWarningToken(value.expiryWarning), nullptr, FadeInToken(value.fadeIn)};
         };
         const auto savedTokens = tokens(loaded.preferences), candidateTokens = tokens(candidate);
         first = true;

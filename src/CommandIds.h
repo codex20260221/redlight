@@ -38,12 +38,14 @@ inline constexpr unsigned ID_HOTKEY_TOGGLE = 1;
 inline constexpr unsigned ID_HOTKEY_RESTORE = 2;
 inline constexpr unsigned ID_TRAY_RETRY_TIMER = 1;
 inline constexpr unsigned ID_SESSION_TIMER = 2;
+inline constexpr unsigned ID_FADE_TIMER = 3;
 inline constexpr unsigned ID_SESSION_LIMIT_BASE = 1000;
 inline constexpr unsigned ID_BACKEND_PREFERENCE_BASE = 1300;
 inline constexpr unsigned ID_LUMA_PROFILE_BASE = 1400;
 inline constexpr unsigned ID_SHORTCUT_PROFILE_BASE = 1500;
 inline constexpr unsigned ID_EXPIRY_WARNING_BASE = 1600;
 inline constexpr unsigned ID_RED_BRIGHTNESS_BASE = 2000;
+inline constexpr unsigned ID_FADE_IN_BASE = 2300;
 
 static_assert(ID_SESSION_LIMIT_BASE + SessionTimer::maxMinutes < ID_BACKEND_PREFERENCE_BASE);
 static_assert(ID_BACKEND_PREFERENCE_BASE + 2 < ID_LUMA_PROFILE_BASE);

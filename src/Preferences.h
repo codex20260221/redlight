@@ -4,6 +4,7 @@
 #include "SessionTimer.h"
 #include "ShortcutProfile.h"
 #include "ExpiryWarning.h"
+#include "FadeInDuration.h"
 #include "Utf8.h"
 #include <charconv>
 #include <array>
@@ -13,17 +14,18 @@
 #include <string>
 #include <string_view>
 
-inline constexpr unsigned PreferencesProfileVersion = 4;
-inline constexpr std::array PreferencesInputSchemas{1u, 2u, 3u, 4u};
+inline constexpr unsigned PreferencesProfileVersion = 5;
+inline constexpr std::array PreferencesInputSchemas{1u, 2u, 3u, 4u, 5u};
 inline constexpr std::size_t PreferencesProfileMaxBytes = 4096;
 static_assert(PreferencesInputSchemas.back() == PreferencesProfileVersion);
-struct ProfileSchemaDefaults { bool shortcuts, expiryWarning, brightness; };
+struct ProfileSchemaDefaults { bool shortcuts, expiryWarning, brightness, fadeIn; };
 inline constexpr std::optional<ProfileSchemaDefaults> DefaultsForProfileSchema(unsigned schema) noexcept {
     switch (schema) {
-    case 1: return ProfileSchemaDefaults{true, true, true};
-    case 2: return ProfileSchemaDefaults{false, true, true};
-    case 3: return ProfileSchemaDefaults{false, false, true};
-    case 4: return ProfileSchemaDefaults{false, false, false};
+    case 1: return ProfileSchemaDefaults{true, true, true, true};
+    case 2: return ProfileSchemaDefaults{false, true, true, true};
+    case 3: return ProfileSchemaDefaults{false, false, true, true};
+    case 4: return ProfileSchemaDefaults{false, false, false, true};
+    case 5: return ProfileSchemaDefaults{false, false, false, false};
     default: return std::nullopt;
     }
 }
@@ -36,6 +38,7 @@ struct AppPreferences {
     ShortcutProfile shortcuts = ShortcutProfile::Default;
     ExpiryWarning expiryWarning = ExpiryWarning::Off;
     unsigned brightnessPercent = DefaultRedBrightness;
+    FadeInDuration fadeIn = FadeInDuration::Off;
     bool operator==(const AppPreferences&) const = default;
 };
 inline bool ValidPreferences(const AppPreferences& value) {
@@ -43,7 +46,7 @@ inline bool ValidPreferences(const AppPreferences& value) {
         IsValidLumaProfile(static_cast<unsigned>(value.luma)) &&
         IsValidBackendPreference(static_cast<unsigned>(value.backend)) && value.sessionMinutes <= SessionTimer::maxMinutes &&
         IsValidShortcutProfile(static_cast<unsigned>(value.shortcuts)) && IsValidExpiryWarning(value.expiryWarning) &&
-        ValidRedBrightness(value.brightnessPercent);
+        ValidRedBrightness(value.brightnessPercent) && ValidFadeInDuration(value.fadeIn);
 }
 inline const char* PreferenceModeToken(RedMode value) noexcept {
     switch (value) {
@@ -72,9 +75,9 @@ inline std::optional<std::string> SerializePreferences(const AppPreferences& val
     if (!ValidPreferences(value)) return std::nullopt;
     char text[256];
     const int length = std::snprintf(text, sizeof(text),
-        "[RedLightProfile]\r\nversion=%u\r\nmode=%s\r\nluma=%s\r\nbackend=%s\r\nsession_minutes=%u\r\nhotkeys=%s\r\nexpiry_warning=%s\r\nbrightness_percent=%u\r\n",
+        "[RedLightProfile]\r\nversion=%u\r\nmode=%s\r\nluma=%s\r\nbackend=%s\r\nsession_minutes=%u\r\nhotkeys=%s\r\nexpiry_warning=%s\r\nbrightness_percent=%u\r\nfade_in=%s\r\n",
         PreferencesProfileVersion, PreferenceModeToken(value.mode), PreferenceLumaToken(value.luma), PreferenceBackendToken(value.backend),
-        value.sessionMinutes, ShortcutProfileToken(value.shortcuts), ExpiryWarningToken(value.expiryWarning), value.brightnessPercent);
+        value.sessionMinutes, ShortcutProfileToken(value.shortcuts), ExpiryWarningToken(value.expiryWarning), value.brightnessPercent, FadeInToken(value.fadeIn));
     if (length < 0 || static_cast<std::size_t>(length) >= sizeof(text)) return std::nullopt;
     return std::string(text, static_cast<std::size_t>(length));
 }
@@ -161,6 +164,11 @@ inline PreferencesParseResult ParsePreferences(std::string_view input) {
             if (parsed.ec != std::errc{} || parsed.ptr != field.data() + field.size() || !ValidRedBrightness(percent))
                 return {std::nullopt, "Red brightness must be an integer from 1 to 100", lineNumber};
             value.brightnessPercent = percent;
+        } else if (key == "fade_in") {
+            flag = 256;
+            const auto duration = ParseFadeInDuration(field);
+            if (!duration) return {std::nullopt, "Invalid fade-in duration", lineNumber};
+            value.fadeIn = *duration;
         } else return {std::nullopt, "Unknown profile field", lineNumber};
         if (seen & flag) return {std::nullopt, "Duplicate profile field", lineNumber};
         seen |= flag;
@@ -168,12 +176,14 @@ inline PreferencesParseResult ParsePreferences(std::string_view input) {
     if (version == 1 && (seen & 32)) return {std::nullopt, "Shortcut settings require profile version 2", lineNumber};
     if (version < 3 && (seen & 64)) return {std::nullopt, "Expiry warnings require profile version 3", lineNumber};
     if (version < 4 && (seen & 128)) return {std::nullopt, "Red brightness requires profile version 4", lineNumber};
-    if (!header || seen != (version == 4 ? 255u : (version == 3 ? 127u : (version == 2 ? 63u : 31u)))) return {std::nullopt, "Profile section or required fields are missing", lineNumber};
+    if (version < 5 && (seen & 256)) return {std::nullopt, "Fade-in requires profile version 5", lineNumber};
+    if (!header || seen != (version == 5 ? 511u : (version == 4 ? 255u : (version == 3 ? 127u : (version == 2 ? 63u : 31u))))) return {std::nullopt, "Profile section or required fields are missing", lineNumber};
     const auto defaults = DefaultsForProfileSchema(version);
     if (!defaults) return {std::nullopt, "Unsupported profile version", lineNumber};
     // Older schema defaults are fixed by their contract, independent of future app defaults.
     if (defaults->shortcuts) value.shortcuts = ShortcutProfile::Default;
     if (defaults->expiryWarning) value.expiryWarning = ExpiryWarning::Off;
     if (defaults->brightness) value.brightnessPercent = DefaultRedBrightness;
+    if (defaults->fadeIn) value.fadeIn = FadeInDuration::Off;
     return {value, nullptr, 0, version};
 }

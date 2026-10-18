@@ -18,6 +18,16 @@ inline bool StartFadeInAfterEnable(RedFadeIn& fade, const DisplayFilter& filter,
     return WantsFadeIn(filter, target, duration) && filter.isActive() && filter.needsRestore() &&
         filter.brightnessPercent() == 1 && !filter.lastError()[0] && fade.start(target, duration, now);
 }
+
+// A deliberate mode/preset selection finishes the old brightness first. The
+// native caller stops its timer and restores the original immediately on false.
+inline bool CompleteFadeInForSelection(RedFadeIn& fade, DisplayFilter& filter, BackendVerificationCache& verification, unsigned target) {
+    fade.cancel();
+    if (!ValidRedBrightness(target)) return false;
+    if (!filter.supportsBrightness() || !filter.isActive() || filter.brightnessPercent() == target) return true;
+    verification.beforeBrightnessSelection(filter, target);
+    return filter.setBrightnessPercent(target);
+}
 enum class FadeInStep { Idle, Waiting, Applied, Completed, Cancelled, BackendFailed, Expired };
 inline FadeInStep AdvanceFadeIn(RedFadeIn& fade, DisplayFilter& filter, BackendVerificationCache& verification,
     const SessionTimer& session, std::uint64_t now, bool busy, bool restoreRequested) {
