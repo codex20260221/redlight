@@ -49,9 +49,47 @@ Scheduled restoration must not be blocked by an enable gate or by a manual overr
 
 Save the enabled flag and two local minutes together in the established validated per-user record, with a future profile schema that defaults older inputs to scheduling Off. Export/import/reset review must disclose automatic-activation consent and restore before storage/application; importing a schedule must not execute a trigger. Reset uses disabled scheduling. Rejected/failed storage retains the prior schedule and runtime policy; no partially armed UI claim. Activation is allowed only after the native timer and schedule configuration are both confirmed.
 
-Do not squeeze schedule times into the current scalar current-preferences packet: schema 5 uses bits 0–46 and only bit 47 remains free. Decide a bounded, consistent full-preferences IPC response before changing production schemas or claiming scripts report the complete configuration. Preserve old protocol rejection and read-only automation. Runtime observation/consumption, countdown progress, and override state are not portable preferences.
+Do not append schedule times to the current packet: schema 5 uses bits 0–46 and only bit 47 remains free. The proposed replacement below carries a complete single-response snapshot. Preserve old protocol rejection and read-only automation. Runtime observation/consumption, countdown progress, and override state are not portable preferences.
 
 The isolated supplied-time boundary/consumption policy now exists outside the application target and native dispatch. It validates Gregorian dates in the Windows 1601–30827 range, supplied UTC/local agreement within a conservative whole-minute ±24-hour offset, monotonic gaps up to 60 seconds, and UTC/elapsed disagreement up to 2 seconds. These prototype bounds still require review against the future native adapter; a zone/rule change with an unchanged offset requires an explicit continuity signal. Rebase skips already-past events and preserves consumed-date marks; only deliberate configuration starts a new observation lifetime. Next review native clock conversion, control/session readiness, the settings UI/consent transaction, full-preferences IPC, timer lifecycle, and static callback paths as one focused integration plan. No production schedule or hardware support claim follows from the prototype.
+
+## Production integration plan (not implemented)
+
+### Complete preference snapshot
+
+Proposed profile schema 6 appends `schedule=off|daily`, `enable_at=HH:MM`, and `restore_at=HH:MM` after all eight existing fields. Older schemas and legacy records resolve to Off with both times `00:00`; equal times are allowed only while Off. Strict 24-hour tokens preserve midnight and are portable local times, not UTC offsets. Import preview must explicitly disclose automatic activation, both times, future-only arming, and immediate restoration of the current display before import. Reset disables scheduling. Neither operation changes Windows startup consent.
+
+Current-settings protocol 2 can keep the existing bounded synchronous message and one positive x64 scalar by using an eight-bit packet tag and option indices. This avoids a mixed snapshot from multiple queries, cross-process pointers, shared memory, or another server. Proposed tag `0x53` occupies bits 56–63 and binds **exactly schema 6**; enforce this binding with a compile-time assertion rather than silently accepting later schemas. Bit 55 is reserved and must be zero. No production version/format changes occur until the schedule feature is integrated.
+
+| Payload bits | Value |
+| --- | --- |
+| 0 | Red mode |
+| 1–2 / 3–4 | Luma / backend option |
+| 5–12 / 13–14 | Session minutes / shortcut option |
+| 15–16 | Expiry warning option index (Off, 30s, 1m, 5m), preserving exact existing values |
+| 17 / 18 | Unsaved / busy flags |
+| 19–20 / 21 | Startup preference source / historical load warning |
+| 22–28 / 29–31 | Brightness 1–100 / fade option index |
+| 32 | Daily scheduling enabled |
+| 33–43 / 44–54 | Enable / restore local minutes, each 0–1439 |
+
+Packing/unpacking must validate every option, range, state, reserved bit, and the equal-time rule. Old clients already reject different canonical profile schemas; protocol negotiation must also reject old/new mismatches with zero/invalid response, without activating the app or changing output. Update current-settings JSON (including errors) and build discovery to protocol 2 together; keep status protocol 1 unchanged. Saved-settings/validation JSON can remain additive protocol 1 with profile schema 6. Recompute bounded formatter/preview sizes from complete maximum values and test exact terminators. Existing comparison field positions remain fixed; append the three new fields.
+
+### Checked native clock adapter
+
+Read one UTC FILETIME, obtain checked dynamic time-zone settings, convert that same UTC snapshot through checked `FileTimeToSystemTime` and `SystemTimeToTzSpecificLocalTimeEx`, and bracket capture with monotonic ticks. Floor FILETIME to the same millisecond precision used in SYSTEMTIME. Never combine independently sampled GetLocalTime and UTC readings around a boundary. Scheduling observations should use checked [QueryUnbiasedInterruptTime](https://learn.microsoft.com/en-us/windows/win32/api/realtimeapiset/nf-realtimeapiset-queryunbiasedinterrupttime), which excludes sleep, so UTC/elapsed disagreement can additionally detect missed sleep notifications. Keep GetTickCount64 for bounded capture latency and the existing countdown/fade policy; do not change their clock basis. Power/session notifications still invalidate schedule continuity immediately. Capture and tolerance are best effort, not proof that every tiny discontinuity or notification loss can be identified.
+
+[GetDynamicTimeZoneInformation](https://learn.microsoft.com/en-us/windows/win32/api/timezoneapi/nf-timezoneapi-getdynamictimezoneinformation) has three successful status values including zero; only its documented invalid sentinel is failure. [FileTimeToSystemTime](https://learn.microsoft.com/en-us/windows/win32/api/timezoneapi/nf-timezoneapi-filetimetosystemtime) and local conversion return checked Boolean success. Clear last-error before calls that document it and capture supplied/absent errors immediately. QueryUnbiasedInterruptTime does not document an extended-error contract: check failure but do not report its GetLastError value as a native cause. Failed/malformed/slow capture produces no usable observation and invalidates continuity. A native time-zone/rule identity must compare semantic fields and a bounded key name, not structure padding or localized display names; compare it even when the current UTC offset has not changed. No operation changes clocks, time zones, or registry settings.
+
+Keep this adapter free of activation, timers, persistence, and dialogs. Fake-API tests must cover success statuses, exact arguments, non-hour offsets, capture near midnight, submillisecond truncation, unsigned tick wrap, each failed conversion and stale-error provenance, malformed output, slow capture, zone/rule identity changes, and allocation/backend isolation. Build it against real headers for ABI/static review, but do not execute the native path under the present restrictions.
+
+### Configuration, timers, and dispatch
+
+Provide one native schedule dialog with an explicit enabled choice and two validated times; Cancel changes nothing. Enabling must review valid data, prepare a fresh observation baseline, confirm a window-bound timer, save the complete preference record, and only then publish the new runtime policy. Disabling must remain possible without a valid clock sample. If an intermediate step fails, retain the prior saved configuration, cancel any newly armed logical plan, and preserve failed native cleanup ownership. A previously installed timer must not be forgotten or re-owned after a failed replacement/removal. Startup can show a saved enabled preference as **not armed** on failure; it cannot claim runtime scheduling success.
+
+Use a separate one-second window timer/ID and the existing checked timer helper. A disabled schedule makes no periodic clock/display calls. Always consume an observed boundary before dispatch; never queue an enable. Busy/preferences/queued recovery, absent tray/session hooks, invalid clock, failed timer ownership, explicit Changed/Unavailable verification, backend errors, or pending original recovery block enable. Already-active enable is idempotent and cannot restart countdown/fade. Restoration bypasses enable gates and uses the existing immediate/deferred restoration path. Profile/reset/manual toggle/Restore and environment events rebase or invalidate observation before later automatic actions can run.
+
+Build the native clock adapter independently first. Integrate schema/IPC, dialog, cached preferred-versus-armed status, timer ownership, startup, and dispatch together only after the complete path has fake failure coverage and a static review of every restore/exit/callback branch. Do not temporarily ship an enabled preference with incomplete consent or runtime routing. A native control probe for issue #23 remains separate research and cannot take over display ownership as a scheduler fallback.
 
 ## Required evidence
 
