@@ -1,28 +1,61 @@
 cmake_minimum_required(VERSION 3.20)
-project(RedLight VERSION 0.5.1)
+project(RedLight VERSION 0.6.0 LANGUAGES CXX RC)
 
+if(NOT WIN32 OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+    message(FATAL_ERROR "RedLight requires a native Windows x64 build.")
+endif()
+if(MSVC AND NOT CMAKE_CXX_COMPILER_ARCHITECTURE_ID STREQUAL "x64")
+    message(FATAL_ERROR "Select the x64 C++ toolchain (cmake -A x64).")
+endif()
 set(CMAKE_CXX_STANDARD 20)
-set(CMAKE_CXX_STANDARD_REQUIRED True)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+# Portable release: no separate Visual C++ runtime installer required.
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+configure_file(src/Version.h.in generated/Version.h @ONLY)
 
 add_executable(RedLight WIN32
-    src/Diagnostics.cpp
-    src/Diagnostics.h
-    src/main.cpp
-    src/DisplayFilter.h
-    src/GammaRampFilter.h
-    src/GammaRampFilter.cpp
-    src/MagnificationFilter.h
-    src/MagnificationFilter.cpp
+    src/Diagnostics.cpp src/main.cpp
+    src/GammaRampFilter.cpp src/MagnificationFilter.cpp
     resources/app.rc
 )
+target_include_directories(RedLight PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated" resources)
+target_compile_definitions(RedLight PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00)
+target_link_libraries(RedLight PRIVATE user32 gdi32 Shell32 Magnification Wtsapi32 Advapi32)
+if(MSVC)
+    target_compile_options(RedLight PRIVATE /W4 /permissive- /utf-8)
+    target_link_options(RedLight PRIVATE /MANIFEST:NO /DYNAMICBASE /NXCOMPAT)
+endif()
 
-target_link_libraries(RedLight PRIVATE user32 gdi32 Shell32 Magnification)
-
-set_target_properties(RedLight PROPERTIES
-    LINK_FLAGS "/SUBSYSTEM:WINDOWS"
-)
-
-if (WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8)
+option(REDLIGHT_BUILD_PROBE "Build the manual display probe (never a CTest test)" OFF)
+if(REDLIGHT_BUILD_PROBE)
     add_executable(MagRedProbe experiments/MagRedProbe.cpp)
     target_link_libraries(MagRedProbe PRIVATE Magnification)
 endif()
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(RedLightCodeTests
+        tests/CodeTests.cpp src/MagnificationFilter.cpp src/GammaRampFilter.cpp)
+    # Fake headers provide every display API: this target cannot call real display APIs.
+    target_include_directories(RedLightCodeTests BEFORE PRIVATE tests/fake_win32 src)
+    target_compile_definitions(RedLightCodeTests PRIVATE REDLIGHT_FAKE_WIN32=1)
+    if(MSVC)
+        target_compile_options(RedLightCodeTests PRIVATE /W4 /WX /permissive- /utf-8)
+    endif()
+    add_test(NAME RedLight.CodeTests COMMAND RedLightCodeTests)
+    set_tests_properties(RedLight.CodeTests PROPERTIES LABELS "code-only;no-display")
+endif()
+
+install(TARGETS RedLight RUNTIME DESTINATION .)
+install(FILES README.md CHANGELOG.md LICENSE DESTINATION .)
+install(CODE [[
+    file(SHA256 "${CMAKE_INSTALL_PREFIX}/RedLight.exe" redlight_hash)
+    file(WRITE "${CMAKE_INSTALL_PREFIX}/RedLight.exe.sha256" "${redlight_hash}  RedLight.exe\n")
+]])
+install(DIRECTORY docs/ DESTINATION docs)
+set(CPACK_GENERATOR ZIP)
+set(CPACK_PACKAGE_NAME RedLight)
+set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}-rc.1")
+set(CPACK_PACKAGE_FILE_NAME "RedLight-${CPACK_PACKAGE_VERSION}-windows-x64")
+include(CPack)

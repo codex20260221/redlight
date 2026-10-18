@@ -13,20 +13,23 @@ public:
     bool enable() override;
     bool disable() override;
     bool isActive() const override;
+    bool needsRestore() const override;
+    const char* lastError() const override;
     bool setRedMode(RedMode mode) override;
     RedMode redMode() const override;
     bool supportsRedMode(RedMode mode) const override;
-    void shutdown() override;
+    bool shutdown() override;
     const char* name() const override;
 
 private:
     void SetError(const char* action, DWORD error);
-    bool SetGammaRamp(WORD ramp[3][256], const char* action);
+    bool SetGammaRamp(WORD ramp[3][256], const char* action, bool requireZeroGreenBlue = false);
     void BuildRedRamp();
 
     HDC hdc_;
     bool initialized_;
     bool active_;
+    bool restorePending_;
     WORD originalGammaRamp_[3][256];
     WORD redGammaRamp_[3][256];
     char lastError_[256];

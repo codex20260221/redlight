@@ -2,6 +2,7 @@
 #include "Diagnostics.h"
 
 #include <cstdio>
+#include <cstring>
 
 namespace {
 
@@ -13,6 +14,7 @@ GammaRampFilter::GammaRampFilter()
     : hdc_(NULL),
       initialized_(false),
       active_(false),
+      restorePending_(false),
       originalGammaRamp_{},
       redGammaRamp_{},
       lastError_{} {}
@@ -26,6 +28,7 @@ bool GammaRampFilter::initialize() {
         return true;
     }
 
+    if (hdc_ && !shutdown()) return false;
     hdc_ = GetDC(NULL);
     if (!hdc_) {
         SetError("GetDC", GetLastError());
@@ -35,8 +38,11 @@ bool GammaRampFilter::initialize() {
 
     if (!GetDeviceGammaRamp(hdc_, originalGammaRamp_)) {
         SetError("GetDeviceGammaRamp", GetLastError());
-        ReleaseDC(NULL, hdc_);
-        hdc_ = NULL;
+        if (!ReleaseDC(NULL, hdc_)) {
+            SetError("ReleaseDC after capture failure", GetLastError());
+        } else {
+            hdc_ = NULL;
+        }
         Diagnostics::LogFormat("%s initialization failed.", kFilterName);
         return false;
     }
@@ -59,7 +65,27 @@ bool GammaRampFilter::enable() {
         return true;
     }
 
-    if (!SetGammaRamp(redGammaRamp_, "SetDeviceGammaRamp(red)")) {
+    if (restorePending_) {
+        SetError("enable while recovery pending", ERROR_INVALID_STATE);
+        return false;
+    }
+    // Reacquire after topology changes and save the latest calibration on each enable.
+    if (hdc_ && !ReleaseDC(NULL, hdc_)) {
+        SetError("ReleaseDC before enable", GetLastError());
+        return false;
+    }
+    hdc_ = GetDC(NULL);
+    if (!hdc_ || !GetDeviceGammaRamp(hdc_, originalGammaRamp_)) {
+        SetError("capture before enable", GetLastError());
+        return false;
+    }
+    restorePending_ = true;
+    if (!SetGammaRamp(redGammaRamp_, "SetDeviceGammaRamp(red)", true)) {
+        char enableError[sizeof(lastError_)];
+        std::memcpy(enableError, lastError_, sizeof(enableError));
+        if (disable()) {
+            std::memcpy(lastError_, enableError, sizeof(lastError_));
+        }
         return false;
     }
 
@@ -74,7 +100,7 @@ bool GammaRampFilter::disable() {
         return false;
     }
 
-    if (!active_) {
+    if (!needsRestore()) {
         return true;
     }
 
@@ -83,6 +109,7 @@ bool GammaRampFilter::disable() {
     }
 
     active_ = false;
+    restorePending_ = false;
     Diagnostics::LogFormat("%s disable succeeded.", kFilterName);
     return true;
 }
@@ -91,12 +118,16 @@ bool GammaRampFilter::isActive() const {
     return active_;
 }
 
+bool GammaRampFilter::needsRestore() const { return active_ || restorePending_; }
+
+const char* GammaRampFilter::lastError() const { return lastError_; }
+
 bool GammaRampFilter::setRedMode(RedMode mode) {
     if (mode == RedMode::StrictRed) {
         return true;
     }
 
-    Diagnostics::Log("GammaRampFilter: Luma Red requested but gamma ramps do not support cross-channel mixing; staying in Strict Red.");
+    SetError("unsupported mode (gamma supports Strict Red only)", ERROR_INVALID_PARAMETER);
     return false;
 }
 
@@ -108,26 +139,18 @@ bool GammaRampFilter::supportsRedMode(RedMode mode) const {
     return mode == RedMode::StrictRed;
 }
 
-void GammaRampFilter::shutdown() {
-    if (!initialized_) {
-        return;
+bool GammaRampFilter::shutdown() {
+    if (needsRestore() && !disable()) {
+        Diagnostics::Log("GammaRampFilter: restore failed; retaining DC and recovery state.");
+        return false;
     }
-
-    if (hdc_) {
-        Diagnostics::LogFormat("%s shutdown restore attempt.", kFilterName);
-        if (!SetGammaRamp(originalGammaRamp_, "shutdown restore")) {
-            Diagnostics::Log("GammaRampFilter: shutdown restore failed; display state may not have been restored.");
-        } else {
-            active_ = false;
-        }
-
-        if (!ReleaseDC(NULL, hdc_)) {
-            SetError("ReleaseDC", GetLastError());
-        }
-        hdc_ = NULL;
+    if (hdc_ && !ReleaseDC(NULL, hdc_)) {
+        SetError("ReleaseDC", GetLastError());
+        return false;
     }
-
+    hdc_ = NULL;
     initialized_ = false;
+    return true;
 }
 
 const char* GammaRampFilter::name() const {
@@ -142,7 +165,7 @@ void GammaRampFilter::SetError(const char* action, DWORD error) {
     Diagnostics::LogFormat("%s: %s failed (GetLastError=%lu)", kFilterName, action, static_cast<unsigned long>(error));
 }
 
-bool GammaRampFilter::SetGammaRamp(WORD ramp[3][256], const char* action) {
+bool GammaRampFilter::SetGammaRamp(WORD ramp[3][256], const char* action, bool requireZeroGreenBlue) {
     if (!hdc_) {
         SetError(action, ERROR_INVALID_HANDLE);
         return false;
@@ -153,13 +176,29 @@ bool GammaRampFilter::SetGammaRamp(WORD ramp[3][256], const char* action) {
         return false;
     }
 
+    // Drivers can silently ignore a successful SetDeviceGammaRamp call.
+    WORD applied[3][256] = {};
+    if (!GetDeviceGammaRamp(hdc_, applied)) {
+        SetError("gamma read-back", GetLastError());
+        return false;
+    }
+    for (int channel = 0; channel < 3; ++channel) {
+        for (int i = 0; i < 256; ++i) {
+            // DAC precision varies; compare the significant byte.
+            if ((requireZeroGreenBlue && channel > 0 && applied[channel][i] != 0) ||
+                (applied[channel][i] >> 8) != (ramp[channel][i] >> 8)) {
+                SetError("gamma read-back mismatch (driver rejected ramp)", ERROR_INVALID_DATA);
+                return false;
+            }
+        }
+    }
     lastError_[0] = '\0';
     return true;
 }
 
 void GammaRampFilter::BuildRedRamp() {
     for (int i = 0; i < 256; ++i) {
-        redGammaRamp_[0][i] = static_cast<WORD>(i << 8);
+        redGammaRamp_[0][i] = static_cast<WORD>(i * 257);
         redGammaRamp_[1][i] = 0;
         redGammaRamp_[2][i] = 0;
     }

@@ -14,10 +14,12 @@ public:
     bool enable() override;
     bool disable() override;
     bool isActive() const override;
+    bool needsRestore() const override;
+    const char* lastError() const override;
     bool setRedMode(RedMode mode) override;
     RedMode redMode() const override;
     bool supportsRedMode(RedMode mode) const override;
-    void shutdown() override;
+    bool shutdown() override;
     const char* name() const override;
 
 private:

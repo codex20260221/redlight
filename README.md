@@ -1,9 +1,18 @@
 # RedLight
 RedLight is a lightweight Windows tray application that applies a red-only display filter. It is not a translucent tint. The app runs from the system tray, allowing users to easily toggle the filter on and off with one click.
 
+## Release candidate
+
+**0.6.0-rc.1** is a portable Windows x64 release candidate. The filter starts **off**. This candidate has code-only validation; live display and tray acceptance checks are listed in [release validation](docs/release-validation.md) and have not been run for this candidate.
+
 ## Features
-- **Toggle Red Filter**: Quickly enable or disable the red filter directly from the system tray.
-- **Minimal Resource Usage**: Runs quietly in the background with essentially no impact on system performance.
+
+- Strict Red and Luma Red modes, with your selection remembered between starts.
+- Tray toggle and keyboard shortcuts; a separate Restore display command.
+- Visible errors, recovery retries, and diagnostics available from the tray menu.
+- Tray recovery after Explorer restarts.
+- Restoration attempts on sleep/wake, lock/unlock, session disconnect, and display configuration changes. Re-enable manually afterward.
+- Native C++/Win32, with no installer or separate Visual C++ runtime required.
 
 ## Red Modes
 Strict Red is the original red-channel-only mode and transforms display output as follows:
@@ -34,32 +43,43 @@ Luma Red keeps the display red-only while making blue, green, and cyan UI elemen
 | ![Color bars test image](docs/images/color-bars.webp) | ![Color bars shown through RedLight Luma Red mode](docs/images/luma-red-color-bars.webp) |
 
 ## Architecture
-v0.5.1-beta uses the Windows Magnification API full-screen color transform as the preferred backend, with Luma Red as the default mode.
+RedLight uses the Windows Magnification API full-screen color transform as the preferred backend, with Luma Red as the default mode.
 The legacy gamma-ramp backend is retained as a Strict Red fallback.
 
 ## Installation
 To install RedLight, follow these steps:
 1. Download the latest release from the [Releases](https://github.com/michaelmawhinney/redlight/releases) page.
-2. Run `RedLight.exe` to start the application.
+2. Extract the portable ZIP to a folder you can keep, then run `RedLight.exe`. The standalone executable is also available. Administrator privileges are not required.
+3. If the icon is hidden, look in the taskbar notification overflow. Windows controls its placement.
 
 ## Usage
-After starting RedLight, an icon will appear in the system tray.
+After starting RedLight, an icon appears in the system tray with the filter off.
 
-* Left-click on the icon to toggle between red mode and normal mode.
-* Right-click the icon to access the following options:
-  - **Toggle ON/off**: Enable or disable the red light filter.
-  - **Strict Red**: Use the original red-channel-only mode.
-  - **Luma Red**: Use the default luma-weighted red mode when the Magnification API backend is active.
-  - **About**: Display information about the application.
-  - **Exit**: Quit the application.
+| Control | Action |
+| --- | --- |
+| Left-click, Enter, or Space on the tray icon | Toggle the filter |
+| Ctrl+Alt+R | Toggle the filter |
+| Ctrl+Alt+Shift+R | Restore the display |
+| Right-click or the keyboard context menu | Open the tray menu |
 
-## Important Notes
+The menu provides **Turn on / Turn off**, **Restore display**, **Strict Red**, **Luma Red**, **Open logs folder**, **About**, and **Exit**. About shows the backend, mode, filter status, and shortcut/session registration status. If another program has registered a shortcut, use the tray controls.
+
+Mode selection is saved under `HKCU\Software\RedLight\RedMode`. An unavailable Luma Red preference is retained for a future Magnification session, while gamma fallback uses Strict Red. The enabled state is never saved. Exit first restores display state; if restoration fails, RedLight stays available for another attempt.
+
+On an Explorer restart, display change, sleep/wake, or session change, RedLight attempts to restore the saved state and leaves the filter off. If restoration fails, an error is logged and recovery data is kept. Use **Restore display** to retry. No automatic re-enabling occurs.
+
+## Compatibility and limitations
+
+- Target: Windows 10/11 x64 desktop sessions. HDR, remote sessions, exclusive full-screen apps, protected content, and the secure desktop are not qualified for this candidate. RedLight is not a hardware blue-light guarantee.
+- Magnification is the preferred full-screen backend. Gamma fallback uses a desktop device context, and may not cover every monitor/adapter. It supports Strict Red only.
+- Gamma drivers may silently reject color ramps; RedLight reads back the ramp and attempts rollback on failure. This verifies the reported ramp, not physical panel output. See [Microsoft's gamma API limitations](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/nf-wingdi-setdevicegammaramp).
+
 * This application may conflict with other apps/features that change display color, such as f.lux, Windows Night Light, HDR/color calibration settings, GPU color controls, or similar display-color tools. If you want to use RedLight, you should close or disable similar apps/features to avoid unexpected behavior.
 * RedLight is provided as-is and without any warranty of any kind. Although the code is simple and straightforward, you are still advised to use it at your own risk!
 
 ## Windows Security Notice
 
-RedLight beta builds are currently unsigned. Because the executable is not code-signed, Windows or Microsoft Defender SmartScreen may show a warning before running it, especially the first time it is downloaded.
+RedLight builds, including this release candidate, are currently unsigned. Because the executable is not code-signed, Windows or Microsoft Defender SmartScreen may show a warning before running it, especially the first time it is downloaded.
 
 This warning does not necessarily mean RedLight is malicious; it means Windows does not yet recognize the publisher or file reputation. RedLight is open source, so users who are concerned are encouraged to inspect the source code, build the app themselves, or verify the downloaded executable against the SHA-256 checksum published with the release.
 
@@ -70,7 +90,11 @@ Do not run software you do not trust. RedLight is provided as-is and without war
 * Reset commands:
   * `RedLight.exe --restore`
   * `RedLight.exe --reset-display`
-* Reset mode can ask a running tray instance to restore the display before falling back to direct recovery.
+* With a running instance, reset mode asks that instance to restore its saved state. A busy or unresponsive instance is not bypassed.
+* Without a running instance, reset mode applies an identity Magnification matrix. This clears Magnification color effects, including those from other tools; it cannot recover a lost gamma-ramp snapshot after a crash.
+* Exit codes: `0` for success (including an already-running instance), `1` for startup/recovery failure, and `2` for invalid arguments. `--help` and `--version` display informational dialogs. Options are case-sensitive and exactly one option is accepted.
+* Logs support Unicode Windows profile paths. Rotation at startup keeps up to three archives when the current log exceeds 1 MiB.
+* To remove RedLight, exit it, delete its folder, and optionally delete `%LOCALAPPDATA%\RedLight` and the `HKCU\Software\RedLight` registry key. No service or startup entry is installed.
 
 ## Building from Source
 RedLight is built and tested as a Windows x64 application. Use Visual Studio 2022 Build Tools or Visual Studio 2022 with the C++ toolchain installed.
@@ -97,7 +121,23 @@ RedLight is built and tested as a Windows x64 application. Use Visual Studio 202
    ```
 4. The release artifact is expected at `build\Release\RedLight.exe`
 
-Local testing passed on a Windows 10 x64 system with two monitors.
+### Code-only validation and packaging
+
+These commands do not start RedLight or the manual display probe:
+
+```powershell
+./tools/Test-CodeOnlyBinary.ps1
+ctest --test-dir build -C Release --output-on-failure
+./tools/Verify-Release.ps1
+cpack --config build/CPackConfig.cmake -C Release -B build/packages
+./tools/Verify-Package.ps1
+```
+
+The code-test target compiles the production backends against fake Win32 headers and functions. Its import check permits only KERNEL32.dll. It exercises the color matrices and backend failure/recovery paths without access to display APIs. Build the manual probe only when explicitly wanted with `-DREDLIGHT_BUILD_PROBE=ON`; it is excluded by default and is never a CTest test.
+
+The ZIP includes the executable, SHA-256 checksum, license, README, changelog, and documentation. Verify a downloaded executable with `Get-FileHash .\RedLight.exe -Algorithm SHA256` against its published checksum. SHA-256 identifies the file; it does not establish publisher trust.
+
+[Release validation and manual Windows test notes](docs/release-validation.md) describe candidate acceptance and promotion to a stable release.
 
 ## Contributing
 Contributions are welcome! Feel free to open pull requests or issues to suggest improvements or add new features.

@@ -1,1 +1,31 @@
+#include <windows.h>
+#include "Version.h"
 100 ICON "redlight.ico"
+1 RT_MANIFEST "app.manifest"
+1 VERSIONINFO
+ FILEVERSION REDLIGHT_VERSION_TUPLE
+ PRODUCTVERSION REDLIGHT_VERSION_TUPLE
+ FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+ FILEFLAGS VS_FF_PRERELEASE
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+BEGIN
+ BLOCK "StringFileInfo"
+ BEGIN
+  BLOCK "040904b0"
+  BEGIN
+   VALUE "CompanyName", "RedLight contributors\0"
+   VALUE "FileDescription", "RedLight red-only display filter\0"
+   VALUE "FileVersion", REDLIGHT_VERSION "\0"
+   VALUE "InternalName", "RedLight\0"
+   VALUE "OriginalFilename", "RedLight.exe\0"
+   VALUE "ProductName", "RedLight\0"
+   VALUE "ProductVersion", REDLIGHT_VERSION "\0"
+   VALUE "LegalCopyright", "GPL-3.0; see LICENSE\0"
+  END
+ END
+ BLOCK "VarFileInfo"
+ BEGIN
+  VALUE "Translation", 0x409, 1200
+ END
+END

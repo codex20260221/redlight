@@ -8,10 +8,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Added Ctrl+Alt+R toggle and Ctrl+Alt+Shift+R display restoration shortcuts, with availability shown in About.
+- Added a Restore display command, direct access to diagnostics, accessible tray activation, and saved red-mode selection.
+- Added isolated code tests for color transforms, command-line parsing, API failure handling, rollback, and restoration retries. Tests use fake display APIs and verify binary import isolation.
+- Added native x64 portable ZIP packaging, executable version/manifest metadata, SHA-256 checksums, and release validation notes for 0.6.0-rc.1.
+- Added command-line help/version dialogs and explicit rejection of unknown or conflicting options.
 
 ### Changed
+- Capture the most recent display state before every activation; refuse activation when capture fails.
+- Keep recovery data and backend resources available after failed restoration. Normal Exit stays open when display restoration fails.
+- Attempt restoration and leave the filter off on display, power, and session changes; re-enable manually.
+- Recover the tray after Explorer restarts, retrying registration while keeping the filter off.
+- Use a per-session instance mutex and refuse direct reset when a live/starting instance's recovery controls are unavailable.
+- Build with the static MSVC runtime and make the display probe opt-in. CI runs code-only tests and prepares draft prereleases after all gates pass.
+- Support Unicode diagnostics paths and report log-write failures to the debugger.
 
 ### Fixed
+- Detect silently rejected gamma writes through significant-byte read-back and attempt rollback without claiming a failed enable is active.
+- Preserve gamma restoration data even when a partial write and rollback both fail; avoid overwriting calibration on inactive shutdown.
+- Cover the full red gamma range from black to maximum red.
+- Surface backend, tray initialization, and restoration failures instead of silently running without usable controls.
+- Handle message-loop failures and clean up tray/hotkey/session resources.
 
 ## [0.5.1-beta] - 2026-05-18
 

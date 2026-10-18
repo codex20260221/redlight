@@ -24,9 +24,13 @@ public:
     virtual bool enable() = 0;
     virtual bool disable() = 0;
     virtual bool isActive() const = 0;
+    // A failed/partial write can require recovery without a confirmed active filter.
+    virtual bool needsRestore() const = 0;
+    virtual const char* lastError() const = 0;
     virtual bool setRedMode(RedMode mode) = 0;
     virtual RedMode redMode() const = 0;
     virtual bool supportsRedMode(RedMode mode) const = 0;
-    virtual void shutdown() = 0;
+    // Keep resources and restore data available when recovery fails.
+    virtual bool shutdown() = 0;
     virtual const char* name() const = 0;
 };

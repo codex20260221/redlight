@@ -1,5 +1,9 @@
 #include <windows.h>
 #include <shellapi.h>
+#include <wtsapi32.h>
+#include <vector>
+#include "CommandLine.h"
+#include "Version.h"
 #include <cstdio>
 
 #include "Diagnostics.h"
@@ -14,49 +18,87 @@
 #define ID_TRAY_EXIT 202
 #define ID_TRAY_MODE_STRICT_RED 203
 #define ID_TRAY_MODE_LUMA_RED 204
+#define ID_TRAY_RESTORE 205
+#define ID_TRAY_LOGS 206
+#define ID_HOTKEY_TOGGLE 1
+#define ID_HOTKEY_RESTORE 2
+#define ID_TRAY_RETRY_TIMER 1
 
 namespace {
 
 MagnificationFilter g_magnificationFilter;
 GammaRampFilter g_gammaRampFilter;
 DisplayFilter* g_displayFilter = &g_gammaRampFilter;
-NOTIFYICONDATA nid = {};
+NOTIFYICONDATAA nid = {};
+UINT g_taskbarCreated = 0;
+bool g_trayAdded = false;
+bool g_trayVersion4 = false;
+bool g_sessionNotifications = false;
+bool g_toggleHotkey = false;
+bool g_restoreHotkey = false;
+bool g_busy = false;
+bool g_pendingRestore = false;
 
 }
 
-bool ShouldRunResetMode();
+StartupAction GetStartupAction();
+bool RestoreFilter(bool showError);
+void CloseInstanceMutex(HANDLE handle);
+void PostTrayCommand(HWND hwnd, UINT command);
+void DestroyTrayWindow(HWND hwnd);
+void ReportError(const char* message, bool modal = true);
+bool AddTrayIcon();
+void ScheduleTrayRecovery();
+void ShowTrayMenu(HWND hwnd);
+void SaveRedMode(RedMode mode);
+void LoadRedMode();
 void LogSystemInfo();
 bool ResetDisplay();
 bool RequestRunningInstanceRestore(bool* handled);
 void ToggleRedlight();
 void UpdateTrayIconTip(const char* tip);
 void RefreshTrayIconTip();
-void InitializeTrayIcon(HINSTANCE hInstance);
+bool InitializeTrayIcon(HINSTANCE hInstance);
 void SetRedModeFromTray(RedMode mode);
 void ShowAboutDialog(HWND parent);
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
-int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nShowCmd) {
+int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPSTR lpCmdLine, _In_ int nShowCmd) {
     (void)hPrevInstance;
     (void)lpCmdLine;
     (void)nShowCmd;
 
     Diagnostics::Initialize();
-    Diagnostics::Log("RedLight starting.");
+    Diagnostics::Log("RedLight " REDLIGHT_VERSION " starting.");
     LogSystemInfo();
 
-    if (ShouldRunResetMode()) {
+    const StartupAction action = GetStartupAction();
+    if (action == StartupAction::Help || action == StartupAction::Version || action == StartupAction::Invalid) {
+        MessageBoxA(NULL, action == StartupAction::Version ? "RedLight " REDLIGHT_VERSION :
+            "RedLight " REDLIGHT_VERSION "\n\nUsage: RedLight.exe [option]\n\n"
+            "--restore / --reset-display: restore display colors\n"
+            "--help: show this help\n--version: show version\n\n"
+            "Without options, start in the tray with the filter off.\n"
+            "Ctrl+Alt+R: toggle. Ctrl+Alt+Shift+R: restore.",
+            action == StartupAction::Invalid ? "RedLight - invalid command line" : "RedLight",
+            MB_OK | (action == StartupAction::Invalid ? MB_ICONERROR : MB_ICONINFORMATION));
+        Diagnostics::Shutdown();
+        return action == StartupAction::Invalid ? 2 : 0;
+    }
+    if (action == StartupAction::Restore) {
         const bool resetSucceeded = ResetDisplay();
         Diagnostics::LogFormat("RedLight reset mode completed with %s.", resetSucceeded ? "success" : "failure");
+        if (!resetSucceeded) ReportError("Display recovery failed. The running instance may be busy, or no saved gamma ramp is available. See %LOCALAPPDATA%\\RedLight\\redlight.log.");
         Diagnostics::Log("RedLight exiting.");
         Diagnostics::Shutdown();
         return resetSucceeded ? 0 : 1;
     }
 
     // silently exit multiple instances
-    HANDLE hMutex = CreateMutex(NULL, TRUE, "Global\\RedLightApp");
+    HANDLE hMutex = CreateMutex(NULL, TRUE, "Local\\RedLightApp");
     if (!hMutex) {
         Diagnostics::LogFormat("CreateMutex failed (GetLastError=%lu).", static_cast<unsigned long>(GetLastError()));
+        ReportError("RedLight could not acquire its instance guard. See the diagnostics log for details.");
         Diagnostics::Log("RedLight exiting.");
         Diagnostics::Shutdown();
         return 1;
@@ -64,10 +106,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         Diagnostics::Log("Another RedLight instance is already running.");
-        CloseHandle(hMutex);
+        if (!CloseHandle(hMutex)) Diagnostics::Log("Closing duplicate instance mutex failed.");
         Diagnostics::Log("RedLight exiting.");
         Diagnostics::Shutdown();
-        return 1;
+        return 0;
     }
 
     if (g_magnificationFilter.initialize()) {
@@ -77,8 +119,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         Diagnostics::Log("MagnificationFilter initialization failed; falling back to GammaRampFilter.");
         if (!g_gammaRampFilter.initialize()) {
             Diagnostics::Log("GammaRampFilter initialization failed.");
-            ReleaseMutex(hMutex);
-            CloseHandle(hMutex);
+            ReportError("No display backend is available. See the diagnostics log in %LOCALAPPDATA%\\RedLight.");
+            CloseInstanceMutex(hMutex);
             Diagnostics::Log("RedLight exiting.");
             Diagnostics::Shutdown();
             return 1;
@@ -88,40 +130,59 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     }
 
     Diagnostics::LogFormat("Monitor count: %d", GetSystemMetrics(SM_CMONITORS));
-    InitializeTrayIcon(hInstance);
+    LoadRedMode();
+    if (!InitializeTrayIcon(hInstance)) {
+        ReportError("The tray controls could not be created. RedLight will exit with the filter off.");
+        g_displayFilter->shutdown();
+        if (IsWindow(nid.hWnd)) DestroyTrayWindow(nid.hWnd);
+        CloseInstanceMutex(hMutex);
+        Diagnostics::Shutdown();
+        return 1;
+    }
 
     MSG msg = {};
-    while (GetMessage(&msg, NULL, 0, 0)) {
+    int messageResult = 0;
+    while ((messageResult = GetMessageA(&msg, NULL, 0, 0)) > 0) {
         TranslateMessage(&msg);
-        DispatchMessage(&msg);
+        DispatchMessageA(&msg);
     }
-
-    g_displayFilter->shutdown();
+    if (messageResult == -1) {
+        Diagnostics::LogFormat("GetMessage failed (error %lu).", GetLastError());
+        ReportError("The Windows message loop failed. RedLight is attempting display restoration.");
+    }
+    const bool restored = g_displayFilter->shutdown();
+    if (IsWindow(nid.hWnd)) DestroyWindow(nid.hWnd);
     Diagnostics::Log("RedLight exiting.");
-
-    ReleaseMutex(hMutex);
-    CloseHandle(hMutex);
+    CloseInstanceMutex(hMutex);
     Diagnostics::Shutdown();
-    return 0;
+    return messageResult == -1 || !restored ? 1 : 0;
 }
 
-bool ShouldRunResetMode() {
+void CloseInstanceMutex(HANDLE handle) {
+    if (!ReleaseMutex(handle)) Diagnostics::LogFormat("ReleaseMutex failed (error %lu).", GetLastError());
+    if (!CloseHandle(handle)) Diagnostics::LogFormat("CloseHandle failed (error %lu).", GetLastError());
+}
+
+void PostTrayCommand(HWND hwnd, UINT command) {
+    if (!PostMessageA(hwnd, WM_COMMAND, command, 0)) ReportError("The tray command could not be queued. Please retry.");
+}
+
+void DestroyTrayWindow(HWND hwnd) {
+    if (!DestroyWindow(hwnd)) {
+        Diagnostics::LogFormat("DestroyWindow failed (error %lu).", GetLastError());
+        ReportError("RedLight could not close its controls. Please retry Exit.");
+    }
+}
+
+StartupAction GetStartupAction() {
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    if (!argv) {
-        return false;
-    }
-
-    bool resetMode = false;
-    for (int i = 1; i < argc; ++i) {
-        if (lstrcmpiW(argv[i], L"--restore") == 0 || lstrcmpiW(argv[i], L"--reset-display") == 0) {
-            resetMode = true;
-            break;
-        }
-    }
-
-    LocalFree(argv);
-    return resetMode;
+    if (!argv) return StartupAction::Invalid;
+    std::vector<std::wstring_view> args;
+    for (int i = 1; i < argc; ++i) args.emplace_back(argv[i]);
+    const StartupAction action = ParseArguments(args);
+    if (LocalFree(argv)) Diagnostics::Log("Freeing command-line arguments failed.");
+    return action;
 }
 
 void LogSystemInfo() {
@@ -143,7 +204,7 @@ void LogSystemInfo() {
     using RtlGetVersionFn = LONG (WINAPI*)(RTL_OSVERSIONINFOW_LOCAL*);
     auto rtlGetVersion = reinterpret_cast<RtlGetVersionFn>(GetProcAddress(ntdll, "RtlGetVersion"));
     if (!rtlGetVersion) {
-        FreeLibrary(ntdll);
+        if (!FreeLibrary(ntdll)) Diagnostics::Log("FreeLibrary(ntdll) failed.");
         Diagnostics::Log("Windows version: unavailable.");
         return;
     }
@@ -158,7 +219,7 @@ void LogSystemInfo() {
         Diagnostics::Log("Windows version: unavailable.");
     }
 
-    FreeLibrary(ntdll);
+    if (!FreeLibrary(ntdll)) Diagnostics::Log("FreeLibrary(ntdll) failed.");
 }
 
 bool ResetDisplay() {
@@ -181,6 +242,25 @@ bool ResetDisplay() {
         {0.0f, 0.0f, 0.0f, 0.0f, 1.0f},
     }};
 
+    // Never bypass a live/starting owner's recovery data with an identity reset.
+    HANDLE owner = CreateMutexA(NULL, TRUE, "Local\\RedLightApp");
+    const DWORD mutexError = GetLastError();
+    if (!owner) {
+        Diagnostics::LogFormat("Reset mode: could not acquire instance guard (error %lu).", mutexError);
+        return false;
+    }
+    if (mutexError == ERROR_ALREADY_EXISTS) {
+        if (!CloseHandle(owner)) Diagnostics::Log("Reset mode: CloseHandle failed.");
+        Diagnostics::Log("Reset mode: an instance exists but its controls are unavailable; refusing direct reset.");
+        return false;
+    }
+    struct ResetGuard {
+        HANDLE handle;
+        ~ResetGuard() {
+            if (!ReleaseMutex(handle)) Diagnostics::Log("Reset mode: ReleaseMutex failed.");
+            if (!CloseHandle(handle)) Diagnostics::Log("Reset mode: CloseHandle failed.");
+        }
+    } resetGuard{owner};
     Diagnostics::Log("Reset mode: attempting Magnification API restore.");
 
     if (!MagInitialize()) {
@@ -215,7 +295,7 @@ bool RequestRunningInstanceRestore(bool* handled) {
         *handled = false;
     }
 
-    HWND trayWindow = FindWindowA("TrayOnlyClass", "RedLight");
+    HWND trayWindow = FindWindowA("RedLight.TrayWindow", "RedLight");
     if (!trayWindow) {
         Diagnostics::Log("Reset mode: running tray window not found.");
         return false;
@@ -250,76 +330,174 @@ bool RequestRunningInstanceRestore(bool* handled) {
     return restoreResult != FALSE;
 }
 
+void ReportError(const char* message, bool modal) {
+    Diagnostics::Log(message);
+    if (modal || !g_trayAdded) {
+        MessageBoxA(nid.hWnd, message, "RedLight", MB_OK | MB_ICONERROR);
+        return;
+    }
+    NOTIFYICONDATAA notification = nid;
+    notification.uFlags = NIF_INFO;
+    strcpy_s(notification.szInfoTitle, "RedLight needs attention");
+    strncpy_s(notification.szInfo, message, _TRUNCATE);
+    notification.dwInfoFlags = NIIF_ERROR;
+    if (!Shell_NotifyIconA(NIM_MODIFY, &notification)) {
+        Diagnostics::Log("Could not display recovery notification.");
+    }
+}
+
+bool RestoreFilter(bool showError) {
+    if (g_busy) { g_pendingRestore = true; return false; }
+    g_pendingRestore = false;
+    g_busy = true;
+    const bool restored = !g_displayFilter->needsRestore() || g_displayFilter->disable();
+    g_busy = false;
+    if (restored) g_pendingRestore = false;
+    RefreshTrayIconTip();
+    if (!restored) {
+        char message[768];
+        sprintf_s(message, "Display restoration failed. RedLight has kept its recovery data.\n"
+            "Use Restore display or Ctrl+Alt+Shift+R to retry.\n\n%s", g_displayFilter->lastError());
+        ReportError(message, showError);
+    }
+    return restored;
+}
+
 void UpdateTrayIconTip(const char* tip) {
-    strcpy_s(nid.szTip, sizeof(nid.szTip), tip);
-    if (!Shell_NotifyIcon(NIM_MODIFY, &nid)) {
-        Diagnostics::LogFormat("Shell_NotifyIcon(NIM_MODIFY) failed (GetLastError=%lu).", static_cast<unsigned long>(GetLastError()));
+    strcpy_s(nid.szTip, tip);
+    if (g_trayAdded && !Shell_NotifyIconA(NIM_MODIFY, &nid)) {
+        Diagnostics::Log("Tray update failed; restoring display before retrying tray registration.");
+        g_trayAdded = false;
+        RestoreFilter(false);
+        if (!AddTrayIcon()) ScheduleTrayRecovery();
     }
 }
 
 void RefreshTrayIconTip() {
     char tip[sizeof(nid.szTip)];
-    sprintf_s(tip,
-        sizeof(tip),
-        "RedLight %s - %s - %s",
-        g_displayFilter->isActive() ? "ON" : "off",
-        g_displayFilter->name(),
-        RedModeDisplayName(g_displayFilter->redMode()));
+    sprintf_s(tip, "RedLight %s - %s - %s",
+        g_displayFilter->needsRestore() && g_displayFilter->lastError()[0] ? "RECOVERY NEEDED" :
+        (g_displayFilter->isActive() ? "ON" : "off"),
+        g_displayFilter->name(), RedModeDisplayName(g_displayFilter->redMode()));
     UpdateTrayIconTip(tip);
 }
 
 void ToggleRedlight() {
-    Diagnostics::LogFormat("Toggle request: %s (%s, %s)",
-        g_displayFilter->isActive() ? "disable" : "enable",
-        g_displayFilter->name(),
-        RedModeDisplayName(g_displayFilter->redMode()));
-    if (g_displayFilter->isActive()) {
-        if (!g_displayFilter->disable()) {
-            Diagnostics::Log("Toggle result: disable failed.");
-        } else {
-            Diagnostics::Log("Toggle result: disable succeeded.");
-        }
-    } else {
-        if (!g_displayFilter->enable()) {
-            Diagnostics::Log("Toggle result: enable failed.");
-        } else {
-            Diagnostics::Log("Toggle result: enable succeeded.");
-        }
+    if (g_busy) return;
+    if (!g_trayAdded && !g_displayFilter->needsRestore()) {
+        ReportError("RedLight is waiting for its tray controls to return. The filter will stay off.");
+        return;
     }
-
-    RefreshTrayIconTip();
+    if (g_displayFilter->needsRestore()) {
+        RestoreFilter(true);
+    } else {
+        Diagnostics::LogFormat("Enable request: %s (%s)", g_displayFilter->name(), RedModeDisplayName(g_displayFilter->redMode()));
+        g_busy = true;
+        const bool enabled = g_displayFilter->enable();
+        g_busy = false;
+        if (g_pendingRestore) RestoreFilter(false);
+        if (!enabled) {
+            char message[768];
+            sprintf_s(message, "The red filter could not be enabled.\n\n%s", g_displayFilter->lastError());
+            ReportError(message);
+        }
+        RefreshTrayIconTip();
+    }
+    g_busy = false;
 }
 
-void InitializeTrayIcon(HINSTANCE hInstance) {
-    WNDCLASS wc = {0};
+void ScheduleTrayRecovery() {
+    if (!SetTimer(nid.hWnd, ID_TRAY_RETRY_TIMER, 2000, NULL)) {
+        Diagnostics::LogFormat("SetTimer for tray recovery failed (error %lu).", GetLastError());
+        ReportError("Tray recovery failed. Use Ctrl+Alt+Shift+R to restore colors, then restart RedLight.");
+    } else {
+        Diagnostics::Log("Tray registration will be retried every two seconds; new activation is blocked until controls return.");
+    }
+}
+
+bool AddTrayIcon() {
+    if (!Shell_NotifyIconA(NIM_ADD, &nid)) {
+        Diagnostics::Log("Shell_NotifyIcon(NIM_ADD) failed.");
+        return false;
+    }
+    g_trayAdded = true;
+    nid.uVersion = NOTIFYICON_VERSION_4;
+    g_trayVersion4 = Shell_NotifyIconA(NIM_SETVERSION, &nid) != FALSE;
+    if (!g_trayVersion4) Diagnostics::Log("Tray version 4 unavailable; using legacy callbacks.");
+    return true;
+}
+
+bool InitializeTrayIcon(HINSTANCE hInstance) {
+    g_taskbarCreated = RegisterWindowMessageA("TaskbarCreated");
+    if (!g_taskbarCreated) {
+        Diagnostics::LogFormat("RegisterWindowMessage failed (error %lu).", GetLastError());
+        return false;
+    }
+    WNDCLASSA wc = {};
     wc.lpfnWndProc = WindowProc;
     wc.hInstance = hInstance;
-    wc.lpszClassName = "TrayOnlyClass";
-    RegisterClass(&wc);
-
-    HWND hwnd = CreateWindowEx(0, "TrayOnlyClass", "RedLight", 0, 0, 0, 0, 0, NULL, NULL, hInstance, NULL);
-    if (!hwnd) {
-        Diagnostics::LogFormat("CreateWindowEx failed (GetLastError=%lu).", static_cast<unsigned long>(GetLastError()));
+    wc.lpszClassName = "RedLight.TrayWindow";
+    if (!RegisterClassA(&wc)) {
+        Diagnostics::LogFormat("RegisterClass failed (error %lu).", GetLastError());
+        return false;
     }
-
-    nid.cbSize = sizeof(NOTIFYICONDATA);
-    nid.hWnd = hwnd;
+    nid.cbSize = sizeof(nid);
+    nid.hWnd = CreateWindowExA(0, wc.lpszClassName, "RedLight", WS_OVERLAPPED,
+        0, 0, 0, 0, NULL, NULL, hInstance, NULL);
+    if (!nid.hWnd) {
+        Diagnostics::LogFormat("CreateWindowEx failed (error %lu).", GetLastError());
+        return false;
+    }
     nid.uID = IDI_REDLIGHT_ICON;
-    nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_SHOWTIP;
     nid.uCallbackMessage = WM_TRAYICON;
-    nid.hIcon = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_REDLIGHT_ICON));
-    sprintf_s(nid.szTip,
-        sizeof(nid.szTip),
-        "RedLight %s - %s - %s",
-        g_displayFilter->isActive() ? "ON" : "off",
-        g_displayFilter->name(),
-        RedModeDisplayName(g_displayFilter->redMode()));
-    if (!Shell_NotifyIcon(NIM_ADD, &nid)) {
-        Diagnostics::LogFormat("Shell_NotifyIcon(NIM_ADD) failed (GetLastError=%lu).", static_cast<unsigned long>(GetLastError()));
+    nid.hIcon = LoadIconA(hInstance, MAKEINTRESOURCEA(IDI_REDLIGHT_ICON));
+    if (!nid.hIcon) {
+        Diagnostics::LogFormat("LoadIcon failed (error %lu).", GetLastError());
+        return false;
+    }
+    RefreshTrayIconTip();
+    if (!AddTrayIcon()) return false;
+    g_toggleHotkey = RegisterHotKey(nid.hWnd, ID_HOTKEY_TOGGLE, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'R') != FALSE;
+    g_restoreHotkey = RegisterHotKey(nid.hWnd, ID_HOTKEY_RESTORE, MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_NOREPEAT, 'R') != FALSE;
+    g_sessionNotifications = WTSRegisterSessionNotification(nid.hWnd, NOTIFY_FOR_THIS_SESSION) != FALSE;
+    if (g_displayFilter == &g_gammaRampFilter) {
+        ReportError("Using the legacy Strict Red fallback. Driver and multi-monitor support varies. See About and the README for details.", false);
+    }
+    if (!g_toggleHotkey || !g_restoreHotkey || !g_sessionNotifications) {
+        ReportError("Some keyboard shortcuts or session notifications are unavailable. See About for shortcut status. Tray controls remain available.", false);
+    }
+    return true;
+}
+
+void SaveRedMode(RedMode mode) {
+    const DWORD value = mode == RedMode::LumaRed ? 1 : 0;
+    const LSTATUS result = RegSetKeyValueW(HKEY_CURRENT_USER, L"Software\\RedLight", L"RedMode",
+        REG_DWORD, &value, sizeof(value));
+    if (result != ERROR_SUCCESS) {
+        Diagnostics::LogFormat("Saving red mode failed (error %ld).", result);
+        ReportError("The mode was applied, but could not be saved for the next start.");
+    }
+}
+
+void LoadRedMode() {
+    DWORD value = 0;
+    DWORD size = sizeof(value);
+    const LSTATUS result = RegGetValueW(HKEY_CURRENT_USER, L"Software\\RedLight", L"RedMode",
+        RRF_RT_REG_DWORD, NULL, &value, &size);
+    if (result == ERROR_FILE_NOT_FOUND) return;
+    if (result != ERROR_SUCCESS || value > 1) {
+        Diagnostics::LogFormat("Invalid/unavailable saved mode (error %ld); using backend default.", result);
+        return;
+    }
+    const RedMode mode = value == 1 ? RedMode::LumaRed : RedMode::StrictRed;
+    if (g_displayFilter->supportsRedMode(mode) && !g_displayFilter->setRedMode(mode)) {
+        Diagnostics::LogFormat("Loading saved mode failed: %s", g_displayFilter->lastError());
     }
 }
 
 void SetRedModeFromTray(RedMode mode) {
+    if (g_busy || (g_displayFilter->needsRestore() && !g_displayFilter->isActive())) return;
     Diagnostics::LogFormat("Red mode request: %s -> %s (%s)",
         RedModeDisplayName(g_displayFilter->redMode()),
         RedModeDisplayName(mode),
@@ -334,91 +512,163 @@ void SetRedModeFromTray(RedMode mode) {
         return;
     }
 
-    if (!g_displayFilter->setRedMode(mode)) {
+    g_busy = true;
+    const bool changed = g_displayFilter->setRedMode(mode);
+    g_busy = false;
+    if (g_pendingRestore) RestoreFilter(false);
+    if (!changed) {
         Diagnostics::LogFormat("Red mode change to %s failed.", RedModeDisplayName(mode));
+        ReportError(g_displayFilter->lastError());
     } else {
         Diagnostics::LogFormat("Red mode change to %s succeeded.", RedModeDisplayName(g_displayFilter->redMode()));
+        SaveRedMode(g_displayFilter->redMode());
     }
 
     RefreshTrayIconTip();
 }
 
 void ShowAboutDialog(HWND parent) {
-    char aboutText[512];
-    sprintf_s(aboutText,
-        sizeof(aboutText),
-        "RedLight v0.5.1-beta\n\nBackend: %s\nRed mode: %s%s\n\ngithub.com/michaelmawhinney/redlight",
-        g_displayFilter->name(),
-        RedModeDisplayName(g_displayFilter->redMode()),
-        g_displayFilter->supportsRedMode(RedMode::LumaRed) ? "" : "\nLuma Red requires the Magnification API backend.");
-    const char* aboutTitle = "About";
+    char aboutText[1024];
+    sprintf_s(aboutText, "RedLight " REDLIGHT_VERSION "\n\nBackend: %s\nMode: %s\nStatus: %s\n\n"
+        "Ctrl+Alt+R: %s\nCtrl+Alt+Shift+R: %s\nSession recovery: %s\n\n"
+        "Logs: %%LOCALAPPDATA%%\\RedLight\nUnsigned release candidate\n"
+        "github.com/michaelmawhinney/redlight",
+        g_displayFilter->name(), RedModeDisplayName(g_displayFilter->redMode()),
+        g_displayFilter->needsRestore() && g_displayFilter->lastError()[0] ? "Recovery needed" :
+        (g_displayFilter->isActive() ? "ON" : "off"),
+        g_toggleHotkey ? "Toggle filter" : "Unavailable (shortcut in use)",
+        g_restoreHotkey ? "Restore display" : "Unavailable (shortcut in use)",
+        g_sessionNotifications ? "Available" : "Unavailable (registration failed)");
+    MessageBoxA(parent, aboutText, "About RedLight", MB_OK | MB_ICONINFORMATION);
+}
 
-    MessageBox(parent, aboutText, aboutTitle, MB_OK | MB_ICONINFORMATION);
+void ShowTrayMenu(HWND hwnd) {
+    POINT pt = {};
+    NOTIFYICONIDENTIFIER iconId = {};
+    iconId.cbSize = sizeof(iconId);
+    iconId.hWnd = hwnd;
+    iconId.uID = nid.uID;
+    RECT iconRect = {};
+    if (SUCCEEDED(Shell_NotifyIconGetRect(&iconId, &iconRect))) {
+        pt = {iconRect.left, iconRect.bottom};
+    } else if (!GetCursorPos(&pt)) {
+        ReportError("Could not locate the tray menu.");
+        return;
+    }
+    HMENU menu = CreatePopupMenu();
+    if (!menu) { ReportError("Could not create the tray menu."); return; }
+    const UINT strictFlags = MF_STRING | (g_displayFilter->redMode() == RedMode::StrictRed ? MF_CHECKED : MF_UNCHECKED);
+    const UINT lumaFlags = MF_STRING | (g_displayFilter->redMode() == RedMode::LumaRed ? MF_CHECKED : MF_UNCHECKED)
+        | (g_displayFilter->supportsRedMode(RedMode::LumaRed) ? MF_ENABLED : MF_GRAYED);
+    const bool built =
+        AppendMenuA(menu, MF_STRING, ID_TRAY_TOGGLE, g_displayFilter->needsRestore() ? "Turn &off\tCtrl+Alt+R" : "Turn &on\tCtrl+Alt+R") &&
+        AppendMenuA(menu, MF_STRING, ID_TRAY_RESTORE, "&Restore display\tCtrl+Alt+Shift+R") &&
+        AppendMenuA(menu, MF_SEPARATOR, 0, NULL) &&
+        AppendMenuA(menu, strictFlags, ID_TRAY_MODE_STRICT_RED, "&Strict Red") &&
+        AppendMenuA(menu, lumaFlags, ID_TRAY_MODE_LUMA_RED, "&Luma Red") &&
+        AppendMenuA(menu, MF_SEPARATOR, 0, NULL) &&
+        AppendMenuA(menu, MF_STRING, ID_TRAY_LOGS, "Open &logs folder") &&
+        AppendMenuA(menu, MF_STRING, ID_TRAY_ABOUT, "&About") &&
+        AppendMenuA(menu, MF_STRING, ID_TRAY_EXIT, "E&xit");
+    if (!built) {
+        ReportError("Could not build the tray menu.");
+    } else {
+        if (!SetForegroundWindow(hwnd)) Diagnostics::Log("SetForegroundWindow failed for tray menu.");
+        const UINT command = TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
+            pt.x, pt.y, 0, hwnd, NULL);
+        if (command) PostTrayCommand(hwnd, command);
+        if (!PostMessageA(hwnd, WM_NULL, 0, 0)) Diagnostics::Log("Posting tray menu dismissal failed.");
+        if (!Shell_NotifyIconA(NIM_SETFOCUS, &nid)) Diagnostics::Log("Could not restore tray keyboard focus.");
+    }
+    if (!DestroyMenu(menu)) Diagnostics::Log("DestroyMenu failed.");
 }
 
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    if (g_taskbarCreated && uMsg == g_taskbarCreated) {
+        g_trayAdded = false;
+        Diagnostics::Log("Explorer restarted; restoring display and tray control.");
+        RestoreFilter(false);
+        if (!AddTrayIcon()) ScheduleTrayRecovery();
+        return 0;
+    }
     switch (uMsg) {
-    case WM_TRAYICON:
-        if (lParam == WM_RBUTTONDOWN) {
-            POINT pt;
-            GetCursorPos(&pt);
-            HMENU hMenu = CreatePopupMenu();
-            if (hMenu) {
-                const UINT strictFlags = MF_STRING | (g_displayFilter->redMode() == RedMode::StrictRed ? MF_CHECKED : MF_UNCHECKED);
-                const UINT lumaFlags = MF_STRING
-                    | (g_displayFilter->redMode() == RedMode::LumaRed ? MF_CHECKED : MF_UNCHECKED)
-                    | (g_displayFilter->supportsRedMode(RedMode::LumaRed) ? MF_ENABLED : MF_GRAYED);
-                AppendMenu(hMenu, MF_STRING, ID_TRAY_TOGGLE, TEXT("Toggle ON/off"));
-                AppendMenu(hMenu, MF_SEPARATOR, 0, NULL);
-                AppendMenu(hMenu, strictFlags, ID_TRAY_MODE_STRICT_RED, TEXT("Strict Red"));
-                AppendMenu(hMenu, lumaFlags, ID_TRAY_MODE_LUMA_RED, TEXT("Luma Red"));
-                AppendMenu(hMenu, MF_SEPARATOR, 0, NULL);
-                AppendMenu(hMenu, MF_STRING, ID_TRAY_ABOUT, TEXT("About"));
-                AppendMenu(hMenu, MF_STRING, ID_TRAY_EXIT, TEXT("Exit"));
-                SetForegroundWindow(hwnd);
-                TrackPopupMenu(hMenu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, NULL);
-                DestroyMenu(hMenu);
-            }
-        } else if (lParam == WM_LBUTTONDOWN) {
-            ToggleRedlight();
+    case WM_TIMER:
+        if (wParam == ID_TRAY_RETRY_TIMER && (g_trayAdded || AddTrayIcon())) {
+            if (!KillTimer(hwnd, ID_TRAY_RETRY_TIMER)) Diagnostics::Log("Could not stop tray recovery timer.");
         }
-        break;
-
+        return 0;
+    case WM_TRAYICON: {
+        const UINT event = g_trayVersion4 ? LOWORD(lParam) : static_cast<UINT>(lParam);
+        if (event == WM_CONTEXTMENU || (!g_trayVersion4 && event == WM_RBUTTONUP)) {
+            ShowTrayMenu(hwnd);
+        } else if ((g_trayVersion4 && (event == NIN_SELECT || event == NIN_KEYSELECT)) ||
+            (!g_trayVersion4 && event == WM_LBUTTONUP)) {
+            PostTrayCommand(hwnd, ID_TRAY_TOGGLE);
+        }
+        return 0;
+    }
+    case WM_HOTKEY:
+        if (wParam == ID_HOTKEY_TOGGLE) ToggleRedlight();
+        else if (wParam == ID_HOTKEY_RESTORE) RestoreFilter(true);
+        return 0;
     case WM_COMMAND:
-        if (LOWORD(wParam) == ID_TRAY_TOGGLE) {
-            ToggleRedlight();
-        } else if (LOWORD(wParam) == ID_TRAY_MODE_STRICT_RED) {
-            SetRedModeFromTray(RedMode::StrictRed);
-        } else if (LOWORD(wParam) == ID_TRAY_MODE_LUMA_RED) {
-            SetRedModeFromTray(RedMode::LumaRed);
-        } else if (LOWORD(wParam) == ID_TRAY_EXIT) {
-            Shell_NotifyIcon(NIM_DELETE, &nid);
-            PostQuitMessage(0);
-        } else if (LOWORD(wParam) == ID_TRAY_ABOUT) {
-            ShowAboutDialog(hwnd);
+        switch (LOWORD(wParam)) {
+        case ID_TRAY_TOGGLE: ToggleRedlight(); break;
+        case ID_TRAY_RESTORE: RestoreFilter(true); break;
+        case ID_TRAY_MODE_STRICT_RED: SetRedModeFromTray(RedMode::StrictRed); break;
+        case ID_TRAY_MODE_LUMA_RED: SetRedModeFromTray(RedMode::LumaRed); break;
+        case ID_TRAY_ABOUT: ShowAboutDialog(hwnd); break;
+        case ID_TRAY_EXIT:
+            if (!PostMessageA(hwnd, WM_CLOSE, 0, 0)) ReportError("The exit request could not be queued. Please retry.");
+            break;
+        case ID_TRAY_LOGS: {
+            const std::wstring directory = Diagnostics::LogDirectory();
+            if (directory.empty() || reinterpret_cast<INT_PTR>(ShellExecuteW(hwnd, L"open", directory.c_str(),
+                NULL, NULL, SW_SHOWNORMAL)) <= 32) ReportError("Could not open the diagnostics folder.");
+            break;
         }
-        break;
-
+        }
+        return 0;
     case WM_REDLIGHT_RESTORE:
         Diagnostics::Log("External restore request received.");
-        if (!g_displayFilter->isActive()) {
-            Diagnostics::Log("External restore request: filter already inactive.");
-            return TRUE;
+        return RestoreFilter(false) ? TRUE : FALSE;
+    case WM_DISPLAYCHANGE:
+        Diagnostics::Log("Display configuration changed; restoring filter. Re-enable manually.");
+        RestoreFilter(false);
+        return 0;
+    case WM_POWERBROADCAST:
+        if (wParam == PBT_APMSUSPEND || wParam == PBT_APMRESUMEAUTOMATIC || wParam == PBT_APMRESUMESUSPEND) {
+            Diagnostics::Log("Power transition; restoring filter. Re-enable manually.");
+            RestoreFilter(false);
         }
-
-        if (!g_displayFilter->disable()) {
-            Diagnostics::Log("External restore request: disable failed.");
-            return FALSE;
-        }
-
-        RefreshTrayIconTip();
-        Diagnostics::Log("External restore request: disable succeeded.");
         return TRUE;
-
+    case WM_WTSSESSION_CHANGE:
+        if (wParam == WTS_SESSION_LOCK || wParam == WTS_SESSION_UNLOCK ||
+            wParam == WTS_CONSOLE_DISCONNECT || wParam == WTS_REMOTE_DISCONNECT) {
+            Diagnostics::Log("Session transition; restoring filter. Re-enable manually.");
+            RestoreFilter(false);
+        }
+        return 0;
+    case WM_QUERYENDSESSION:
+        RestoreFilter(false);
+        return TRUE;
+    case WM_ENDSESSION:
+        if (wParam) {
+            RestoreFilter(false);
+            DestroyTrayWindow(hwnd);
+        }
+        return 0;
+    case WM_CLOSE:
+        if (RestoreFilter(true)) DestroyTrayWindow(hwnd);
+        return 0;
     case WM_DESTROY:
-        Shell_NotifyIcon(NIM_DELETE, &nid);
+        if (g_toggleHotkey && !UnregisterHotKey(hwnd, ID_HOTKEY_TOGGLE)) Diagnostics::Log("Unregister toggle hotkey failed.");
+        if (g_restoreHotkey && !UnregisterHotKey(hwnd, ID_HOTKEY_RESTORE)) Diagnostics::Log("Unregister restore hotkey failed.");
+        if (g_sessionNotifications && !WTSUnRegisterSessionNotification(hwnd)) Diagnostics::Log("Unregister session notifications failed.");
+        if (g_trayAdded && !Shell_NotifyIconA(NIM_DELETE, &nid)) Diagnostics::Log("Tray icon removal failed.");
+        g_trayAdded = false;
         PostQuitMessage(0);
         return 0;
     }
-    return DefWindowProc(hwnd, uMsg, wParam, lParam);
+    return DefWindowProcA(hwnd, uMsg, wParam, lParam);
 }

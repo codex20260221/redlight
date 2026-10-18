@@ -14,17 +14,17 @@ SRWLOCK g_lock = SRWLOCK_INIT;
 
 constexpr ULONGLONG kMaxLogSizeBytes = 1ull << 20;
 
-std::string BuildLogDirectory() {
-    char localAppData[32768] = {};
-    const DWORD length = GetEnvironmentVariableA("LOCALAPPDATA", localAppData, static_cast<DWORD>(sizeof(localAppData)));
-    if (length == 0 || length >= sizeof(localAppData)) {
+std::wstring BuildLogDirectory() {
+    std::wstring directory(32768, L'\0');
+    const DWORD length = GetEnvironmentVariableW(L"LOCALAPPDATA", directory.data(), static_cast<DWORD>(directory.size()));
+    if (length == 0 || length >= directory.size()) {
         return {};
     }
 
-    std::string directory = localAppData;
-    directory += "\\RedLight";
+    directory.resize(length);
+    directory += L"\\RedLight";
 
-    if (!CreateDirectoryA(directory.c_str(), NULL)) {
+    if (!CreateDirectoryW(directory.c_str(), NULL)) {
         const DWORD error = GetLastError();
         if (error != ERROR_ALREADY_EXISTS) {
             return {};
@@ -34,14 +34,14 @@ std::string BuildLogDirectory() {
     return directory;
 }
 
-std::string BuildLogPath(const char* fileName) {
-    std::string directory = BuildLogDirectory();
+std::wstring BuildLogPath(const wchar_t* fileName) {
+    std::wstring directory = BuildLogDirectory();
     if (directory.empty()) {
         return {};
     }
 
-    directory += "\\";
-    directory += fileName ? fileName : "";
+    directory += L"\\";
+    directory += fileName ? fileName : L"";
     return directory;
 }
 
@@ -61,18 +61,18 @@ std::string BuildTimestamp() {
     return timestamp;
 }
 
-void WriteDebugFailure(const char* action, const std::string& path, DWORD error) {
+void WriteDebugFailure(const char* action, const std::wstring& path, DWORD error) {
     char buffer[512] = {};
-    std::snprintf(buffer, sizeof(buffer), "RedLight: diagnostics %s failed for %s (error %lu)\n",
+    std::snprintf(buffer, sizeof(buffer), "RedLight: diagnostics %s failed for %ls (error %lu)\n",
         action ? action : "operation",
         path.c_str(),
         static_cast<unsigned long>(error));
     OutputDebugStringA(buffer);
 }
 
-bool IsLogTooLarge(const std::string& path) {
+bool IsLogTooLarge(const std::wstring& path) {
     WIN32_FILE_ATTRIBUTE_DATA data = {};
-    if (!GetFileAttributesExA(path.c_str(), GetFileExInfoStandard, &data)) {
+    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data)) {
         return false;
     }
 
@@ -81,8 +81,8 @@ bool IsLogTooLarge(const std::string& path) {
     return size > kMaxLogSizeBytes;
 }
 
-void BestEffortDeleteFile(const std::string& path) {
-    if (!DeleteFileA(path.c_str())) {
+void BestEffortDeleteFile(const std::wstring& path) {
+    if (!DeleteFileW(path.c_str())) {
         const DWORD error = GetLastError();
         if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) {
             WriteDebugFailure("delete", path, error);
@@ -90,29 +90,29 @@ void BestEffortDeleteFile(const std::string& path) {
     }
 }
 
-void BestEffortMoveFile(const std::string& from, const std::string& to) {
-    if (!MoveFileExA(from.c_str(), to.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+void BestEffortMoveFile(const std::wstring& from, const std::wstring& to) {
+    if (!MoveFileExW(from.c_str(), to.c_str(), MOVEFILE_REPLACE_EXISTING)) {
         const DWORD error = GetLastError();
         if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) {
             return;
         }
 
-        std::string path = from;
-        path += " -> ";
+        std::wstring path = from;
+        path += L" -> ";
         path += to;
         WriteDebugFailure("rename", path, error);
     }
 }
 
 void RotateLogsIfNeeded() {
-    const std::string logPath = BuildLogPath("redlight.log");
+    const std::wstring logPath = BuildLogPath(L"redlight.log");
     if (logPath.empty() || !IsLogTooLarge(logPath)) {
         return;
     }
 
-    const std::string log1Path = BuildLogPath("redlight.1.log");
-    const std::string log2Path = BuildLogPath("redlight.2.log");
-    const std::string log3Path = BuildLogPath("redlight.3.log");
+    const std::wstring log1Path = BuildLogPath(L"redlight.1.log");
+    const std::wstring log2Path = BuildLogPath(L"redlight.2.log");
+    const std::wstring log3Path = BuildLogPath(L"redlight.3.log");
     if (log1Path.empty() || log2Path.empty() || log3Path.empty()) {
         return;
     }
@@ -124,14 +124,14 @@ void RotateLogsIfNeeded() {
 }
 
 void OpenLogFile() {
-    const std::string path = BuildLogPath("redlight.log");
+    const std::wstring path = BuildLogPath(L"redlight.log");
     if (path.empty()) {
         return;
     }
 
     RotateLogsIfNeeded();
 
-    g_logFile = CreateFileA(
+    g_logFile = CreateFileW(
         path.c_str(),
         FILE_APPEND_DATA,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
@@ -159,13 +159,17 @@ void WriteLine(const char* message) {
 
     AcquireSRWLockExclusive(&g_lock);
     DWORD written = 0;
-    (void)WriteFile(g_logFile, line.c_str(), static_cast<DWORD>(line.size()), &written, NULL);
+    if (!WriteFile(g_logFile, line.c_str(), static_cast<DWORD>(line.size()), &written, NULL) || written != line.size()) {
+        OutputDebugStringA("RedLight: diagnostics write failed.\n");
+    }
     ReleaseSRWLockExclusive(&g_lock);
 }
 
 }  // namespace
 
 namespace Diagnostics {
+
+std::wstring LogDirectory() { return BuildLogDirectory(); }
 
 void Initialize() {
     if (g_initialized) {
@@ -211,8 +215,8 @@ void Shutdown() {
 
     if (g_logFile != INVALID_HANDLE_VALUE) {
         AcquireSRWLockExclusive(&g_lock);
-        (void)FlushFileBuffers(g_logFile);
-        (void)CloseHandle(g_logFile);
+        if (!FlushFileBuffers(g_logFile)) OutputDebugStringA("RedLight: diagnostics flush failed.\n");
+        if (!CloseHandle(g_logFile)) OutputDebugStringA("RedLight: diagnostics close failed.\n");
         g_logFile = INVALID_HANDLE_VALUE;
         ReleaseSRWLockExclusive(&g_lock);
     }

@@ -68,13 +68,15 @@ bool MagnificationFilter::initialize() {
         return false;
     }
 
+    initialized_ = true;
     MAGCOLOREFFECT capturedEffect = {};
     if (MagGetFullscreenColorEffect(&capturedEffect)) {
         restoreEffect_ = capturedEffect;
     } else {
         LogError("MagGetFullscreenColorEffect", GetLastError());
-        restoreEffect_ = kIdentityEffect;
-        Diagnostics::Log("MagnificationFilter: using identity restore matrix because the previous full-screen color effect could not be captured.");
+        Diagnostics::Log("MagnificationFilter: refusing to enable without a saved restore matrix.");
+        shutdown();
+        return false;
     }
 
     initialized_ = true;
@@ -93,6 +95,14 @@ bool MagnificationFilter::enable() {
     if (active_) {
         return true;
     }
+
+    // Capture immediately before each activation, not just at application startup.
+    MAGCOLOREFFECT currentEffect = {};
+    if (!MagGetFullscreenColorEffect(&currentEffect)) {
+        LogError("capture before enable", GetLastError());
+        return false;
+    }
+    restoreEffect_ = currentEffect;
 
     char action[128];
     sprintf_s(action, sizeof(action), "MagSetFullscreenColorEffect(%s)", RedModeDisplayName(redMode_));
@@ -128,7 +138,15 @@ bool MagnificationFilter::isActive() const {
     return active_;
 }
 
+bool MagnificationFilter::needsRestore() const { return active_; }
+
+const char* MagnificationFilter::lastError() const { return lastError_; }
+
 bool MagnificationFilter::setRedMode(RedMode mode) {
+    if (!supportsRedMode(mode)) {
+        LogError("unsupported red mode", ERROR_INVALID_PARAMETER);
+        return false;
+    }
     if (mode == redMode_) {
         return true;
     }
@@ -154,27 +172,21 @@ bool MagnificationFilter::supportsRedMode(RedMode mode) const {
     return mode == RedMode::StrictRed || mode == RedMode::LumaRed;
 }
 
-void MagnificationFilter::shutdown() {
+bool MagnificationFilter::shutdown() {
     if (!initialized_) {
-        return;
+        return true;
     }
-
-    if (active_) {
-        Diagnostics::LogFormat("%s shutdown restore attempt.", kFilterName);
-        if (!SetColorEffect(restoreEffect_, "shutdown restore")) {
-            Diagnostics::Log("MagnificationFilter: shutdown restore failed; display state may not have been restored.");
-        } else {
-            active_ = false;
-        }
+    if (active_ && !disable()) {
+        Diagnostics::Log("MagnificationFilter: restore failed; retaining recovery state.");
+        return false;
     }
-
     if (!MagUninitialize()) {
         LogError("MagUninitialize", GetLastError());
-    } else {
-        Diagnostics::LogFormat("%s shutdown completed.", kFilterName);
+        return false;
     }
-
     initialized_ = false;
+    Diagnostics::LogFormat("%s shutdown completed.", kFilterName);
+    return true;
 }
 
 const char* MagnificationFilter::name() const {
