@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Define optional daily scheduling behavior before implementation: future-only activation, explicit consent, manual override, skipped missed events, clock/DST rules, and restoration/countdown priority. Production scheduling remains unimplemented pending isolated policy and native integration review.
 - Add optional Magnification activation-only red fade-in (Off/5s/15s/30s/1m), with next-activation tray controls, schema-5 persistence/profiles and older-schema Off defaults, cached current/target progress, and an independent checked timer. Every step preserves red-only/black safety and the original snapshot; restoration and manual brightness remain immediate. Failed steps/startup/completion attempt original restoration, failed timer cleanup stays owned, and cached verification attention stops automatic writes without changing output. Gamma retains a future preference only. Native/manual qualification remains pending.
 - Define the planned optional red-only activation fade-in, immediate restoration/cancellation rules, timing/ownership boundaries, and required isolated/manual validation before production integration.
 - Add a structured display/backend bug-report form requesting versions, selected mode/backend/brightness, monitor/GPU/color-tool details, recovery observations, and optional support reports/logs, with unavailable-data and redaction guidance.

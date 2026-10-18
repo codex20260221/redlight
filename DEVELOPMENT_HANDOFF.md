@@ -1,10 +1,10 @@
 # Issue-driven development checkpoint — 2026-10-18
 
-The user resumed the issue-driven goal from clean local commit `693d204`. Brightness is committed as `7ced3fe`, optional startup as `b12065a`, the local issue form as `0e24d03`, transition design as `2992d5b`, and fade coordination as `d382181`. This checkpoint integrates native activation-only fade controls, schema-5 preferences/profiles, current/target reporting, checked timer routing, and cancellation/recovery on `release/0.6.0-rc1`. Continue autonomously through the roadmap until externally interrupted; no unfinished implementation remains at this checkpoint.
+The user resumed the issue-driven goal from clean local commit `693d204`. Brightness is committed as `7ced3fe`, optional startup as `b12065a`, the local issue form as `0e24d03`, transition design as `2992d5b`, and fade coordination as `d382181`. Fade integration is committed as `28ea461`. This checkpoint defines the optional daily schedule contract before an isolated policy prototype on `release/0.6.0-rc1`. Continue autonomously through the roadmap until externally interrupted; no unfinished implementation remains at this checkpoint.
 
 ## New issue-driven direction
 
-Read the actual open GitHub issue descriptions and every available comment, then compared them with local code; issues #1 and #17 were rechecked during implementation. [Issue roadmap](docs/issue-roadmap.md) records priorities, dependencies, and implemented-versus-missing status. Do not resume the old series of specialized diagnostics. Issue #3 is now implemented locally with explicit red-only semantics and immediate restoration. Next define scheduling semantics before any implementation; the actual issue comment requests more real-world backend experience first. Per-monitor work remains isolated research only.
+Read the actual open GitHub issue descriptions and every available comment, then compared them with local code; issues #1 and #17 were rechecked during implementation. [Issue roadmap](docs/issue-roadmap.md) records priorities, dependencies, and implemented-versus-missing status. Do not resume the old series of specialized diagnostics. Issue #3 is now implemented locally with explicit red-only semantics and immediate restoration. The [daily scheduling contract](docs/scheduling-design.md) now defines manual override, future-only startup/wake, missed/busy events, clock/DST continuity, and restoration priority. The actual issue comment requests more real-world backend experience first; production schedules remain unimplemented. Per-monitor work remains isolated research only.
 
 Issue #27 is addressed locally with four bright monochrome tray symbols (off ring, Strict filled circle, Luma diamond, recovery/unconfirmed triangle), complete shared resource loading, cached state selection, fake-API regressions, and reproducible original pixel assets. Existing tray callbacks, identity, tooltip, menu/shortcuts, recovery priorities, and restore-before-retry behavior remain intact. Native Explorer/DPI/theme/filtered-display acceptance is pending.
 
@@ -57,7 +57,8 @@ The focused audit is committed as `4a1dd71`. The detailed state table, ownership
 | `0e24d03` | Issue #16 local structured display/backend report form; static-only review, no publication |
 | `2992d5b` | Initial issue #3 activation-only red fade-in contract defined before code |
 | `d382181` | Isolated fade progress/backend/cache coordination and checked independent timer periods |
-| This checkpoint | Integrated activation-only fade UI/preferences/profiles/timers, immediate restoration/cancellation, and migration/failure regressions |
+| `28ea461` | Integrated activation-only fade UI/preferences/profiles/timers, immediate restoration/cancellation, and migration/failure regressions |
+| This checkpoint | Daily scheduling contract, Windows time/message source review, and isolated-policy integration boundaries |
 
 All commits are local. Each feature's evidence and unexecuted manual notes are recorded in [release validation](docs/release-validation.md#expert-feature-follow-up-validation).
 
@@ -68,7 +69,7 @@ All commits are local. Each feature's evidence and unexecuted manual notes are r
 - `tools/Test-TrayIcons.ps1` verifies four deterministic original monochrome resources at seven sizes, distinct shapes, transparency, bounded file layout, and Strict/Luma endpoint contrast. The off-screen asset contact sheet was inspected without launching RedLight.
 - Both test executables passed the KERNEL32-only import gate before execution. RedLight itself was never executed.
 - Static release checks passed: seven reviewed Windows DLLs, x64 GUI executable, ASLR/DEP, version/prerelease metadata, embedded `asInvoker` manifest, and SHA-256.
-- The portable ZIP contains 13 files matching the current binary/documentation, including the issue roadmap and transition design. Release/package metadata is refreshed after checkpoint commits as part of closeout.
+- The portable ZIP contains 14 files matching the current binary/documentation, including the issue roadmap and transition/scheduling designs. Release/package metadata is refreshed after checkpoint commits as part of closeout.
 - Local artifact: `build/packages/RedLight-0.6.0-rc.1-windows-x64.zip`, with SHA-256 sidecars. Generated build artifacts are ignored by Git. This root handoff is internal and excluded by the existing package install rules.
 
 Use the existing build trees when resuming:
@@ -91,7 +92,7 @@ cpack --config build/CPackConfig.cmake -C Release -B build/packages
 
 Start with `git status --short` and this handoff. The worktree should be clean. There is no unfinished fix, active build, or required implementation follow-up from this checkpoint. Manual/native qualification remains unauthorized unless the user changes that restriction.
 
-The [activation-only fade-in contract](docs/transition-design.md) is integrated. An optional async question offered activation-only (recommended) versus also fading later brightness edits; after a reasonable unanswered interval the agent stated activation-only. Incorporate later steering. Native message/timer/UI behavior remains compiled/static-only; isolated tests use real backend/control code against fake APIs. Next revisit issue #4 and its comment, define manual override, sleep/resume, wall-clock/DST/missed-trigger, startup-off, and countdown/recovery precedence before code. Its maintainer explicitly asks for more real-world backend testing; do not claim that requirement has been met by isolated tests. Research/prototypes can proceed without enabling automatic display activation or claiming hardware support.
+The [activation-only fade-in contract](docs/transition-design.md) is integrated. An optional async question offered activation-only (recommended) versus also fading later brightness edits; after a reasonable unanswered interval the agent stated activation-only. Incorporate later steering. Native message/timer/UI behavior remains compiled/static-only; isolated tests use real backend/control code against fake APIs. Issue #4 and its comment were re-read. The [daily contract](docs/scheduling-design.md) is defined; an optional startup/wake question was unanswered after a reasonable interval, so use future boundaries without catch-up unless later steering arrives. Next implement an isolated supplied-time boundary/consumption policy only, keeping it out of the application build/dispatch. Production integration needs checked time conversion/discontinuity handling, native timer and control/session readiness, explicit schedule consent, and a consistent full-preferences IPC design (the schema-5 scalar has only one free payload bit). The maintainer explicitly asks for more real-world backend testing; do not claim isolated tests meet that request. Research/prototypes can proceed without enabling automatic display activation or claiming hardware support.
 
 Preserve these integration boundaries:
 
