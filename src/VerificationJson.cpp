@@ -53,8 +53,8 @@ std::optional<std::string_view> FormatVerificationJson(const VerificationJsonSna
         if (written < 0 || static_cast<std::size_t>(written) >= output.size() - length) return false;
         length += static_cast<std::size_t>(written); return true;
     };
-    if (!append("{\"protocol\":1,\"status\":\"verification\",\"backend\":\"%s\",\"scope\":\"last-explicit-check\",\"verification\":\"%s\","
-        "\"age_seconds\":%s,\"duration_ms\":%s,\"read_error\":%u,\"readback\":", snapshot.gammaBackend ? "gamma" : "magnification",
+    if (!append("{\"protocol\":%u,\"status\":\"verification\",\"backend\":\"%s\",\"scope\":\"last-explicit-check\",\"verification\":\"%s\","
+        "\"age_seconds\":%s,\"duration_ms\":%s,\"read_error\":%u,\"readback\":", VerificationJsonProtocolVersion, snapshot.gammaBackend ? "gamma" : "magnification",
         states[static_cast<unsigned>(snapshot.report.state)], age, duration, snapshot.report.errorCode)) return std::nullopt;
     if (snapshot.report.readback) {
         const auto& detail = *snapshot.report.readback;

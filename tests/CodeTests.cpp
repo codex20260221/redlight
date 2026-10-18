@@ -2823,7 +2823,7 @@ void BuildInfoJsonAndIsolation() {
     const auto& text = fake.stdoutText;
     Check(text.starts_with("{\"protocol\":1,\"product\":\"RedLight\",\"version\":\"0.6.0-rc.1\"") &&
         text.find("\"build_revision\":\"0123456789ab\",\"source_state\":\"clean\",\"platform\":\"windows-x64\"") != std::string::npos &&
-        text.ends_with("\"profile_schema\":3,\"status_protocol\":1,\"current_settings_protocol\":1,\"profile_input_schemas\":[1,2,3],"
+        text.ends_with("\"profile_schema\":3,\"status_protocol\":1,\"current_settings_protocol\":1,\"restoration_history_protocol\":1,\"verification_protocol\":1,\"profile_input_schemas\":[1,2,3],"
             "\"limits\":{\"profile_bytes\":4096,\"session_minutes\":240}}\n"), "build info carries complete identity, supported protocols/schemas, and authoritative limits");
     Check(fake.magInitializes == 0 && fake.dcRequests == 0 && fake.magReads == 0 && fake.gammaReads == 0 &&
         fake.magWrites == 0 && fake.gammaWrites == 0 && fake.mutexCreates == 0 && fake.statusSends == 0 && fake.profileOpens == 0 &&
@@ -2923,12 +2923,25 @@ void BuildInfoCapabilitiesPreserveRecovery() {
         TestMemory::FailNextAllocation fail;
         result = WriteBuildInfo("v", "r", "s"); unused = TestMemory::AllocationFailurePending();
     }
-    Check(result == 0 && unused && fake.stdoutText.find("\"current_settings_protocol\":1") != std::string::npos &&
+    Check(result == 0 && unused && fake.stdoutText.find("\"current_settings_protocol\":1,\"restoration_history_protocol\":1,\"verification_protocol\":1") != std::string::npos &&
         filter.needsRestore() && !filter.isActive() && fake.mutexOwned && filter.statistics() == statistics && error == filter.lastError() &&
         fake.gammaReads == reads && fake.gammaWrites == writes && fake.mutexReleases == releases && fake.backendClockReads == clocks &&
         fake.registryReads == 0 && fake.registryWrites == 0 && fake.profileOpens == 0 && fake.instanceCreates == 0 && fake.statusSends == 0 &&
         fake.metricReads == 0 && fake.clipOpens == 0, "complete capability discovery is allocation-free and cannot inspect or disturb pending display recovery");
     Check(filter.disable(), "original gamma calibration remains recoverable after build capability discovery");
+}
+void BuildInfoClipboardProtocolsAgreeWithExports() {
+    char historyText[RestorationHistoryJsonBufferSize], verificationText[VerificationJsonBufferSize], fields[128], prefix[32];
+    const auto history = FormatRestorationHistoryJson(RestorationHistory{}, 0, historyText);
+    const auto verification = FormatVerificationJson(VerificationJsonSnapshot{}, verificationText);
+    std::snprintf(prefix, sizeof(prefix), "{\"protocol\":%u,", RestorationHistoryJsonProtocolVersion);
+    Check(history && history->starts_with(prefix), "restoration export uses its advertised shared schema version");
+    std::snprintf(prefix, sizeof(prefix), "{\"protocol\":%u,", VerificationJsonProtocolVersion);
+    Check(verification && verification->starts_with(prefix), "verification export uses its advertised shared schema version");
+    std::snprintf(fields, sizeof(fields), "\"restoration_history_protocol\":%u,\"verification_protocol\":%u,", RestorationHistoryJsonProtocolVersion, VerificationJsonProtocolVersion);
+    Check(WriteBuildInfo("version", "revision", "archive") == 0 && fake.stdoutText.find(fields) != std::string::npos &&
+        fake.stdoutText.find(fields) == fake.stdoutText.rfind(fields) && fake.magReads == 0 && fake.gammaReads == 0 && fake.clipOpens == 0 &&
+        fake.instanceCreates == 0 && fake.statusSends == 0 && fake.registryReads == 0, "discovery names both clipboard-only schemas exactly once without obtaining a tray/export snapshot or clipboard");
 }
 void BuildInfoArguments() {
     const std::wstring_view args[] = {L"--build-info"};
@@ -6055,6 +6068,7 @@ int main() {
         {"Build metadata without C++ allocation", BuildInfoNoCppAllocation}, {"Build metadata output failures", BuildInfoOutputFailures},
         {"Build metadata accepted schemas match parser", BuildInfoSupportedSchemasMatchParser}, {"Build metadata shared profile/session limits", BuildInfoProfileAndSessionLimitsAgree},
         {"Build metadata capabilities preserve recovery", BuildInfoCapabilitiesPreserveRecovery},
+        {"Build metadata clipboard protocols match exports", BuildInfoClipboardProtocolsAgreeWithExports},
         {"Build metadata arguments", BuildInfoArguments},
         {"Verification timing outcomes and precision", VerificationTimingStatesAndPrecision}, {"Verification timing wrap/invalidation", VerificationTimingWrapAndInvalidation},
         {"Verification repeated selections retain attention", VerificationRepeatedSelectionsRetainAttention}, {"Verification Strict preferred preset edits", VerificationStrictPresetEditsPreserveCheck},

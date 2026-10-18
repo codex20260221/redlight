@@ -5,6 +5,8 @@
 #include "StandardOutput.h"
 #include "StatusQuery.h"
 #include "PreferencesQuery.h"
+#include "RestorationHistoryJson.h"
+#include "VerificationJson.h"
 #include <cstdio>
 #include <span>
 #include <charconv>
@@ -42,12 +44,14 @@ int WriteBuildInfo(std::string_view version, std::string_view revision, std::str
     const int length = std::snprintf(output, sizeof(output),
         "{\"protocol\":%u,\"product\":\"RedLight\",\"version\":%.*s,\"build_revision\":%.*s,\"source_state\":%.*s,"
         "\"platform\":\"windows-x64\",\"profile_schema\":%u,\"status_protocol\":%u,\"current_settings_protocol\":%u,"
+        "\"restoration_history_protocol\":%u,\"verification_protocol\":%u,"
         "\"profile_input_schemas\":%.*s,\"limits\":{\"profile_bytes\":%zu,\"session_minutes\":%u}}\n",
         BuildMetadataProtocolVersion,
         static_cast<int>(quotedVersion->size()), quotedVersion->data(),
         static_cast<int>(quotedRevision->size()), quotedRevision->data(),
         static_cast<int>(quotedSource->size()), quotedSource->data(),
         PreferencesProfileVersion, REDLIGHT_STATUS_PROTOCOL, REDLIGHT_PREFERENCES_PROTOCOL,
+        RestorationHistoryJsonProtocolVersion, VerificationJsonProtocolVersion,
         static_cast<int>(inputSchemas->size()), inputSchemas->data(), PreferencesProfileMaxBytes, SessionTimer::maxMinutes);
     if (length < 0 || static_cast<std::size_t>(length) >= sizeof(output)) {
         Diagnostics::Log("Build metadata exceeded its output buffer; no output was written.");

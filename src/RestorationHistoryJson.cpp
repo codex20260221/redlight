@@ -19,8 +19,8 @@ std::optional<std::string_view> FormatRestorationHistoryJson(const RestorationHi
         length += static_cast<std::size_t>(written);
         return true;
     };
-    if (!append("{\"protocol\":1,\"status\":\"restoration-history\",\"order\":\"newest-completed-first\",\"retained\":%zu,\"capacity\":%zu,"
-        "\"overwritten\":%llu,\"requests_in_progress\":%u,\"events\":[", history.size(), history.capacity,
+    if (!append("{\"protocol\":%u,\"status\":\"restoration-history\",\"order\":\"newest-completed-first\",\"retained\":%zu,\"capacity\":%zu,"
+        "\"overwritten\":%llu,\"requests_in_progress\":%u,\"events\":[", RestorationHistoryJsonProtocolVersion, history.size(), history.capacity,
         static_cast<unsigned long long>(history.overwritten()), history.inProgress())) return std::nullopt;
     for (std::size_t index = 0; index < history.size(); ++index) {
         const auto* event = history.newest(index);
