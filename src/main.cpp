@@ -38,6 +38,7 @@
 #include "RecentDiagnosticsClipboard.h"
 #include "TrayCommand.h"
 #include "PreferencesClipboard.h"
+#include "PreferencesQuery.h"
 #include "StandardOutput.h"
 #include <cstdio>
 #include <optional>
@@ -117,6 +118,7 @@ void SetRedModeFromTray(RedMode mode);
 void ShowAboutDialog(HWND parent);
 void CopySupportReport(HWND owner);
 TrayStatus CaptureCachedTrayStatus();
+CurrentPreferencesSnapshot CaptureCurrentPreferencesSnapshot() noexcept;
 void CopyStatusJson(HWND owner);
 void CopySettingsProfile(HWND owner);
 void ImportSettingsProfile(HWND owner);
@@ -160,6 +162,11 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
     }
     if (action == StartupAction::Settings) {
         const int result = QuerySavedSettings();
+        Diagnostics::Shutdown();
+        return result;
+    }
+    if (action == StartupAction::CurrentSettings) {
+        const int result = QueryRunningPreferences();
         Diagnostics::Shutdown();
         return result;
     }
@@ -893,6 +900,10 @@ void SetRedModeFromTray(RedMode mode) {
     RefreshTrayIconTip();
 }
 
+CurrentPreferencesSnapshot CaptureCurrentPreferencesSnapshot() noexcept {
+    return {g_preferences, g_preferencesUnsaved, g_busy || g_preferencesApplying || g_pendingRestore,
+        g_startupPreferenceSource, g_startupPreferenceWarning};
+}
 TrayStatus CaptureCachedTrayStatus() {
     TrayStatus state;
     state.backendActive = g_displayFilter->isActive();
@@ -1193,7 +1204,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
     return GuardUiCall<LRESULT>([&] { return HandleWindowMessage(hwnd, uMsg, wParam, lParam); },
         [&](const char* error) -> LRESULT {
             Diagnostics::LogFormat("C++ failure in window message %u: %s", uMsg, error);
-            if (uMsg == WM_REDLIGHT_STATUS) return 0; // Read-only automation never restores or opens an error dialog.
+            if (IsReadOnlyTrayQueryMessage(uMsg)) return 0; // Read-only automation never restores or opens an error dialog.
             const bool mayChangeFilter = uMsg == WM_COMMAND ? CommandMayChangeFilter(LOWORD(wParam), g_displayFilter->supportsRedMode(RedMode::LumaRed)) :
                 (uMsg == WM_REDLIGHT_UI_ERROR ? wParam != 0 : uMsg != WM_TRAYICON);
             const auto recovery = RecoveryAfterUiFailure(mayChangeFilter, g_pendingRestore, g_busy);
@@ -1224,6 +1235,12 @@ LRESULT HandleWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         return 0;
     }
     switch (uMsg) {
+    case WM_REDLIGHT_PREFERENCES: {
+        if (wParam != REDLIGHT_PREFERENCES_PROTOCOL || lParam != 0) return 0;
+        const auto reply = PackCurrentPreferences(CaptureCurrentPreferencesSnapshot());
+        if (!reply) Diagnostics::Log("Cached preference snapshot is invalid; refusing to report it as valid.");
+        return reply ? static_cast<LRESULT>(*reply) : 0;
+    }
     case WM_REDLIGHT_STATUS: {
         if (wParam != REDLIGHT_STATUS_PROTOCOL || lParam != 0) return 0;
         const auto reply = PackTrayStatus(CaptureCachedTrayStatus());
@@ -1344,9 +1361,7 @@ LRESULT HandleWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         case ID_TRAY_VERIFY_BACKEND: VerifyBackendState(hwnd); break;
         case ID_TRAY_COPY_PROFILE: CopySettingsProfile(hwnd); break;
         case ID_TRAY_COPY_PREFERENCES_JSON: {
-            const CurrentPreferencesSnapshot snapshot{g_preferences, g_preferencesUnsaved, g_busy || g_preferencesApplying || g_pendingRestore,
-                g_startupPreferenceSource, g_startupPreferenceWarning};
-            if (!CopyCurrentPreferencesJsonToClipboard(hwnd, snapshot)) ReportError("The current preference JSON could not be copied. Please retry.");
+            if (!CopyCurrentPreferencesJsonToClipboard(hwnd, CaptureCurrentPreferencesSnapshot())) ReportError("The current preference JSON could not be copied. Please retry.");
             else {
                 Diagnostics::Log("Current in-memory preference JSON copied at user request.");
                 ShowTrayInfo("RedLight preference JSON copied", "Paste for inspection or scripts. Use the settings profile text for importing.");

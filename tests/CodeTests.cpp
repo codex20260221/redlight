@@ -18,6 +18,7 @@
 #include "UiSafety.h"
 #include "TrayStatus.h"
 #include "StatusQuery.h"
+#include "PreferencesQuery.h"
 #include "StandardOutput.h"
 #include "StartupOptions.h"
 #include "ProfileValidation.h"
@@ -1286,6 +1287,136 @@ void StatusQueryFailures() {
         Check(QueryRunningStatus() == 1 && fake.stdoutText.empty(), "response allocation failure is contained before any partial output");
     }
     Check(fake.magWrites == 0 && fake.gammaWrites == 0 && fake.magInitializes == 0, "query failures never change or initialize display state");
+}
+void CurrentPreferencesPacketRoundTrip() {
+    for (const auto mode : {RedMode::StrictRed, RedMode::LumaRed})
+        for (unsigned luma = 0; luma < 3; ++luma)
+            for (unsigned backend = 0; backend < 3; ++backend)
+                for (unsigned shortcut = 0; shortcut < 4; ++shortcut)
+                    for (const auto warning : ExpiryWarningOptions)
+                        for (unsigned source = 0; source < 3; ++source)
+                            for (unsigned flags = 0; flags < 8; ++flags) {
+                                const CurrentPreferencesSnapshot value{{mode, static_cast<LumaProfile>(luma), static_cast<BackendPreference>(backend),
+                                    (flags * 31 + luma * 3 + backend + source * 7) % 241, static_cast<ShortcutProfile>(shortcut), warning},
+                                    (flags & 1) != 0, (flags & 2) != 0, static_cast<PreferenceSource>(source), (flags & 4) != 0};
+                                const auto packet = PackCurrentPreferences(value);
+                                Check(packet && *packet <= static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)()) &&
+                                    UnpackCurrentPreferences(*packet) == value, "preference fields/flags round-trip through one positive x64 scalar reply");
+                            }
+    for (unsigned minutes = 0; minutes <= 240; ++minutes) {
+        CurrentPreferencesSnapshot value; value.preferences.sessionMinutes = minutes;
+        Check(UnpackCurrentPreferences(*PackCurrentPreferences(value)) == value, "every supported whole-minute value survives packet encoding");
+    }
+}
+void CurrentPreferencesPacketRejectsInvalidFields() {
+    for (unsigned field = 0; field < 7; ++field) {
+        CurrentPreferencesSnapshot value;
+        switch (field) {
+        case 0: value.preferences.mode = static_cast<RedMode>(99); break;
+        case 1: value.preferences.luma = static_cast<LumaProfile>(99); break;
+        case 2: value.preferences.backend = static_cast<BackendPreference>(99); break;
+        case 3: value.preferences.sessionMinutes = 241; break;
+        case 4: value.preferences.shortcuts = static_cast<ShortcutProfile>(99); break;
+        case 5: value.preferences.expiryWarning = static_cast<ExpiryWarning>(99); break;
+        default: value.startupSource = static_cast<PreferenceSource>(99); break;
+        }
+        Check(!PackCurrentPreferences(value), "invalid cached values cannot be silently masked into a valid packet");
+    }
+    const auto valid = *PackCurrentPreferences({});
+    Check(!UnpackCurrentPreferences((valid & ~(3ull << 1)) | (3ull << 1)) &&
+        !UnpackCurrentPreferences((valid & ~(3ull << 3)) | (3ull << 3)) &&
+        !UnpackCurrentPreferences((valid & ~(255ull << 5)) | (241ull << 5)) &&
+        !UnpackCurrentPreferences((valid & ~(511ull << 15)) | (1ull << 15)) &&
+        !UnpackCurrentPreferences((valid & ~(3ull << 26)) | (3ull << 26)), "invalid encoded presets/backends/minutes/warnings/source are refused on decode too");
+}
+void CurrentPreferencesPacketFamilySchemaAndReservedBits() {
+    const auto packet = *PackCurrentPreferences({});
+    Check(!UnpackCurrentPreferences(0) && !UnpackCurrentPreferences(packet ^ (1ull << 48)) &&
+        !UnpackCurrentPreferences(*PackTrayStatus({})) && !UnpackTrayStatus(packet), "status and preference packet families cannot be confused");
+    for (unsigned bit = 37; bit < 48; ++bit) Check(!UnpackCurrentPreferences(packet | (1ull << bit)), "every unused preference payload bit must be zero");
+    for (const unsigned schema : {0u, 2u, 4u, 255u})
+        Check(!UnpackCurrentPreferences((packet & ~(255ull << 29)) | (static_cast<std::uint64_t>(schema) << 29)), "incompatible canonical schema cannot be presented as this binary's complete preferences");
+}
+void CurrentPreferencesQueryExistingAndMissing() {
+    const CurrentPreferencesSnapshot snapshot{{RedMode::LumaRed, LumaProfile::GreenDetail, BackendPreference::Magnification, 17,
+        ShortcutProfile::F10, ExpiryWarning::OneMinute}, true, true, PreferenceSource::LegacyValues, true};
+    fake.statusReply = *PackCurrentPreferences(snapshot); fake.stdoutChunk = 7; fake.registryRead = false;
+    char output[CurrentPreferencesJsonBufferSize];
+    const auto expected = FormatCurrentPreferencesJson(snapshot, output);
+    Check(expected && QueryRunningPreferences() == 0 && fake.stdoutText == *expected && fake.statusSends == 1 &&
+        fake.statusMessageId == WM_REDLIGHT_PREFERENCES && fake.statusWparam == REDLIGHT_PREFERENCES_PROTOCOL && fake.statusLparam == 0 &&
+        fake.statusTimeout == 3000 && fake.statusFlags == (SMTO_ABORTIFHUNG | SMTO_BLOCK),
+        "one bounded scalar request returns the complete cached JSON through partial writes with no saved-settings fallback");
+    Check(fake.magInitializes == 0 && fake.dcRequests == 0 && fake.registryReads == 0 && fake.registryWrites == 0 && fake.clipOpens == 0 &&
+        fake.instanceCreates == 0 && fake.metricReads == 0 && fake.hotkeyRegisters == 0 && fake.sessionRegisters == 0,
+        "current preference queries do not create an owner, read storage/backends, copy a clipboard, or register controls");
+    Reset(); fake.trayExists = false;
+    Check(QueryRunningPreferences() == 3 && fake.statusSends == 0 && fake.stdoutText ==
+        "{\"protocol\":1,\"status\":\"not-running\",\"preferences\":null}\n", "absent tray produces a distinct noninteractive result without starting one");
+}
+void CurrentPreferencesQueryFailuresAndOutput() {
+    fake.statusMessage = false; fake.statusReply = *PackCurrentPreferences({});
+    Check(QueryRunningPreferences() == 1 && fake.stdoutText.find("\"status\":\"query-failed\"") != std::string::npos,
+        "transport failure cannot accept an otherwise valid cached reply or start a fallback instance");
+    for (const auto reply : {0ull, 1ull, *PackTrayStatus({}), *PackCurrentPreferences({}) | (1ull << 47)}) {
+        Reset(); fake.statusReply = reply;
+        Check(QueryRunningPreferences() == 1 && fake.stdoutText.find("\"status\":\"invalid-response\"") != std::string::npos &&
+            fake.stdoutText.find("\"preferences\":null") != std::string::npos, "unsupported/malformed responses expose no invented preferences");
+    }
+    Reset(); fake.statusReply = *PackCurrentPreferences({}); fake.stdoutChunk = 5; fake.stdoutFailOnCall = 2;
+    Check(QueryRunningPreferences() == 1 && fake.stdoutText.size() == 5, "partial JSON output reports failure for callers to discard");
+    Reset(); fake.trayExists = false; fake.stdoutWrite = false;
+    Check(QueryRunningPreferences() == 1, "not-running still requires successful output");
+    Reset(); fake.statusReply = *PackCurrentPreferences({}); fake.stdoutValid = false; fake.consoleAttach = false;
+    Check(QueryRunningPreferences() == 1 && fake.stdoutText.empty() && fake.instanceCreates == 0 && fake.registryReads == 0,
+        "missing output remains a contained noninteractive failure without storage/instance work");
+}
+void CurrentPreferencesQueryNoAllocationAndReadOnlyPolicy() {
+    fake.statusReply = *PackCurrentPreferences({}); fake.stdoutText.reserve(1024);
+    int result = 1;
+    bool unused = false;
+    {
+        TestMemory::FailNextAllocation fail;
+        result = QueryRunningPreferences();
+        unused = TestMemory::AllocationFailurePending();
+    }
+    Check(result == 0 && unused && IsReadOnlyTrayQueryMessage(WM_REDLIGHT_PREFERENCES) && IsReadOnlyTrayQueryMessage(WM_REDLIGHT_STATUS) &&
+        !IsReadOnlyTrayQueryMessage(WM_COMMAND) && !IsReadOnlyTrayQueryMessage(WM_REDLIGHT_PREFERENCES + 1),
+        "prepared output allows allocation-free query formatting and both automation messages use the callback guard's read-only path");
+}
+void CurrentPreferencesQueryPreservesGammaRecovery() {
+    GammaRampFilter filter;
+    Check(filter.initialize(), "prepare gamma recovery");
+    fake.writes = {Write::FailAfterApply, Write::Fail};
+    Check(!filter.enable() && filter.needsRestore(), "retain partial rollback");
+    const auto reads = fake.gammaReads, writes = fake.gammaWrites, releases = fake.mutexReleases;
+    const auto statistics = filter.statistics();
+    const auto clocks = fake.backendClockReads;
+    const auto error = std::string(filter.lastError());
+    fake.statusReply = *PackCurrentPreferences({{RedMode::LumaRed, LumaProfile::EqualDetail, BackendPreference::Magnification, 31,
+        ShortcutProfile::F9, ExpiryWarning::FiveMinutes}, true, true, PreferenceSource::Defaults, true});
+    Check(QueryRunningPreferences() == 0 && fake.stdoutText.find("\"mode\":\"luma\"") != std::string::npos &&
+        filter.redMode() == RedMode::StrictRed && !filter.isActive() && filter.needsRestore() && fake.mutexOwned &&
+        error == filter.lastError() && fake.gammaReads == reads && fake.gammaWrites == writes && fake.mutexReleases == releases &&
+        fake.backendClockReads == clocks && filter.statistics() == statistics && fake.registryReads == 0 && fake.clipOpens == 0,
+        "current preference IPC uses its cached packet and never inspects/reapplies/restores pending gamma state");
+    Check(filter.disable(), "original gamma calibration remains recoverable after query");
+}
+void CurrentPreferencesQueryArguments() {
+    const std::wstring_view option[] = {L"--current-settings"};
+    Check(ParseStartupOptions(option).action == StartupAction::CurrentSettings && ParseStartupOptions(option).errorOutput == StartupErrorOutput::Json,
+        "current-settings is a distinct noninteractive action");
+    for (const auto value : {L"--current-settings=", L"--current-settings=extra", L"--current-settings-extra"}) {
+        const std::wstring_view args[] = {value};
+        Check(ParseStartupOptions(args).action == StartupAction::Invalid && ParseStartupOptions(args).errorOutput == StartupErrorOutput::Json,
+            "malformed current-setting requests stay in JSON error policy");
+    }
+    const std::wstring_view mixed[] = {L"--help-text", L"--current-settings"};
+    Check(ParseStartupOptions(mixed).action == StartupAction::Invalid && ParseStartupOptions(mixed).errorOutput == StartupErrorOutput::Json,
+        "conflicting machine actions use existing JSON error precedence");
+    fake.argumentsCount = 2; fake.arguments[1] = const_cast<LPWSTR>(L"--current-settings");
+    Check(GetStartupOptions().action == StartupAction::CurrentSettings && fake.argumentFrees == 1 && !fake.argumentsOutstanding,
+        "native argument ownership releases normally without tray/backend initialization");
 }
 void ExpiryWarningBoundariesAndDeadline() {
     SessionTimer timer;
@@ -4654,6 +4785,10 @@ int main() {
         {"Conservative status JSON", StatusJsonConservativeStates}, {"Standard output ownership", StandardOutputOwnership},
         {"Standard output failures", StandardOutputFailures}, {"Existing-instance status query", StatusQueryExistingInstanceOnly},
         {"Status query failures", StatusQueryFailures},
+        {"Current preferences packet round-trip", CurrentPreferencesPacketRoundTrip}, {"Current preferences invalid packet fields", CurrentPreferencesPacketRejectsInvalidFields},
+        {"Current preferences packet family/schema/reserved", CurrentPreferencesPacketFamilySchemaAndReservedBits}, {"Current preferences query existing/missing", CurrentPreferencesQueryExistingAndMissing},
+        {"Current preferences query/output failures", CurrentPreferencesQueryFailuresAndOutput}, {"Current preferences query allocation/read-only policy", CurrentPreferencesQueryNoAllocationAndReadOnlyPolicy},
+        {"Current preferences query retains gamma recovery", CurrentPreferencesQueryPreservesGammaRecovery}, {"Current preferences query arguments", CurrentPreferencesQueryArguments},
         {"Expiry warning deadline policy", ExpiryWarningBoundariesAndDeadline}, {"Expiry warning short sessions/clock", ExpiryWarningShortSessionsAndClockWrap},
         {"Expiry warning schema migration", ExpiryWarningSchemaMigrationAndValidation},
         {"Magnification operation counters", MagnificationStatisticsAndSafeReset}, {"Gamma operation counters", GammaStatisticsAndCleanupReset},

@@ -1,5 +1,7 @@
 #pragma once
 #include "CommandIds.h"
+#include "StatusQuery.h"
+#include "PreferencesQuery.h"
 #include <exception>
 
 class ScopedFlag {
@@ -38,6 +40,9 @@ inline bool CommandMayChangeFilter(unsigned command, bool supportsLuma = true) n
     }
 }
 enum class UiFailureRecovery { None, Restore, Defer };
+inline bool IsReadOnlyTrayQueryMessage(unsigned message) noexcept {
+    return message == WM_REDLIGHT_STATUS || message == WM_REDLIGHT_PREFERENCES;
+}
 inline UiFailureRecovery RecoveryAfterUiFailure(bool mayChangeFilter, bool restoreRequested, bool busy) noexcept {
     if (!mayChangeFilter && !restoreRequested) return UiFailureRecovery::None;
     return busy ? UiFailureRecovery::Defer : UiFailureRecovery::Restore;
