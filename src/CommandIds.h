@@ -28,6 +28,7 @@ inline constexpr unsigned ID_TRAY_ENABLE = 222; // Explicit intent from an alrea
 inline constexpr unsigned ID_TRAY_COPY_RECENT_DIAGNOSTICS = 223;
 inline constexpr unsigned ID_TRAY_CLEAR_RECENT_DIAGNOSTICS = 224;
 inline constexpr unsigned ID_TRAY_COPY_PREFERENCES_JSON = 225;
+inline constexpr unsigned ID_TRAY_COPY_RESTORATION_JSON = 226;
 inline constexpr unsigned ID_HOTKEY_TOGGLE = 1;
 inline constexpr unsigned ID_HOTKEY_RESTORE = 2;
 inline constexpr unsigned ID_TRAY_RETRY_TIMER = 1;

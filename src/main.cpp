@@ -8,6 +8,7 @@
 #include "BuildMetadata.h"
 #include "VerificationCache.h"
 #include "RestorationHistory.h"
+#include "RestorationHistoryClipboard.h"
 #include "SessionTimer.h"
 #include "CountdownTimerRegistration.h"
 #include "SessionControl.h"
@@ -1328,6 +1329,16 @@ LRESULT HandleWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         case ID_TRAY_ABOUT: ShowAboutDialog(hwnd); break;
         case ID_TRAY_COPY_REPORT: CopySupportReport(hwnd); break;
         case ID_TRAY_COPY_STATUS_JSON: CopyStatusJson(hwnd); break;
+        case ID_TRAY_COPY_RESTORATION_JSON: {
+            const auto snapshot = g_restorationHistory;
+            const auto now = GetTickCount64();
+            if (!CopyRestorationHistoryJsonToClipboard(hwnd, snapshot, now)) ReportError("Restoration-history JSON could not be copied. Please retry.");
+            else {
+                Diagnostics::Log("Restoration-history JSON copied at user request.");
+                ShowTrayInfo("RedLight restoration history copied", "Paste the JSON for inspection or scripts. Only completed request scopes are included.");
+            }
+            break;
+        }
         case ID_TRAY_COPY_RECENT_DIAGNOSTICS:
             if (!CopyRecentDiagnosticsToClipboard(hwnd)) {
                 ReportError("Recent diagnostics could not be copied. Retry when the clipboard is available.");

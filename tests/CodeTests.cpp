@@ -31,6 +31,7 @@
 #include "LoopShutdown.h"
 #include "TrayMenu.h"
 #include "StatusClipboard.h"
+#include "RestorationHistoryClipboard.h"
 #include "RecentDiagnostics.h"
 #include "RecentDiagnosticsClipboard.h"
 #include "TrayCommand.h"
@@ -4649,6 +4650,131 @@ void RestorationHistoryClearNoAllocationAndReadOnlyPolicy() {
     Check(cleared && allocationUnused && !CommandMayChangeFilter(ID_TRAY_CLEAR_RESTORATION_HISTORY) && fake.magWrites == 0 && fake.gammaWrites == 0,
         "clearing in-memory diagnostics allocates no C++ storage and has read-only display-failure policy");
 }
+void RestorationJsonEmptyGolden() {
+    RestorationHistory history; char output[RestorationHistoryJsonBufferSize];
+    constexpr std::string_view expected = "{\"protocol\":1,\"status\":\"restoration-history\",\"order\":\"newest-completed-first\",\"retained\":0,\"capacity\":8,\"overwritten\":0,\"requests_in_progress\":0,\"events\":[]}\n";
+    const auto text = FormatRestorationHistoryJson(history, 0, output);
+    Check(text == expected && output[expected.size()] == '\0' && history.size() == 0 && history.overwritten() == 0,
+        "empty history has an exact complete protocol envelope with no invented events");
+}
+void RestorationJsonReasonOutcomeTokens() {
+    constexpr const char* reasons[] = {"manual", "countdown", "timer-failure", "display-change", "power-transition", "session-transition", "explorer-restart",
+        "tray-failure", "external-request", "preferences", "exit", "callback-failure", "deferred-request"};
+    constexpr const char* outcomes[] = {"interrupted", "deferred", "already-clear", "restored", "failed"};
+    for (unsigned reason = 0; reason < std::size(reasons); ++reason) for (unsigned outcome = 0; outcome < std::size(outcomes); ++outcome) {
+        RestorationHistory history; history.record({static_cast<RestoreReason>(reason), static_cast<RestoreOutcome>(outcome), 1000, 0});
+        char output[RestorationHistoryJsonBufferSize], expected[256];
+        std::snprintf(expected, sizeof(expected), "\"events\":[{\"reason\":\"%s\",\"outcome\":\"%s\",\"age_seconds\":5,\"duration_ms\":0}]", reasons[reason], outcomes[outcome]);
+        const auto text = FormatRestorationHistoryJson(history, 6000, output);
+        Check(text && text->find(expected) != std::string_view::npos, "every reason/outcome uses canonical stable tokens and zero duration is numeric rather than null");
+    }
+}
+void RestorationJsonRingOrderAndSnapshot() {
+    RestorationHistory history;
+    for (std::uint64_t index = 0; index < 12; ++index) history.record({RestoreReason::Manual, RestoreOutcome::Restored, index * 1000, index});
+    const auto snapshot = history; char output[RestorationHistoryJsonBufferSize];
+    const auto text = FormatRestorationHistoryJson(snapshot, 12000, output);
+    Check(text && text->find("\"retained\":8,\"capacity\":8,\"overwritten\":4") != std::string_view::npos &&
+        text->find("\"duration_ms\":11") < text->find("\"duration_ms\":4") && text->find("\"duration_ms\":3}") == std::string_view::npos,
+        "bounded history exports newest completion first with retained/overwritten counts and no evicted events");
+    const std::string expected(*text);
+    Check(history.clear() && FormatRestorationHistoryJson(snapshot, 12000, output) == expected && snapshot.size() == 8 && snapshot.overwritten() == 4,
+        "a copied snapshot retains its event order/counts after the live history is cleared");
+}
+void RestorationJsonOpenNestedAndInterruptedScopes() {
+    RestorationHistory history; char output[RestorationHistoryJsonBufferSize];
+    {
+        RecordRestorationRequest outer(history, RestoreReason::Manual, 0);
+        auto text = FormatRestorationHistoryJson(history, 5000, output);
+        Check(text && text->find("\"requests_in_progress\":1,\"events\":[]") != std::string_view::npos,
+            "unfinished scopes are counted but never exported as completed events");
+        { RecordRestorationRequest nested(history, RestoreReason::DeferredRequest, 1000); nested.finish(RestoreOutcome::Deferred); }
+        text = FormatRestorationHistoryJson(history, 5000, output);
+        Check(text && text->find("\"requests_in_progress\":1") != std::string_view::npos && text->find("\"outcome\":\"deferred\",\"age_seconds\":4,\"duration_ms\":null") != std::string_view::npos,
+            "completed nested requests coexist with unfinished outer scope metadata and untimed null durations");
+        outer.finish(RestoreOutcome::Restored);
+    }
+    auto text = FormatRestorationHistoryJson(history, 5000, output);
+    constexpr std::string_view completed = "{\"protocol\":1,\"status\":\"restoration-history\",\"order\":\"newest-completed-first\",\"retained\":2,\"capacity\":8,\"overwritten\":0,\"requests_in_progress\":0,\"events\":["
+        "{\"reason\":\"manual\",\"outcome\":\"restored\",\"age_seconds\":5,\"duration_ms\":null},"
+        "{\"reason\":\"deferred-request\",\"outcome\":\"deferred\",\"age_seconds\":4,\"duration_ms\":null}]}\n";
+    Check(text == completed, "two completed scopes have an exact JSON envelope, separator, ordering, types, and newline");
+    Check(text && text->find("\"reason\":\"manual\"") < text->find("\"reason\":\"deferred-request\"") &&
+        text->find("\"requests_in_progress\":0") != std::string_view::npos, "completion order is preserved even when the newest completion has an older request time");
+    try { RecordRestorationRequest interrupted(history, RestoreReason::CallbackFailure, 2000); throw 7; } catch (...) {}
+    text = FormatRestorationHistoryJson(history, 5000, output);
+    Check(text && text->find("\"reason\":\"callback-failure\",\"outcome\":\"interrupted\"") != std::string_view::npos &&
+        fake.backendClockReads == 0 && history.inProgress() == 0, "unwinding completes an interrupted event without the formatter sampling any clock");
+}
+void RestorationJsonBoundsExtremesAndAllocation() {
+    RestorationHistory history;
+    for (std::size_t index = 0; index < history.capacity; ++index)
+        history.record({RestoreReason::DeferredRequest, RestoreOutcome::Interrupted, 1, (std::numeric_limits<std::uint64_t>::max)()});
+    char output[RestorationHistoryJsonBufferSize];
+    const auto text = FormatRestorationHistoryJson(history, 0, output);
+    Check(text && text->size() < sizeof(output) && text->find("\"age_seconds\":18446744073709551,\"duration_ms\":18446744073709551615") != std::string_view::npos,
+        "full history preserves maximum unsigned duration and monotonic-wrap ages as JSON numbers");
+    const std::string expected(*text);
+    Check(!FormatRestorationHistoryJson(history, 0, {}) && !FormatRestorationHistoryJson(history, 0, std::span<char>(output, 1)) &&
+        !FormatRestorationHistoryJson(history, 0, std::span<char>(output, expected.size())) &&
+        FormatRestorationHistoryJson(history, 0, std::span<char>(output, expected.size() + 1)) == expected && output[expected.size()] == '\0',
+        "incomplete envelopes/events and missing terminators never become successful output");
+    bool formatted = false, unused = false;
+    { TestMemory::FailNextAllocation fail; formatted = FormatRestorationHistoryJson(history, 0, output) == expected; unused = TestMemory::AllocationFailurePending(); }
+    Check(formatted && unused && history.size() == history.capacity && fake.backendClockReads == 0 && fake.magWrites == 0 && fake.gammaWrites == 0,
+        "complete maximum history formatting allocates no C++ memory and changes no history/backend/clock state");
+}
+void RestorationJsonInvalidSnapshotsAndPreparationFailure() {
+    for (unsigned field = 0; field < 2; ++field) for (int invalid : {-1, 99}) {
+        Reset(); RestorationHistory history; history.record({field ? RestoreReason::Manual : static_cast<RestoreReason>(invalid),
+            field ? static_cast<RestoreOutcome>(invalid) : RestoreOutcome::Failed, 0});
+        fake.clipMemory = {L'k', L'e', L'e', L'p', L'\0'};
+        char output[RestorationHistoryJsonBufferSize];
+        Check(!FormatRestorationHistoryJson(history, 0, output) && !CopyRestorationHistoryJsonToClipboard(nullptr, history, 0) &&
+            fake.clipAllocations == 0 && fake.clipOpens == 0 && std::wstring_view(fake.clipMemory.data()) == L"keep" && history.size() == 1,
+            "unknown reason/outcome values are refused before clipboard preparation or history mutation");
+    }
+    Reset(); RestorationHistory history; fake.clipMemory = {L'k', L'e', L'e', L'p', L'\0'};
+    bool copied = true;
+    { TestMemory::FailNextAllocation fail; copied = CopyRestorationHistoryJsonToClipboard(nullptr, history, 0); }
+    Check(!copied && fake.clipOpens == 0 && fake.clipEmpties == 0 && std::wstring_view(fake.clipMemory.data()) == L"keep",
+        "fake native preparation allocation failure is contained before opening/emptying the clipboard");
+}
+void RestorationJsonClipboardNativeFailures() {
+    RestorationHistory history; history.record({RestoreReason::Exit, RestoreOutcome::Failed, 0, 7});
+    for (unsigned failure = 0; failure < 8; ++failure) {
+        Reset();
+        switch (failure) {
+        case 0: fake.clipAllocate = false; break;
+        case 1: fake.clipLock = false; break;
+        case 2: fake.clipOpen = false; break;
+        case 3: fake.clipEmpty = false; break;
+        case 4: fake.clipSet = false; break;
+        case 5: fake.clipClose = false; break;
+        case 6: fake.clipConvert = false; break;
+        default: fake.clipSecondConvert = false; break;
+        }
+        Check(!CopyRestorationHistoryJsonToClipboard(nullptr, history, 0) && fake.clipFrees == (failure == 0 || failure == 5 || failure == 6 ? 0 : 1) &&
+            history.size() == 1 && fake.magWrites == 0 && fake.gammaWrites == 0 && fake.registryWrites == 0,
+            "conversion/allocation/locking/open/empty/transfer/close failures free only app-owned blocks and preserve history/backend settings");
+    }
+}
+void RestorationJsonClipboardPreservesGammaRecovery() {
+    GammaRampFilter filter;
+    Check(filter.initialize(), "prepare gamma history export recovery");
+    fake.writes = {Write::FailAfterApply, Write::Fail};
+    Check(!filter.enable() && filter.needsRestore(), "retain original gamma calibration after failed rollback");
+    RestorationHistory history; history.record({RestoreReason::Manual, RestoreOutcome::Failed, 1000, 0});
+    const auto reads = fake.gammaReads, writes = fake.gammaWrites, releases = fake.mutexReleases;
+    const auto statistics = filter.statistics(); const auto clocks = fake.backendClockReads; const auto error = std::string(filter.lastError());
+    Check(CopyRestorationHistoryJsonToClipboard(nullptr, history, 6000) &&
+        std::wstring_view(fake.clipMemory.data()).find(L"\"outcome\":\"failed\",\"age_seconds\":5,\"duration_ms\":0") != std::wstring_view::npos &&
+        !CommandMayChangeFilter(ID_TRAY_COPY_RESTORATION_JSON) && history.size() == 1 && history.overwritten() == 0 &&
+        filter.needsRestore() && !filter.isActive() && fake.mutexOwned && filter.statistics() == statistics && error == filter.lastError() &&
+        fake.gammaReads == reads && fake.gammaWrites == writes && fake.mutexReleases == releases && fake.backendClockReads == clocks && fake.registryReads == 0,
+        "successful cached history export uses checked clipboard ownership without observing/changing display recovery, counters, errors, clocks, or preferences");
+    Check(filter.disable(), "original calibration stays recoverable after history export");
+}
 void ExpertDiagnosticsMenuLayoutAndOwnership() {
     const auto root = BuildTrayMenu(DefaultMenuState());
     Check(root && FakeMenuCommand(root, ID_TRAY_RESTORE) && FakeMenuCommand(root, ID_TRAY_TOGGLE), "primary display/recovery actions remain directly available");
@@ -4657,7 +4783,7 @@ void ExpertDiagnosticsMenuLayoutAndOwnership() {
     Check(expert && diagnostics && FakeMenuCommand(expert, ID_TRAY_SAVE_PREFERENCES) && FakeMenuCommand(expert, ID_TRAY_IMPORT_PROFILE) &&
         FakeMenuCommand(expert, ID_TRAY_COPY_PREFERENCES_JSON) && !FakeMenuCommand(diagnostics, ID_TRAY_COPY_PREFERENCES_JSON),
         "expert choices and preference transfer remain distinct from the diagnostic submenu");
-    for (const auto id : {ID_TRAY_VERIFY_BACKEND, ID_TRAY_COPY_REPORT, ID_TRAY_COPY_STATUS_JSON, ID_TRAY_COPY_RECENT_DIAGNOSTICS, ID_TRAY_CLEAR_RECENT_DIAGNOSTICS, ID_TRAY_REFRESH_DISPLAY_CONTEXT, ID_TRAY_RETRY_LOGGING, ID_TRAY_RETRY_SESSION,
+    for (const auto id : {ID_TRAY_VERIFY_BACKEND, ID_TRAY_COPY_REPORT, ID_TRAY_COPY_STATUS_JSON, ID_TRAY_COPY_RESTORATION_JSON, ID_TRAY_COPY_RECENT_DIAGNOSTICS, ID_TRAY_CLEAR_RECENT_DIAGNOSTICS, ID_TRAY_REFRESH_DISPLAY_CONTEXT, ID_TRAY_RETRY_LOGGING, ID_TRAY_RETRY_SESSION,
         ID_TRAY_RETRY_SHORTCUTS, ID_TRAY_RESET_BACKEND_COUNTS, ID_TRAY_CLEAR_RESTORATION_HISTORY})
         Check(FakeMenuCommand(diagnostics, id) && !FakeMenuCommand(expert, id), "all diagnostic/retry/bookkeeping actions are grouped exactly once");
     for (const auto& menu : fake.menus) Check(UniqueMenuAccelerators(*menu), "assigned keyboard accelerators remain unique within each submenu");
@@ -4678,6 +4804,7 @@ void ExpertDiagnosticsMenuStateFlags() {
     const auto preferred = FakeMenuCommand(root, ID_LUMA_PROFILE_BASE + 2, true);
     const auto clear = FakeMenuCommand(root, ID_TRAY_CLEAR_RESTORATION_HISTORY, true);
     const auto clearRecent = FakeMenuCommand(root, ID_TRAY_CLEAR_RECENT_DIAGNOSTICS, true);
+    const auto copyHistory = FakeMenuCommand(root, ID_TRAY_COPY_RESTORATION_JSON, true);
     const auto custom = FakeMenuCommand(root, ID_TRAY_CUSTOM_SESSION, true);
     const auto restart = FakeMenuCommand(root, ID_TRAY_RESTART_COUNTDOWN, true);
     const auto save = FakeMenuCommand(root, ID_TRAY_SAVE_PREFERENCES, true);
@@ -4687,6 +4814,7 @@ void ExpertDiagnosticsMenuStateFlags() {
         "recovery-disabled timing/history and gamma-preferred Luma choices retain accurate checked/enabled states");
     Check(save && save->label.find("Retry saving") != std::string::npos && FakeMenuCommand(root, ID_TRAY_TOGGLE)->label.find("Disabled") != std::string::npos,
         "unsaved preference retry and disabled shortcut captions remain visible");
+    Check(copyHistory && !(copyHistory->flags & MF_GRAYED), "read-only history copying stays available when destructive clearing is disabled");
     Check(DestroyMenu(root) && AliveFakeMenus() == 0 && fake.invalidMenuDestroys == 0, "state variants release the complete fake menu tree");
 }
 void ExpertMenuCreationFailureCleanupAtEveryBoundary() {
@@ -5583,6 +5711,10 @@ int main() {
         {"Quit gamma cleanup ownership retry", LoopShutdownGammaCleanupRetryPreservesOwnership},
         {"Restoration history clear preserves backend", RestorationHistoryClearPreservesActiveRecovery}, {"Restoration history clear blocks open scopes", RestorationHistoryClearGuardsUnfinishedScopes},
         {"Restoration history clear allocation/policy", RestorationHistoryClearNoAllocationAndReadOnlyPolicy}, {"Expert diagnostic menu layout/ownership", ExpertDiagnosticsMenuLayoutAndOwnership},
+        {"Restoration JSON empty golden", RestorationJsonEmptyGolden}, {"Restoration JSON canonical tokens", RestorationJsonReasonOutcomeTokens},
+        {"Restoration JSON ring/order/snapshot", RestorationJsonRingOrderAndSnapshot}, {"Restoration JSON open/nested/interrupted scopes", RestorationJsonOpenNestedAndInterruptedScopes},
+        {"Restoration JSON bounds/extremes/allocation", RestorationJsonBoundsExtremesAndAllocation}, {"Restoration JSON invalid/preparation failure", RestorationJsonInvalidSnapshotsAndPreparationFailure},
+        {"Restoration JSON native clipboard failures", RestorationJsonClipboardNativeFailures}, {"Restoration JSON preserves gamma recovery", RestorationJsonClipboardPreservesGammaRecovery},
         {"Expert diagnostic menu state flags", ExpertDiagnosticsMenuStateFlags}, {"Expert menu create failure cleanup matrix", ExpertMenuCreationFailureCleanupAtEveryBoundary},
         {"Expert menu append failure cleanup matrix", ExpertMenuAppendFailureCleanupAtEveryBoundary},
         {"Status clipboard matches cached JSON", StatusClipboardMatchesCachedJson}, {"Status clipboard rejects inconsistent snapshots", StatusClipboardRejectsInconsistentSnapshotBeforeMutation},
