@@ -51,6 +51,7 @@
 #include "FadeInControl.h"
 #include "TrayTooltip.h"
 #include "Prototypes/DailySchedule.h"
+#include "Prototypes/MonitorPlan.h"
 #include "BuildMetadata.h"
 #include "VerificationCache.h"
 #include <map>
@@ -6127,6 +6128,117 @@ void TrayCommandFallbackExceptionRetainsRecoveryRequest() {
         RecoveryAfterUiFailure(false, pending, true) == UiFailureRecovery::Defer,
         "fallback exceptions propagate to the native callback guard with a retained request even for a tray notification");
 }
+void MonitorPlanNegativeOriginsAndExactBounds() {
+    using namespace MonitorPrototype;
+    const Region regions[] = {{1, {-1920, -200, 0, 880}, true}, {2, {0, 0, 2560, 1440}, false}, {3, {2560, -1080, 3640, 840}, true}};
+    std::array<Slot, 3> output{}; output[2].key = 999;
+    const auto plan = Preflight(regions, {4, 4, true, true, true}, output);
+    Check(plan.result == Result::Subset && plan.count == 2 && output[0] == Slot{1, 4, regions[0].bounds, regions[0].bounds, 1920, 1080} &&
+        output[1] == Slot{3, 4, regions[2].bounds, regions[2].bounds, 1080, 1920} && output[2].key == 999,
+        "selected negative-origin/portrait regions publish exact full-bound 1:1 pairs without touching unselected or trailing slots");
+}
+void MonitorPlanAllNoneAndRecoveryGates() {
+    using namespace MonitorPrototype;
+    std::array<Region, 2> regions{{{1, {0, 0, 100, 100}, false}, {2, {100, 0, 200, 100}, false}}};
+    std::array<Slot, 2> output{}; output[0].key = 99; const auto before = output;
+    Context context{1, 1, true, true, true};
+    Check(Preflight(regions, context, output).result == Result::NoSelection && output == before, "empty selection cannot publish experimental hosts");
+    regions[0].selected = regions[1].selected = true;
+    context.pixelCoordinatesSupplied = context.independentSourcesSupplied = false;
+    Check(Preflight(regions, context, output).result == Result::AllMonitors && output == before, "all-monitor requests remain the existing global path without publishing control slots");
+    context.backendClear = false;
+    Check(Preflight(regions, context, output).result == Result::RecoveryOwned && output == before, "pending global ownership blocks even a proposed all-monitor handoff");
+}
+void MonitorPlanMalformedAndStaleSnapshots() {
+    using namespace MonitorPrototype;
+    const std::array<Region, 2> baseline{{{1, {-100, 0, 0, 100}, true}, {2, {0, 0, 100, 100}, false}}};
+    std::array<Slot, 2> output{}; output[0].key = 99; const auto before = output;
+    const Context context{8, 8, true, true, true};
+    for (unsigned invalid = 0; invalid < 6; ++invalid) {
+        auto regions = baseline;
+        if (invalid == 0) regions[0].key = 0;
+        if (invalid == 1) regions[1].key = 1;
+        if (invalid == 2) regions[1].bounds.right = regions[1].bounds.left;
+        if (invalid == 3) regions[1].bounds.bottom = -1;
+        if (invalid == 4) regions[1].bounds.left = 101;
+        if (invalid == 5) regions[1].bounds.top = 100;
+        Check(Preflight(regions, context, output).result == Result::InvalidSnapshot && output == before, "malformed selected or unselected data is rejected before any publication");
+    }
+    Check(Preflight({}, context, output).result == Result::InvalidSnapshot &&
+        Preflight(baseline, {8, 7, true, true, true}, output).result == Result::StaleSnapshot &&
+        Preflight(baseline, {0, 0, true, true, true}, output).result == Result::StaleSnapshot && output == before,
+        "empty/zero-revision/stale selection receipts cannot be treated as a current monitor mapping");
+}
+void MonitorPlanIsolationAndCoordinateRequirements() {
+    using namespace MonitorPrototype;
+    std::array<Region, 2> regions{{{1, {0, 0, 100, 100}, true}, {2, {100, 0, 200, 100}, false}}};
+    std::array<Slot, 2> output{}; output[0].key = 99; const auto before = output;
+    Check(Preflight(regions, {1, 1, true, false, true}, output).result == Result::UnknownCoordinates &&
+        Preflight(regions, {1, 1, true, true, false}, output).result == Result::UnknownSources && output == before,
+        "nonoverlapping rectangles alone do not establish independent outputs or pixel coordinate space");
+    regions[1].bounds = regions[0].bounds;
+    Check(Preflight(regions, {1, 1, true, true, true}, output).result == Result::OverlappingRegions && output == before,
+        "even a claimed independent topology cannot publish cloned rectangles");
+    regions[1].bounds = {99, 99, 200, 200};
+    Check(Preflight(regions, {1, 1, true, true, true}, output).result == Result::OverlappingRegions && output == before,
+        "one-pixel selected/unselected overlap is ambiguous and refused");
+    regions[1].bounds = {100, 100, 200, 200};
+    Check(Preflight(regions, {1, 1, true, true, true}, output).result == Result::Subset, "edge/corner-touching extended regions do not overlap");
+}
+void MonitorPlanCapacityAndPublication() {
+    using namespace MonitorPrototype;
+    const Region regions[] = {{1, {-300, 0, -200, 100}, true}, {2, {-100, 0, 0, 100}, false}, {3, {100, 0, 200, 100}, true}};
+    std::array<Slot, 3> output{}; for (auto& slot : output) slot.key = 99; const auto before = output;
+    for (std::size_t capacity = 0; capacity < 2; ++capacity)
+        Check(Preflight(regions, {1, 1, true, true, true}, std::span<Slot>(output.data(), capacity)).result == Result::BufferTooSmall && output == before,
+            "insufficient buffers publish no partial host plan");
+    const auto plan = Preflight(regions, {1, 1, true, true, true}, std::span<Slot>(output.data(), 2));
+    Check(plan.result == Result::Subset && plan.count == 2 && output[0].key == 1 && output[1].key == 3 && output[2] == before[2],
+        "exact capacity publishes only selected regions in supplied order and leaves gaps uncovered");
+}
+void MonitorPlanArithmeticBounds() {
+    using namespace MonitorPrototype;
+    const auto minimum = (std::numeric_limits<std::int32_t>::min)(), maximum = (std::numeric_limits<std::int32_t>::max)();
+    std::array<Region, 2> regions{{{1, {minimum, minimum, -1, -1}, true}, {2, {0, 0, 100, 100}, false}}};
+    std::array<Slot, 2> output{};
+    Check(Preflight(regions, {1, 1, true, true, true}, output).result == Result::Subset && output[0].width == maximum && output[0].height == maximum,
+        "dimension subtraction uses widened arithmetic and accepts representable positive dimensions without claiming native support");
+    const auto before = output;
+    regions[0].bounds.right = 0;
+    Check(Preflight(regions, {1, 1, true, true, true}, output).result == Result::InvalidSnapshot && output == before, "width exceeding signed Win32 dimensions is rejected without overflow/publication");
+    regions[0].bounds.right = -1; regions[0].bounds.bottom = maximum;
+    Check(Preflight(regions, {1, 1, true, true, true}, output).result == Result::InvalidSnapshot && output == before, "height overflow is rejected independently");
+}
+void MonitorPlanTopologyChangeReceipt() {
+    using namespace MonitorPrototype;
+    std::array<Region, 2> regions{{{1, {-1920, 0, 0, 1080}, true}, {2, {0, 0, 1920, 1080}, false}}};
+    std::array<Slot, 2> output{};
+    Check(Preflight(regions, {10, 10, true, true, true}, output).result == Result::Subset && output[0].revision == 10, "a plan binds its transient selection to one topology revision");
+    const auto before = output;
+    regions[0] = {3, {-2560, 0, 0, 1440}, true};
+    Check(Preflight(regions, {11, 10, true, true, true}, output).result == Result::StaleSnapshot && output == before,
+        "hotplug/replacement cannot silently reuse a reviewed selection against a new snapshot");
+    Check(Preflight(regions, {11, 11, true, true, true}, output).result == Result::Subset && output[0].key == 3 && output[0].revision == 11,
+        "only a matching new receipt can describe the replacement region");
+}
+void MonitorPlanAllocationAndBackendIsolation() {
+    using namespace MonitorPrototype;
+    MagnificationFilter filter; Check(filter.initialize() && filter.enable(), "retain actual fake fullscreen ownership beside preflight");
+    fake.magWriteResults = {Write::FailAfterApply}; Check(!filter.disable() && filter.needsRestore(), "retain ambiguous original restoration for the ownership gate");
+    const Region regions[] = {{1, {-100, 0, 0, 100}, true}, {2, {0, 0, 100, 100}, false}};
+    std::array<Slot, 2> output{};
+    const auto reads = fake.magReads, writes = fake.magWrites;
+    const auto timers = fake.countdownSets; const auto registry = fake.registryWrites; const auto stats = filter.statistics();
+    bool blocked = false, planned = false, noAllocation = false;
+    { TestMemory::FailNextAllocation failure;
+        blocked = Preflight(regions, {1, 1, !filter.isActive() && !filter.needsRestore(), true, true}, output).result == Result::RecoveryOwned;
+        // A separate supplied clear context tests geometry only, not a handoff.
+        planned = Preflight(regions, {1, 1, true, true, true}, output).result == Result::Subset;
+        noAllocation = TestMemory::AllocationFailurePending(); }
+    Check(blocked && planned && noAllocation && fake.magReads == reads && fake.magWrites == writes && fake.countdownSets == timers &&
+        fake.registryWrites == registry && filter.statistics() == stats && filter.needsRestore(), "preflight allocates/calls nothing and cannot release, overwrite, or adopt the original display owner");
+    Check(filter.disable(), "fullscreen original remains independently retryable after geometry research");
+}
 SchedulePrototype::Sample ScheduleSample(unsigned year, unsigned month, unsigned day, unsigned minute, unsigned within, std::uint64_t tick, int offsetMinutes = 0) {
     using namespace std::chrono;
     const auto dates = (sys_days{std::chrono::year{static_cast<int>(year)}/month/day} - sys_days{std::chrono::year{1601}/January/1}).count();
@@ -7583,6 +7695,10 @@ std::optional<std::string> RecentLogText() noexcept {
 }
 int main() {
     const std::pair<const char*, void(*)()> tests[] = {
+        {"Monitor plan negative/full bounds", MonitorPlanNegativeOriginsAndExactBounds}, {"Monitor plan all/none/recovery gate", MonitorPlanAllNoneAndRecoveryGates},
+        {"Monitor plan invalid/stale snapshot", MonitorPlanMalformedAndStaleSnapshots}, {"Monitor plan isolation/coordinate requirements", MonitorPlanIsolationAndCoordinateRequirements},
+        {"Monitor plan capacity/publication", MonitorPlanCapacityAndPublication}, {"Monitor plan arithmetic bounds", MonitorPlanArithmeticBounds},
+        {"Monitor plan topology-change receipt", MonitorPlanTopologyChangeReceipt}, {"Monitor plan allocation/backend isolation", MonitorPlanAllocationAndBackendIsolation},
         {"Schedule prototype every minute/consumption", ScheduleEveryMinuteAndConsumption}, {"Schedule prototype daily/cross-midnight", ScheduleDailyAndCrossMidnight},
         {"Schedule prototype manual/startup future-only", ScheduleManualRebaseAndFutureOnlyStartup}, {"Schedule prototype missed/clock discontinuity", ScheduleMissedBoundariesAndClockDiscontinuities},
         {"Schedule prototype calendar/midnight", ScheduleCalendarValidationAndMidnight}, {"Schedule prototype DST/date rollback", ScheduleDstSkipRepeatAndDateRollback},
