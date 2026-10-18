@@ -1,0 +1,25 @@
+#pragma once
+#include "SessionTimer.h"
+
+inline constexpr unsigned IDI_REDLIGHT_ICON = 100;
+inline constexpr unsigned ID_TRAY_TOGGLE = 200;
+inline constexpr unsigned ID_TRAY_ABOUT = 201;
+inline constexpr unsigned ID_TRAY_EXIT = 202;
+inline constexpr unsigned ID_TRAY_MODE_STRICT_RED = 203;
+inline constexpr unsigned ID_TRAY_MODE_LUMA_RED = 204;
+inline constexpr unsigned ID_TRAY_RESTORE = 205;
+inline constexpr unsigned ID_TRAY_LOGS = 206;
+inline constexpr unsigned ID_TRAY_COPY_REPORT = 207;
+inline constexpr unsigned ID_TRAY_COPY_PROFILE = 208;
+inline constexpr unsigned ID_TRAY_IMPORT_PROFILE = 209;
+inline constexpr unsigned ID_TRAY_VERIFY_BACKEND = 210;
+inline constexpr unsigned ID_HOTKEY_TOGGLE = 1;
+inline constexpr unsigned ID_HOTKEY_RESTORE = 2;
+inline constexpr unsigned ID_TRAY_RETRY_TIMER = 1;
+inline constexpr unsigned ID_SESSION_TIMER = 2;
+inline constexpr unsigned ID_SESSION_LIMIT_BASE = 1000;
+inline constexpr unsigned ID_BACKEND_PREFERENCE_BASE = 1300;
+inline constexpr unsigned ID_LUMA_PROFILE_BASE = 1400;
+
+static_assert(ID_SESSION_LIMIT_BASE + SessionTimer::maxMinutes < ID_BACKEND_PREFERENCE_BASE);
+static_assert(ID_BACKEND_PREFERENCE_BASE + 2 < ID_LUMA_PROFILE_BASE);

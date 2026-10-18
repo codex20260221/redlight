@@ -11,6 +11,8 @@
 #include "Preferences.h"
 #include "PreferencesStore.h"
 #include "PreferencesImport.h"
+#include "CommandIds.h"
+#include "TrayMenu.h"
 #include <cstdio>
 
 #include "Diagnostics.h"
@@ -19,25 +21,6 @@
 
 #define WM_TRAYICON (WM_USER + 1)
 #define WM_REDLIGHT_RESTORE (WM_APP + 1)
-#define IDI_REDLIGHT_ICON 100
-#define ID_TRAY_TOGGLE 200
-#define ID_TRAY_ABOUT 201
-#define ID_TRAY_EXIT 202
-#define ID_TRAY_MODE_STRICT_RED 203
-#define ID_TRAY_MODE_LUMA_RED 204
-#define ID_TRAY_RESTORE 205
-#define ID_TRAY_LOGS 206
-#define ID_TRAY_COPY_REPORT 207
-#define ID_TRAY_COPY_PROFILE 208
-#define ID_TRAY_IMPORT_PROFILE 209
-#define ID_TRAY_VERIFY_BACKEND 210
-#define ID_HOTKEY_TOGGLE 1
-#define ID_HOTKEY_RESTORE 2
-#define ID_TRAY_RETRY_TIMER 1
-#define ID_SESSION_TIMER 2
-#define ID_SESSION_LIMIT_BASE 1000
-#define ID_BACKEND_PREFERENCE_BASE 1300
-#define ID_LUMA_PROFILE_BASE 1400
 
 namespace {
 
@@ -819,85 +802,17 @@ void ShowTrayMenu(HWND hwnd) {
         ReportError("Could not locate the tray menu.");
         return;
     }
-    HMENU menu = CreatePopupMenu();
-    if (!menu) { ReportError("Could not create the tray menu."); return; }
-    HMENU sessionMenu = CreatePopupMenu();
-    if (!sessionMenu) {
-        if (!DestroyMenu(menu)) Diagnostics::Log("DestroyMenu failed after submenu failure.");
-        ReportError("Could not create the session menu.");
-        return;
-    }
-    bool sessionBuilt = true;
-    for (const unsigned minutes : {0u, 15u, 30u, 60u, 120u, 240u}) {
-        char label[48];
-        if (minutes == 0) strcpy_s(label, "Unlimited");
-        else sprintf_s(label, "%u minutes", minutes);
-        sessionBuilt = sessionBuilt && AppendMenuA(sessionMenu,
-            MF_STRING | (g_sessionTimer.minutes() == minutes ? MF_CHECKED : MF_UNCHECKED),
-            ID_SESSION_LIMIT_BASE + minutes, label);
-    }
-    const bool sessionAttached = sessionBuilt && AppendMenuA(menu, MF_POPUP,
-        reinterpret_cast<UINT_PTR>(sessionMenu), "Auto-restore after");
-    if (!sessionAttached) {
-        if (!DestroyMenu(sessionMenu)) Diagnostics::Log("DestroyMenu(session) failed.");
-        if (!DestroyMenu(menu)) Diagnostics::Log("DestroyMenu failed after submenu failure.");
-        ReportError("Could not build the session menu.");
-        return;
-    }
-    HMENU backendMenu = CreatePopupMenu();
-    bool backendBuilt = backendMenu != NULL;
-    for (const auto preference : {BackendPreference::Automatic, BackendPreference::Magnification, BackendPreference::Gamma}) {
-        backendBuilt = backendBuilt && AppendMenuA(backendMenu,
-            MF_STRING | (g_backendPreference == preference ? MF_CHECKED : MF_UNCHECKED),
-            ID_BACKEND_PREFERENCE_BASE + static_cast<unsigned>(preference), BackendPreferenceName(preference));
-    }
-    if (!backendBuilt || !AppendMenuA(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(backendMenu), "Backend preference (next start)")) {
-        if (backendMenu && !DestroyMenu(backendMenu)) Diagnostics::Log("DestroyMenu(backend) failed.");
-        if (!DestroyMenu(menu)) Diagnostics::Log("DestroyMenu failed after backend menu failure.");
-        ReportError("Could not build the backend preference menu.");
-        return;
-    }
-    HMENU lumaMenu = CreatePopupMenu();
-    bool lumaBuilt = lumaMenu != NULL;
-    for (const auto profile : {LumaProfile::Classic, LumaProfile::GreenDetail, LumaProfile::EqualDetail}) {
-        lumaBuilt = lumaBuilt && AppendMenuA(lumaMenu,
-            MF_STRING | (g_displayFilter->lumaProfile() == profile ? MF_CHECKED : MF_UNCHECKED),
-            ID_LUMA_PROFILE_BASE + static_cast<unsigned>(profile), LumaProfileName(profile));
-    }
-    const UINT lumaMenuFlags = MF_POPUP | (g_displayFilter->supportsRedMode(RedMode::LumaRed) ? MF_ENABLED : MF_GRAYED);
-    if (!lumaBuilt || !AppendMenuA(menu, lumaMenuFlags, reinterpret_cast<UINT_PTR>(lumaMenu), "Luma color detail")) {
-        if (lumaMenu && !DestroyMenu(lumaMenu)) Diagnostics::Log("DestroyMenu(luma) failed.");
-        if (!DestroyMenu(menu)) Diagnostics::Log("DestroyMenu failed after luma menu failure.");
-        ReportError("Could not build the luma detail menu.");
-        return;
-    }
-    const UINT strictFlags = MF_STRING | (g_displayFilter->redMode() == RedMode::StrictRed ? MF_CHECKED : MF_UNCHECKED);
-    const UINT lumaFlags = MF_STRING | (g_displayFilter->redMode() == RedMode::LumaRed ? MF_CHECKED : MF_UNCHECKED)
-        | (g_displayFilter->supportsRedMode(RedMode::LumaRed) ? MF_ENABLED : MF_GRAYED);
-    const bool built =
-        AppendMenuA(menu, MF_STRING, ID_TRAY_TOGGLE, g_displayFilter->needsRestore() ? "Turn &off\tCtrl+Alt+R" : "Turn &on\tCtrl+Alt+R") &&
-        AppendMenuA(menu, MF_STRING, ID_TRAY_RESTORE, "&Restore display\tCtrl+Alt+Shift+R") &&
-        AppendMenuA(menu, MF_SEPARATOR, 0, NULL) &&
-        AppendMenuA(menu, strictFlags, ID_TRAY_MODE_STRICT_RED, "&Strict Red") &&
-        AppendMenuA(menu, lumaFlags, ID_TRAY_MODE_LUMA_RED, "&Luma Red") &&
-        AppendMenuA(menu, MF_SEPARATOR, 0, NULL) &&
-        AppendMenuA(menu, MF_STRING, ID_TRAY_LOGS, "Open &logs folder") &&
-        AppendMenuA(menu, MF_STRING, ID_TRAY_VERIFY_BACKEND, "&Verify backend state") &&
-        AppendMenuA(menu, MF_STRING, ID_TRAY_COPY_REPORT, "Copy support &report") &&
-        AppendMenuA(menu, MF_STRING, ID_TRAY_COPY_PROFILE, "Copy settings &profile") &&
-        AppendMenuA(menu, MF_STRING, ID_TRAY_IMPORT_PROFILE, "&Import settings profile") &&
-        AppendMenuA(menu, MF_STRING, ID_TRAY_ABOUT, "&About") &&
-        AppendMenuA(menu, MF_STRING, ID_TRAY_EXIT, "E&xit");
-    if (!built) {
-        ReportError("Could not build the tray menu.");
-    } else {
-        if (!SetForegroundWindow(hwnd)) Diagnostics::Log("SetForegroundWindow failed for tray menu.");
-        const UINT command = TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
-            pt.x, pt.y, 0, hwnd, NULL);
-        if (command) PostTrayCommand(hwnd, command);
-        if (!PostMessageA(hwnd, WM_NULL, 0, 0)) Diagnostics::Log("Posting tray menu dismissal failed.");
-        if (!Shell_NotifyIconA(NIM_SETFOCUS, &nid)) Diagnostics::Log("Could not restore tray keyboard focus.");
-    }
+    const TrayMenuState state{g_displayFilter->needsRestore(), g_displayFilter->redMode(),
+        g_displayFilter->supportsRedMode(RedMode::LumaRed), g_displayFilter->lumaProfile(),
+        g_backendPreference, g_sessionTimer.minutes(), g_toggleHotkey, g_restoreHotkey};
+    HMENU menu = BuildTrayMenu(state);
+    if (!menu) { ReportError("Could not build the tray menu."); return; }
+    if (!SetForegroundWindow(hwnd)) Diagnostics::Log("SetForegroundWindow failed for tray menu.");
+    const UINT command = TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
+        pt.x, pt.y, 0, hwnd, NULL);
+    if (command) PostTrayCommand(hwnd, command);
+    if (!PostMessageA(hwnd, WM_NULL, 0, 0)) Diagnostics::Log("Posting tray menu dismissal failed.");
+    if (!Shell_NotifyIconA(NIM_SETFOCUS, &nid)) Diagnostics::Log("Could not restore tray keyboard focus.");
     if (!DestroyMenu(menu)) Diagnostics::Log("DestroyMenu failed.");
 }
 

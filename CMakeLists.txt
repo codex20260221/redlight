@@ -15,7 +15,7 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 configure_file(src/Version.h.in generated/Version.h @ONLY)
 
 add_executable(RedLight WIN32
-    src/Diagnostics.cpp src/Clipboard.cpp src/PreferencesStore.cpp src/main.cpp
+    src/Diagnostics.cpp src/Clipboard.cpp src/PreferencesStore.cpp src/TrayMenu.cpp src/main.cpp
     src/GammaRampFilter.cpp src/MagnificationFilter.cpp
     resources/app.rc
 )

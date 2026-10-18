@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added command-line help/version dialogs and explicit rejection of unknown or conflicting options.
 
 ### Changed
+- Grouped backend policy, verification, reports, and profile transfer under Expert controls while keeping toggle/restore/modes first; added distinct menu accelerators, visible shortcut-conflict labels, and explicit submenu ownership cleanup.
 - Persist preferences in one validated, versioned record to avoid partial multi-key saves; migrate prior values read-only until the next save, report invalid storage, and show unsaved changes in About/support reports.
 - Capture the most recent display state before every activation; refuse activation when capture fails.
 - Keep recovery data and backend resources available after failed restoration. Normal Exit stays open when display restoration fails.
