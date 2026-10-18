@@ -37,7 +37,7 @@ UINT Checked(bool value) { return MF_STRING | (value ? MF_CHECKED : MF_UNCHECKED
 }
 
 HMENU BuildTrayMenu(const TrayMenuState& state) {
-    Menu root, session, warning, luma, backend, shortcuts, expert;
+    Menu root, session, warning, luma, backend, shortcuts, expert, diagnostics;
     for (unsigned i = 0; i < ExpiryWarningOptions.size(); ++i) {
         const auto option = ExpiryWarningOptions[i];
         if (!warning.add(ID_EXPIRY_WARNING_BASE + i, ExpiryWarningName(option), Checked(state.expiryWarning == option))) return NULL;
@@ -66,13 +66,15 @@ HMENU BuildTrayMenu(const TrayMenuState& state) {
         !shortcuts.add(ID_SHORTCUT_PROFILE_BASE + 1, "Ctrl+Alt+F&9", Checked(state.shortcutProfile == ShortcutProfile::F9)) ||
         !shortcuts.add(ID_SHORTCUT_PROFILE_BASE + 2, "Ctrl+Alt+F&10", Checked(state.shortcutProfile == ShortcutProfile::F10)) ||
         !shortcuts.add(ID_SHORTCUT_PROFILE_BASE + 3, "D&isabled", Checked(state.shortcutProfile == ShortcutProfile::Disabled))) return NULL;
+    if (!diagnostics.add(ID_TRAY_VERIFY_BACKEND, "&Verify backend state") ||
+        !diagnostics.add(ID_TRAY_COPY_REPORT, "&Copy support report") ||
+        !diagnostics.add(ID_TRAY_RETRY_LOGGING, "&Retry file logging") ||
+        !diagnostics.add(ID_TRAY_RETRY_SESSION, "Retry session rec&overy") ||
+        !diagnostics.add(ID_TRAY_RETRY_SHORTCUTS, "Retry selected s&hortcuts") ||
+        !diagnostics.add(ID_TRAY_RESET_BACKEND_COUNTS, "Reset backend cou&nters") ||
+        !diagnostics.add(ID_TRAY_CLEAR_RESTORATION_HISTORY, "Clear restoration histor&y", MF_STRING | (state.canClearRestorationHistory ? MF_ENABLED : MF_GRAYED))) return NULL;
     if (!expert.child(shortcuts, "&Shortcut profile") || !expert.child(backend, "&Backend preference (next start)") ||
-        !expert.add(ID_TRAY_VERIFY_BACKEND, "&Verify backend state") ||
-        !expert.add(ID_TRAY_COPY_REPORT, "&Copy support report") ||
-        !expert.add(ID_TRAY_RETRY_LOGGING, "&Retry file logging") ||
-        !expert.add(ID_TRAY_RETRY_SESSION, "Retry session rec&overy") ||
-        !expert.add(ID_TRAY_RETRY_SHORTCUTS, "Retry selected s&hortcuts") ||
-        !expert.add(ID_TRAY_RESET_BACKEND_COUNTS, "Reset backend cou&nters") ||
+        !expert.child(diagnostics, "Dia&gnostics") ||
         !expert.add(0, NULL, MF_SEPARATOR) ||
         !expert.add(ID_TRAY_SAVE_PREFERENCES, state.preferencesUnsaved ? "Retry saving current &preferences" : "Save current &preferences") ||
         !expert.add(ID_TRAY_COPY_PROFILE, "&Export settings profile to clipboard") ||

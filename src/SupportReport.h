@@ -141,6 +141,7 @@ inline std::string BuildSupportReport(const SupportReportState& state) {
             << " - " << RestoreOutcomeName(event.outcome);
     }
     report << "\r\nOlder restoration records overwritten: " << state.restorationHistory.overwritten()
+        << "\r\nRestoration request scopes in progress: " << state.restorationHistory.inProgress()
         << "\r\nHistory is in-memory control activity; it does not measure display output."
         << "\r\nFile logging: " << state.fileLogging << "\r\nMissing file records: " << state.droppedLogLines
         << "\r\nTruncated records: " << state.truncatedLogLines << "\r\nLast file error: " << state.lastFileError

@@ -47,7 +47,7 @@ endif()
 include(CTest)
 if(BUILD_TESTING)
     add_executable(RedLightCodeTests
-        tests/CodeTests.cpp tests/MemoryFault.cpp src/MagnificationFilter.cpp src/GammaRampFilter.cpp src/Clipboard.cpp src/PreferencesStore.cpp src/HotkeyManager.cpp src/StandardOutput.cpp src/StatusQuery.cpp src/StartupOptions.cpp src/ProfileValidation.cpp src/ProfileExport.cpp src/SessionNotifications.cpp src/BuildMetadata.cpp src/ProfileComparison.cpp src/ProfileSave.cpp src/DisplayContext.cpp src/SavedSettings.cpp src/CommandHelp.cpp)
+        tests/CodeTests.cpp tests/MemoryFault.cpp src/MagnificationFilter.cpp src/GammaRampFilter.cpp src/Clipboard.cpp src/PreferencesStore.cpp src/HotkeyManager.cpp src/StandardOutput.cpp src/StatusQuery.cpp src/StartupOptions.cpp src/ProfileValidation.cpp src/ProfileExport.cpp src/SessionNotifications.cpp src/BuildMetadata.cpp src/ProfileComparison.cpp src/ProfileSave.cpp src/DisplayContext.cpp src/SavedSettings.cpp src/CommandHelp.cpp src/TrayMenu.cpp)
     # Fake headers provide every display API: this target cannot call real display APIs.
     target_include_directories(RedLightCodeTests BEFORE PRIVATE tests/fake_win32 src)
     target_compile_definitions(RedLightCodeTests PRIVATE REDLIGHT_FAKE_WIN32=1)

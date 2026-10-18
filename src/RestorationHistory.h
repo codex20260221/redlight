@@ -56,26 +56,43 @@ public:
     }
     std::size_t size() const noexcept { return count_; }
     std::uint64_t overwritten() const noexcept { return overwritten_; }
+    unsigned inProgress() const noexcept { return openScopes_; }
+    bool clear() noexcept {
+        if (openScopes_) return false;
+        events_ = {};
+        next_ = count_ = 0;
+        overwritten_ = 0;
+        return true;
+    }
     const RestoreEvent* newest(std::size_t index) const noexcept {
         if (index >= count_) return nullptr;
         return &events_[(next_ + capacity - 1 - index) % capacity];
     }
 private:
+    friend class RecordRestorationRequest;
+    bool beginScope() noexcept {
+        if (openScopes_ == (std::numeric_limits<unsigned>::max)()) return false;
+        ++openScopes_;
+        return true;
+    }
+    void endScope(bool tracked) noexcept { if (tracked) --openScopes_; }
     std::array<RestoreEvent, capacity> events_{};
     std::size_t next_ = 0, count_ = 0;
     std::uint64_t overwritten_ = 0;
+    unsigned openScopes_ = 0;
 };
 
 // Observation only: never invokes the backend or changes recovery decisions.
 class RecordRestorationRequest {
 public:
     RecordRestorationRequest(RestorationHistory& history, RestoreReason reason, std::uint64_t now) noexcept
-        : history_(history), event_{reason, RestoreOutcome::Interrupted, now} {}
-    ~RecordRestorationRequest() { history_.record(event_); }
+        : history_(history), event_{reason, RestoreOutcome::Interrupted, now}, tracked_(history_.beginScope()) {}
+    ~RecordRestorationRequest() { history_.record(event_); history_.endScope(tracked_); }
     RecordRestorationRequest(const RecordRestorationRequest&) = delete;
     RecordRestorationRequest& operator=(const RecordRestorationRequest&) = delete;
     void finish(RestoreOutcome outcome) noexcept { event_.outcome = outcome; }
 private:
     RestorationHistory& history_;
     RestoreEvent event_;
+    bool tracked_;
 };

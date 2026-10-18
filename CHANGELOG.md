@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Added guarded Clear restoration history and in-progress request-scope reporting, with allocation-free reset that preserves display recovery/counters/settings and refuses unfinished nested scopes; production menu ownership and state flags now have isolated fake-menu failure coverage at every creation/append boundary.
 - Added noninteractive `--help-text` standard output sharing a bounded, versioned UTF-8 help body with the native help dialog, with checked termination, partial-output failures, allocation-free C++ preparation, and unchanged native help/version behavior.
 - Added read-only `--settings` JSON for persisted/default preferences and storage source, sharing canonical profile tokens, supporting older/legacy records without migration, and refusing corrupt/unreadable storage instead of reporting successful fallback defaults.
 - Added cached logical Windows display context to support reports and diagnostics: visible monitor count, virtual desktop metrics, raw remote-session indication, capture reason/age, and explicit refresh failure with prior successful data retained; captures follow restoration handling and report viewing remains read-only.
@@ -51,6 +52,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added command-line help/version dialogs and explicit rejection of unknown or conflicting options.
 
 ### Changed
+- Group verification, support reports, retry tools, counters, and history under Expert controls → Diagnostics, retaining distinct submenu accelerators and direct primary display/recovery controls.
 - Prepare canonical settings profiles in a checked fixed buffer before one owned-string allocation, reducing allocation pressure during preference saves and exports without changing the format.
 - Selecting an unchanged session limit leaves its deadline intact; timing changes/restarts are blocked after expiry or while recovery/backend confirmation needs attention, preserving restoration retry cadence.
 - Hold a nonblocking cross-session ownership guard around legacy gamma capture, activation, and restoration; conflicts/access failures stay off, detected abandoned ownership blocks activation until recovery/restart, and failed cleanup remains tracked without rewriting already-restored calibration.

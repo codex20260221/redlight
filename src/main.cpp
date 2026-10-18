@@ -1116,7 +1116,8 @@ void ShowTrayMenu(HWND hwnd) {
         g_hotkeys.toggle() ? ShortcutBindingName(*g_hotkeys.toggle()) : NULL,
         g_hotkeys.restore() ? ShortcutBindingName(*g_hotkeys.restore()) : NULL, g_preferences.expiryWarning, g_preferencesUnsaved,
         !g_busy && !g_preferencesApplying && CanChangeSessionLimit(g_sessionTimer, now, *g_displayFilter, g_verification.result().state, g_pendingRestore),
-        !g_busy && !g_preferencesApplying && CanRestartCountdown(g_sessionTimer, now, *g_displayFilter, g_verification.result().state, g_pendingRestore)};
+        !g_busy && !g_preferencesApplying && CanRestartCountdown(g_sessionTimer, now, *g_displayFilter, g_verification.result().state, g_pendingRestore),
+        !g_busy && !g_preferencesApplying && g_restorationHistory.inProgress() == 0};
     HMENU menu = BuildTrayMenu(state);
     if (!menu) { ReportError("Could not build the tray menu."); return; }
     if (!SetForegroundWindow(hwnd)) Diagnostics::Log("SetForegroundWindow failed for tray menu.");
@@ -1263,6 +1264,14 @@ LRESULT HandleWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         case ID_TRAY_SAVE_PREFERENCES: SaveCurrentPreferences(); break;
         case ID_TRAY_RETRY_SESSION: RetrySessionRecovery(); break;
         case ID_TRAY_RETRY_SHORTCUTS: RetrySelectedShortcuts(); break;
+        case ID_TRAY_CLEAR_RESTORATION_HISTORY:
+            if (!g_busy && !g_preferencesApplying) {
+                if (g_restorationHistory.clear()) {
+                    Diagnostics::Log("User cleared in-memory restoration history; filtering, recovery data, and counters unchanged.");
+                    ShowTrayInfo("RedLight restoration history cleared", "The next support report starts with new restoration events. Filtering and recovery data are unchanged.");
+                } else Diagnostics::Log("Restoration history clear skipped: a request is still finishing; retry when idle.");
+            }
+            break;
         case ID_TRAY_RESET_BACKEND_COUNTS:
             if (!g_busy && !g_preferencesApplying) {
                 if (g_displayFilter->resetStatistics()) {

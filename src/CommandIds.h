@@ -21,6 +21,7 @@ inline constexpr unsigned ID_TRAY_SAVE_PREFERENCES = 215;
 inline constexpr unsigned ID_TRAY_RETRY_SESSION = 216;
 inline constexpr unsigned ID_TRAY_RESTART_COUNTDOWN = 217;
 inline constexpr unsigned ID_TRAY_RETRY_SHORTCUTS = 218;
+inline constexpr unsigned ID_TRAY_CLEAR_RESTORATION_HISTORY = 219;
 inline constexpr unsigned ID_HOTKEY_TOGGLE = 1;
 inline constexpr unsigned ID_HOTKEY_RESTORE = 2;
 inline constexpr unsigned ID_TRAY_RETRY_TIMER = 1;

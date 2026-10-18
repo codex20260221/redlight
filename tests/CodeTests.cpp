@@ -26,6 +26,8 @@
 #include "SavedSettings.h"
 #include "CommandHelp.h"
 #include "LoopShutdown.h"
+#include "TrayMenu.h"
+#include <memory>
 #include "InstanceName.h"
 #include "JsonString.h"
 #include "BackendComparison.h"
@@ -48,6 +50,8 @@
 
 namespace {
 enum class Write { Apply, Fail, Ignore, FailAfterApply, LowByteLeak, BlackLift, WhiteLoss };
+struct FakeMenuItem { UINT flags; UINT_PTR value; std::string label; };
+struct FakeMenuData { bool alive = true; std::vector<FakeMenuItem> items; };
 struct RegistryValue { DWORD type; std::vector<char> bytes; };
 struct Fake {
     bool magInit = true, magGet = true, magSet = true, magUninit = true;
@@ -63,6 +67,9 @@ struct Fake {
     unsigned backendClockReads = 0;
     bool* shutdownBusyFlag = nullptr;
     bool shutdownWriteObservedBusy = false;
+    std::vector<std::unique_ptr<FakeMenuData>> menus;
+    unsigned menuCreates = 0, menuAppends = 0, menuDestroys = 0, invalidMenuDestroys = 0;
+    unsigned menuFailCreateAt = 0, menuFailAppendAt = 0;
     int metricMonitors = 1, metricWidth = 1920, metricHeight = 1080, metricRemote = 0;
     unsigned metricReads = 0, unknownMetrics = 0;
     bool clipAllocate = true, clipLock = true, clipOpen = true, clipEmpty = true, clipSet = true, clipClose = true;
@@ -137,6 +144,40 @@ void Check(bool condition, const char* message) {
 }
 BackendOperationStatistics TimedOperationCounts(std::uint64_t requests, std::uint64_t failures) {
     return {requests, failures, 0, BackendOperationTiming{requests, 0, 0, 0}};
+}
+std::size_t AliveFakeMenus() {
+    return static_cast<std::size_t>(std::count_if(fake.menus.begin(), fake.menus.end(), [](const auto& menu) { return menu->alive; }));
+}
+HMENU FakeMenuChild(HMENU owner, std::string_view label) {
+    if (!owner) return nullptr;
+    for (const auto& item : static_cast<FakeMenuData*>(owner)->items)
+        if ((item.flags & MF_POPUP) && item.label == label) return reinterpret_cast<HMENU>(item.value);
+    return nullptr;
+}
+const FakeMenuItem* FakeMenuCommand(HMENU owner, unsigned id, bool recursive = false) {
+    if (!owner) return nullptr;
+    for (const auto& item : static_cast<FakeMenuData*>(owner)->items) {
+        if (item.flags & MF_POPUP) {
+            if (recursive) if (const auto found = FakeMenuCommand(reinterpret_cast<HMENU>(item.value), id, true)) return found;
+        } else if ((item.flags & MF_SEPARATOR) == 0 && item.value == id) return &item;
+    }
+    return nullptr;
+}
+TrayMenuState DefaultMenuState() {
+    return {false, RedMode::LumaRed, true, LumaProfile::Classic, BackendPreference::Automatic, 0, ShortcutProfile::Default,
+        nullptr, nullptr, ExpiryWarning::Off, false, true, false, true};
+}
+bool UniqueMenuAccelerators(const FakeMenuData& menu) {
+    std::array<bool, 256> used{};
+    for (const auto& item : menu.items) for (std::size_t index = 0; index + 1 < item.label.size(); ++index) {
+        if (item.label[index] != '&') continue;
+        unsigned char key = static_cast<unsigned char>(item.label[++index]);
+        if (key == '&') continue;
+        if (key >= 'A' && key <= 'Z') key = static_cast<unsigned char>(key - 'A' + 'a');
+        if (used[key]) return false;
+        used[key] = true;
+    }
+    return true;
 }
 bool Same(const MAGCOLOREFFECT& a, const MAGCOLOREFFECT& b) {
     return std::memcmp(&a, &b, sizeof(a)) == 0;
@@ -3211,8 +3252,144 @@ void LoopShutdownGammaCleanupRetryPreservesOwnership() {
     Check(TryLoopShutdown(filter, 0, busy, [] { return true; }) == LoopShutdownDisposition::ExitSuccess && !filter.needsRestore() &&
         !fake.mutexOwned && !fake.mutexOpen && fake.gammaWrites == writes, "cleanup-only quit retry releases ownership without rewriting already restored calibration");
 }
+void RestorationHistoryClearPreservesActiveRecovery() {
+    MagnificationFilter filter;
+    Check(filter.initialize() && filter.enable(), "active backend before history clear");
+    RestorationHistory history;
+    for (unsigned index = 0; index < 12; ++index) history.record({RestoreReason::Manual, RestoreOutcome::AlreadyClear, index});
+    const auto reads = fake.magReads, writes = fake.magWrites;
+    const auto statistics = filter.statistics();
+    Check(history.clear() && history.size() == 0 && history.overwritten() == 0 && history.inProgress() == 0 && !history.newest(0) &&
+        filter.isActive() && filter.needsRestore() && filter.statistics() == statistics && fake.magReads == reads && fake.magWrites == writes && fake.registryWrites == 0,
+        "idle history clear resets only bounded diagnostics, retaining active output, counters, preferences, and recovery ownership");
+    history.record({RestoreReason::Countdown, RestoreOutcome::Failed, 1000});
+    Check(history.size() == 1 && history.newest(0)->reason == RestoreReason::Countdown && history.overwritten() == 0,
+        "new events record normally after history is cleared");
+    Check(filter.disable(), "original restoration snapshot remains usable after history clear");
+}
+void RestorationHistoryClearGuardsUnfinishedScopes() {
+    RestorationHistory history;
+    history.record({RestoreReason::Manual, RestoreOutcome::AlreadyClear, 0});
+    bool blockedOuter = false, blockedNested = false, blockedAfterNested = false;
+    try {
+        RecordRestorationRequest outer(history, RestoreReason::Countdown, 1000);
+        blockedOuter = history.inProgress() == 1 && !history.clear();
+        {
+            RecordRestorationRequest nested(history, RestoreReason::SessionTransition, 1100);
+            blockedNested = history.inProgress() == 2 && !history.clear();
+            nested.finish(RestoreOutcome::Deferred);
+        }
+        blockedAfterNested = history.inProgress() == 1 && !history.clear();
+        throw 7;
+    } catch (...) {}
+    Check(blockedOuter && blockedNested && blockedAfterNested && history.inProgress() == 0 && history.size() == 3 &&
+        history.newest(0)->outcome == RestoreOutcome::Interrupted, "clear cannot race open/nested/post-backend scopes and unwinding retains outcomes before releasing the guard");
+    Check(history.clear() && history.size() == 0, "clear succeeds after all request scopes finish");
+}
+void RestorationHistoryClearNoAllocationAndReadOnlyPolicy() {
+    RestorationHistory history;
+    history.record({RestoreReason::Manual, RestoreOutcome::Restored, 0});
+    bool cleared = false, allocationUnused = false;
+    {
+        TestMemory::FailNextAllocation fail;
+        cleared = history.clear();
+        allocationUnused = TestMemory::AllocationFailurePending();
+    }
+    Check(cleared && allocationUnused && !CommandMayChangeFilter(ID_TRAY_CLEAR_RESTORATION_HISTORY) && fake.magWrites == 0 && fake.gammaWrites == 0,
+        "clearing in-memory diagnostics allocates no C++ storage and has read-only display-failure policy");
+}
+void ExpertDiagnosticsMenuLayoutAndOwnership() {
+    const auto root = BuildTrayMenu(DefaultMenuState());
+    Check(root && FakeMenuCommand(root, ID_TRAY_RESTORE) && FakeMenuCommand(root, ID_TRAY_TOGGLE), "primary display/recovery actions remain directly available");
+    const auto expert = FakeMenuChild(root, "&Expert controls");
+    const auto diagnostics = FakeMenuChild(expert, "Dia&gnostics");
+    Check(expert && diagnostics && FakeMenuCommand(expert, ID_TRAY_SAVE_PREFERENCES) && FakeMenuCommand(expert, ID_TRAY_IMPORT_PROFILE),
+        "expert choices and preference transfer remain distinct from the diagnostic submenu");
+    for (const auto id : {ID_TRAY_VERIFY_BACKEND, ID_TRAY_COPY_REPORT, ID_TRAY_RETRY_LOGGING, ID_TRAY_RETRY_SESSION,
+        ID_TRAY_RETRY_SHORTCUTS, ID_TRAY_RESET_BACKEND_COUNTS, ID_TRAY_CLEAR_RESTORATION_HISTORY})
+        Check(FakeMenuCommand(diagnostics, id) && !FakeMenuCommand(expert, id), "all diagnostic/retry/bookkeeping actions are grouped exactly once");
+    for (const auto& menu : fake.menus) Check(UniqueMenuAccelerators(*menu), "assigned keyboard accelerators remain unique within each submenu");
+    Check(fake.magReads == 0 && fake.gammaReads == 0 && fake.magWrites == 0 && fake.gammaWrites == 0 && fake.registryReads == 0,
+        "native menu construction uses only fake menu APIs and does no backend/settings work");
+    Check(DestroyMenu(root) && AliveFakeMenus() == 0 && fake.invalidMenuDestroys == 0 && fake.menuDestroys == fake.menus.size(),
+        "one returned root owns every successfully attached submenu without double destruction");
+}
+void ExpertDiagnosticsMenuStateFlags() {
+    auto state = DefaultMenuState();
+    state.needsRestore = true; state.supportsLuma = false; state.mode = RedMode::StrictRed; state.luma = LumaProfile::EqualDetail;
+    state.backendPreference = BackendPreference::Gamma; state.sessionMinutes = 17; state.shortcutProfile = ShortcutProfile::Disabled;
+    state.preferencesUnsaved = true; state.canChangeSessionLimit = false; state.canRestartCountdown = false; state.canClearRestorationHistory = false;
+    const auto root = BuildTrayMenu(state);
+    Check(root, "construct mixed recovery/gamma/unsaved menu state");
+    const auto luma = FakeMenuCommand(root, ID_TRAY_MODE_LUMA_RED, true);
+    const auto preferred = FakeMenuCommand(root, ID_LUMA_PROFILE_BASE + 2, true);
+    const auto clear = FakeMenuCommand(root, ID_TRAY_CLEAR_RESTORATION_HISTORY, true);
+    const auto custom = FakeMenuCommand(root, ID_TRAY_CUSTOM_SESSION, true);
+    const auto restart = FakeMenuCommand(root, ID_TRAY_RESTART_COUNTDOWN, true);
+    const auto save = FakeMenuCommand(root, ID_TRAY_SAVE_PREFERENCES, true);
+    Check(luma && (luma->flags & MF_GRAYED) && preferred && (preferred->flags & MF_CHECKED) && !(preferred->flags & MF_GRAYED) &&
+        clear && (clear->flags & MF_GRAYED) && custom && (custom->flags & MF_GRAYED) && (custom->flags & MF_CHECKED) && restart && (restart->flags & MF_GRAYED),
+        "recovery-disabled timing/history and gamma-preferred Luma choices retain accurate checked/enabled states");
+    Check(save && save->label.find("Retry saving") != std::string::npos && FakeMenuCommand(root, ID_TRAY_TOGGLE)->label.find("Disabled") != std::string::npos,
+        "unsaved preference retry and disabled shortcut captions remain visible");
+    Check(DestroyMenu(root) && AliveFakeMenus() == 0 && fake.invalidMenuDestroys == 0, "state variants release the complete fake menu tree");
+}
+void ExpertMenuCreationFailureCleanupAtEveryBoundary() {
+    auto root = BuildTrayMenu(DefaultMenuState());
+    Check(root, "prepare menu-create boundary count");
+    const auto creates = fake.menuCreates;
+    Check(DestroyMenu(root) && AliveFakeMenus() == 0, "release baseline menus before failure cases");
+    for (unsigned failure = 1; failure <= creates; ++failure) {
+        Reset(); fake.menuFailCreateAt = failure;
+        root = BuildTrayMenu(DefaultMenuState());
+        Check(!root && AliveFakeMenus() == 0 && fake.invalidMenuDestroys == 0 && fake.menuDestroys == fake.menus.size(),
+            "failure at every native menu creation releases all other owned/attached menus exactly once");
+    }
+}
+void ExpertMenuAppendFailureCleanupAtEveryBoundary() {
+    auto root = BuildTrayMenu(DefaultMenuState());
+    Check(root, "prepare menu-append boundary count");
+    const auto appends = fake.menuAppends;
+    Check(DestroyMenu(root) && AliveFakeMenus() == 0, "release baseline tree before append failures");
+    for (unsigned failure = 1; failure <= appends; ++failure) {
+        Reset(); fake.menuFailAppendAt = failure;
+        root = BuildTrayMenu(DefaultMenuState());
+        Check(!root && AliveFakeMenus() == 0 && fake.invalidMenuDestroys == 0 && fake.menuDestroys == fake.menus.size(),
+            "failure at each item/submenu append preserves ownership until success and releases all handles without double destruction");
+    }
+}
 } // namespace
 
+HMENU CreatePopupMenu() {
+    ++fake.menuCreates;
+    if (fake.menuFailCreateAt == fake.menuCreates) { fake.lastError = ERROR_NOT_ENOUGH_MEMORY; return nullptr; }
+    try {
+        auto menu = std::make_unique<FakeMenuData>();
+        const auto handle = menu.get();
+        fake.menus.push_back(std::move(menu));
+        return handle;
+    } catch (...) { fake.lastError = ERROR_NOT_ENOUGH_MEMORY; return nullptr; }
+}
+BOOL AppendMenuA(HMENU handle, UINT flags, UINT_PTR value, const char* label) {
+    ++fake.menuAppends;
+    if (!handle || !static_cast<FakeMenuData*>(handle)->alive || fake.menuFailAppendAt == fake.menuAppends) {
+        fake.lastError = ERROR_NOT_ENOUGH_MEMORY; return FALSE;
+    }
+    try {
+        static_cast<FakeMenuData*>(handle)->items.push_back({flags, value, label ? label : ""});
+        return TRUE;
+    } catch (...) { fake.lastError = ERROR_NOT_ENOUGH_MEMORY; return FALSE; }
+}
+BOOL DestroyMenu(HMENU handle) {
+    ++fake.menuDestroys;
+    if (!handle || !static_cast<FakeMenuData*>(handle)->alive) { ++fake.invalidMenuDestroys; fake.lastError = ERROR_INVALID_HANDLE; return FALSE; }
+    auto& menu = *static_cast<FakeMenuData*>(handle);
+    menu.alive = false;
+    bool succeeded = true;
+    for (const auto& item : menu.items) if (item.flags & MF_POPUP)
+        if (!DestroyMenu(reinterpret_cast<HMENU>(item.value))) succeeded = false;
+    return succeeded ? TRUE : FALSE;
+}
 DWORD GetLastError() { return fake.lastError; }
 std::uint64_t GetTickCount64() { ++fake.backendClockReads; return fake.monotonicNow; }
 int GetSystemMetrics(int metric) {
@@ -3593,6 +3770,10 @@ int main() {
         {"Quit failure resumes controls/snapshot", LoopShutdownFailureResumesControlsAndPreservesSnapshot}, {"Quit cleanup-only failure/retry", LoopShutdownCleanupFailureKeepsOffControlsAvailable},
         {"Quit fatal/missing-control failure paths", LoopShutdownFatalAndMissingControlPathsStayFailures}, {"Quit respects outer busy ownership", LoopShutdownDefersOuterBusyOperation},
         {"Quit gamma cleanup ownership retry", LoopShutdownGammaCleanupRetryPreservesOwnership},
+        {"Restoration history clear preserves backend", RestorationHistoryClearPreservesActiveRecovery}, {"Restoration history clear blocks open scopes", RestorationHistoryClearGuardsUnfinishedScopes},
+        {"Restoration history clear allocation/policy", RestorationHistoryClearNoAllocationAndReadOnlyPolicy}, {"Expert diagnostic menu layout/ownership", ExpertDiagnosticsMenuLayoutAndOwnership},
+        {"Expert diagnostic menu state flags", ExpertDiagnosticsMenuStateFlags}, {"Expert menu create failure cleanup matrix", ExpertMenuCreationFailureCleanupAtEveryBoundary},
+        {"Expert menu append failure cleanup matrix", ExpertMenuAppendFailureCleanupAtEveryBoundary},
         {"Command line", Arguments}
     };
     int failed = 0;
