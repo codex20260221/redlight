@@ -1,6 +1,6 @@
 # Red-only fade-in contract (issue #3)
 
-This defines the initial implementation scope before adding transition code. It is a design, not a claim that fade-in is already available or hardware-qualified. Brightness and optional startup are implemented separately. The [issue discussion](https://github.com/michaelmawhinney/redlight/issues/3#issuecomment-4401991857) calls for intermediate red intensity while preserving green/blue elimination and immediate recovery.
+This defines the initial implementation scope. Elapsed-time progress and backend-coordination headers now have isolated regression coverage; production UI/profile/timer routing is not integrated yet. Fade-in is not available or hardware-qualified. Brightness and optional startup are implemented separately. The [issue discussion](https://github.com/michaelmawhinney/redlight/issues/3#issuecomment-4401991857) calls for intermediate red intensity while preserving green/blue elimination and immediate recovery.
 
 ## User behavior
 

@@ -48,6 +48,7 @@
 #include "LumaPreference.h"
 #include "BrightnessPreference.h"
 #include "StartupRegistration.h"
+#include "FadeInControl.h"
 #include "BuildMetadata.h"
 #include "VerificationCache.h"
 #include <map>
@@ -70,6 +71,7 @@ struct FakeMenuItem { UINT flags; UINT_PTR value; std::string label; };
 struct FakeMenuData { bool alive = true; std::vector<FakeMenuItem> items; };
 struct RegistryValue { DWORD type; std::vector<char> bytes; };
 struct FakeIconRequest { HINSTANCE instance; unsigned resource, type; int width, height; unsigned flags; DWORD errorBefore; };
+struct FakeWindowTimer { HWND owner = nullptr; UINT_PTR id = 0; };
 struct Fake {
     std::wstring modulePath = L"C:\\RedLight\\RedLight.exe";
     bool modulePathAvailable = true, moduleTargetInvalid = false;
@@ -104,6 +106,8 @@ struct Fake {
     std::uint64_t monotonicNow = 0, magReadMilliseconds = 0, magWriteMilliseconds = 0, gammaReadMilliseconds = 0, gammaWriteMilliseconds = 0;
     unsigned backendClockReads = 0;
     bool* shutdownBusyFlag = nullptr;
+    RedFadeIn* cancelFadeOnWrite = nullptr;
+    bool* fadeRestoreOnWrite = nullptr;
     bool shutdownWriteObservedBusy = false;
     std::vector<std::unique_ptr<FakeMenuData>> menus;
     unsigned menuCreates = 0, menuAppends = 0, menuDestroys = 0, invalidMenuDestroys = 0;
@@ -141,6 +145,7 @@ struct Fake {
     WPARAM statusWparam = 0;
     LPARAM statusLparam = 0;
     bool countdownSet = true, countdownKill = true, countdownInstalled = false;
+    std::array<FakeWindowTimer, 8> windowTimers{};
     std::optional<DWORD> countdownSetError = ERROR_ACCESS_DENIED, countdownKillError = ERROR_ACCESS_DENIED;
     unsigned countdownSets = 0, countdownKills = 0, countdownInterval = 0;
     HWND countdownSetOwner = nullptr, countdownKillOwner = nullptr, countdownOwner = nullptr;
@@ -6114,6 +6119,147 @@ void TrayCommandFallbackExceptionRetainsRecoveryRequest() {
         RecoveryAfterUiFailure(false, pending, true) == UiFailureRecovery::Defer,
         "fallback exceptions propagate to the native callback guard with a retained request even for a tray notification");
 }
+void FadePolicyDurationsAndAllTargets() {
+    RedFadeIn fade;
+    Check(!fade.active() && !fade.due(0), "no implicit animation before confirmed enable");
+    for (const auto duration : FadeInOptions) {
+        Check(ParseFadeInDuration(FadeInToken(duration)) == duration && ValidFadeInDuration(duration), "duration choices have canonical fixed tokens");
+        if (duration == FadeInDuration::Off) continue;
+        for (unsigned target = 2; target <= 100; ++target) {
+            Check(fade.start(target, duration, 1234), "start every supported target/duration");
+            const auto total = static_cast<std::uint64_t>(duration) * 1000;
+            unsigned writes = 0, previous = 1;
+            for (std::uint64_t elapsed = 0; elapsed <= total; elapsed += 100) {
+                const auto wanted = fade.due(1234 + elapsed);
+                if (!wanted) continue;
+                Check(*wanted > previous && *wanted <= target && fade.confirmedPercent() == previous,
+                    "elapsed requests are bounded monotonic red levels and do not confirm themselves");
+                Check(fade.confirm(*wanted), "caller confirms a successful requested level"); previous = *wanted; ++writes;
+            }
+            Check(!fade.active() && fade.confirmedPercent() == target && writes <= target - 1 && !fade.due(1234 + total + 1),
+                "late/end ticks finish once without replaying levels or exceeding 99 writes");
+        }
+    }
+    for (const auto token : {"", "0", "60", "60s", " 5s", "5S", "2m"}) Check(!ParseFadeInDuration(token), "invalid duration tokens cannot silently select an animation");
+}
+void FadePolicyWrapCancellationAndValidation() {
+    RedFadeIn fade;
+    Check(fade.start(100, FadeInDuration::Seconds5, 1000) && !fade.due(1000) && fade.due(3500) == 50u && fade.confirmedPercent() == 1,
+        "half-time calculation starts from red-only 1 percent and separates requested versus confirmed progress");
+    Check(fade.due(3500) == 50u && !fade.confirm(0) && !fade.confirm(101) && fade.confirm(50) && !fade.due(3500),
+        "unconfirmed requests repeat safely, invalid confirmations fail, and confirmed levels are not replayed");
+    Check(!fade.start(0, FadeInDuration::Seconds5, 0) && !fade.start(100, static_cast<FadeInDuration>(61), 0) && fade.active() && fade.confirmedPercent() == 50,
+        "invalid restarts cannot erase a valid plan");
+    fade.cancel(); Check(!fade.active() && !fade.due(999999) && !fade.confirm(100), "logical cancellation prevents stale messages or confirmations from reactivating a plan");
+    const auto maximum = (std::numeric_limits<std::uint64_t>::max)();
+    Check(fade.start(100, FadeInDuration::Seconds5, maximum - 999) && fade.due(1500) == 50u && fade.due(4000) == 100u && fade.confirm(100),
+        "unsigned monotonic wrap and long/delayed ticks produce the current bounded level without overflow");
+    Check(!fade.start(1, FadeInDuration::Minute, 0) && !fade.start(100, FadeInDuration::Off, 0) && !fade.active(), "target 1 and Off require no animation");
+}
+void FadeActivationAndConfirmedProgress() {
+    MagnificationFilter filter; RedFadeIn fade; BackendVerificationCache verification; SessionTimer session;
+    Check(filter.initialize(), "prepare fade backend");
+    fake.effect.transform[4][2] = 0.13f; const auto original = fake.effect;
+    Check(PrepareFadeInActivation(filter, 80, FadeInDuration::Seconds5) && filter.brightnessPercent() == 1 && Same(fake.effect, original) && fake.magWrites == 0 &&
+        !StartFadeInAfterEnable(fade, filter, 80, FadeInDuration::Seconds5, 0), "off-state preparation does not write and cannot start a fade before activation");
+    Check(filter.enable() && StartFadeInAfterEnable(fade, filter, 80, FadeInDuration::Seconds5, 1000), "fade starts only after checked red-only 1 percent enable");
+    verification.record(filter.inspectState(), 1000, 1001);
+    const auto reads = fake.magReads, writes = fake.magWrites;
+    Check(AdvanceFadeIn(fade, filter, verification, session, 1000, false, false) == FadeInStep::Waiting && fake.magReads == reads && fake.magWrites == writes,
+        "unchanged integer progress does not touch the backend or verification cache");
+    Check(AdvanceFadeIn(fade, filter, verification, session, 3500, false, false) == FadeInStep::Applied && filter.brightnessPercent() == 40 &&
+        fade.confirmedPercent() == 40 && verification.result().state == BackendVerification::NotChecked,
+        "a real checked step advances confirmation and invalidates the older explicit cache");
+    Check(AdvanceFadeIn(fade, filter, verification, session, 99999, false, false) == FadeInStep::Completed && !fade.active() && filter.brightnessPercent() == 80 &&
+        filter.disable() && Same(fake.effect, original), "a delayed completion keeps the same arbitrary original restorable");
+    Check(PrepareFadeInActivation(filter, 80, FadeInDuration::Off) && filter.enable() && filter.brightnessPercent() == 80,
+        "later immediate activation cannot accidentally reuse a prior intermediate 1-percent level");
+    Check(!PrepareFadeInActivation(filter, 100, FadeInDuration::Minute) && filter.brightnessPercent() == 80 && filter.disable(),
+        "activation preparation refuses owned active output rather than replacing it with an initial stage");
+}
+void FadeBusyAttentionAndQueuedRestore() {
+    for (unsigned reason = 0; reason < 5; ++reason) {
+        Reset(); MagnificationFilter filter; RedFadeIn fade; BackendVerificationCache verification; SessionTimer session;
+        Check(filter.initialize() && PrepareFadeInActivation(filter, 100, FadeInDuration::Minute) && filter.enable() &&
+            StartFadeInAfterEnable(fade, filter, 100, FadeInDuration::Minute, 0), "prepare fade attention/busy cases");
+        if (reason == 0) verification.record({BackendVerification::Changed}, 1, 2);
+        if (reason == 1) verification.record({BackendVerification::Unavailable}, 1, 2);
+        const auto reads = fake.magReads, writes = fake.magWrites;
+        const bool busy = reason == 2 || reason == 4, restoreRequested = reason == 3 || reason == 4;
+        const auto outcome = AdvanceFadeIn(fade, filter, verification, session, 30000, busy, restoreRequested);
+        Check(outcome == (reason == 2 ? FadeInStep::Waiting : FadeInStep::Cancelled) && fade.active() == (reason == 2) &&
+            fake.magReads == reads && fake.magWrites == writes, "attention cancels without a color call; busy defers; queued restoration wins even when busy");
+        if (reason < 2) Check(verification.result().state == (reason ? BackendVerification::Unavailable : BackendVerification::Changed), "read-only attention is retained and never promoted to a matching check");
+        fade.cancel(); Check(filter.disable(), "normal restoration remains available after stopping automatic progress");
+    }
+}
+void FadeExpiryAndGammaPreferenceIsolation() {
+    MagnificationFilter filter; RedFadeIn fade; BackendVerificationCache verification; SessionTimer session;
+    Check(filter.initialize() && PrepareFadeInActivation(filter, 100, FadeInDuration::Minute) && filter.enable() &&
+        StartFadeInAfterEnable(fade, filter, 100, FadeInDuration::Minute, 1000) && session.configure(1, 0, true), "prepare countdown ending before fade completion");
+    const auto writes = fake.magWrites;
+    Check(AdvanceFadeIn(fade, filter, verification, session, 60000, false, false) == FadeInStep::Expired && !fade.active() && fake.magWrites == writes &&
+        session.restoreDue(60000) && filter.disable(), "countdown deadline outranks another red write and remains immediately eligible for ordinary restoration");
+    GammaRampFilter gamma;
+    Check(gamma.initialize(), "prepare independent Gamma capability");
+    const auto reads = fake.gammaReads, gammaWrites = fake.gammaWrites; const auto stats = gamma.statistics(); const auto error = std::string(gamma.lastError());
+    Check(PrepareFadeInActivation(gamma, 1, FadeInDuration::Minute) && !WantsFadeIn(gamma, 100, FadeInDuration::Minute) &&
+        fake.gammaReads == reads && fake.gammaWrites == gammaWrites && gamma.statistics() == stats && error == gamma.lastError(),
+        "Gamma keeps fixed brightness and has no fade preparation calls or state/error mutation");
+}
+void FadeStepFailuresRetainOriginal() {
+    for (unsigned failure = 0; failure < 7; ++failure) {
+        Reset(); MagnificationFilter filter; RedFadeIn fade; BackendVerificationCache verification; SessionTimer session;
+        Check(filter.initialize() && PrepareFadeInActivation(filter, 100, FadeInDuration::Seconds5), "prepare failing step");
+        fake.effect.transform[0][1] = 0.11f; const auto original = fake.effect;
+        Check(filter.enable() && StartFadeInAfterEnable(fade, filter, 100, FadeInDuration::Seconds5, 0), "activate initial confirmed stage");
+        const Write actions[] = {Write::Fail, Write::FailAfterApply, Write::Ignore, Write::LowByteLeak, Write::BlackLift, Write::MatrixNonfinite, Write::Apply};
+        fake.magWriteResults = {actions[failure], Write::Apply};
+        if (failure == 6) fake.magReadResults = {false, true};
+        Check(AdvanceFadeIn(fade, filter, verification, session, 2500, false, false) == FadeInStep::BackendFailed && !fade.active() &&
+            fade.confirmedPercent() == 1 && filter.brightnessPercent() == 1 && filter.isActive(), "failed/partial/ignored/leaking/nonfinite/unreadable steps never confirm progress and stop after checked rollback");
+        const auto writes = fake.magWrites;
+        Check(AdvanceFadeIn(fade, filter, verification, session, 5000, false, false) == FadeInStep::Idle && fake.magWrites == writes, "stale fade work cannot reapply after a failure");
+        fake.magWriteResults = {Write::FailAfterApply}; Check(!filter.disable() && !filter.isActive() && filter.needsRestore(), "failed immediate recovery retains original ownership");
+        Check(filter.disable() && Same(fake.effect, original), "subsequent normal Restore still writes the same preactivation original");
+    }
+}
+void FadeCancellationDuringNativeWrite() {
+    MagnificationFilter filter; RedFadeIn fade; BackendVerificationCache verification; SessionTimer session;
+    Check(filter.initialize() && PrepareFadeInActivation(filter, 100, FadeInDuration::Seconds5), "prepare nested cancellation");
+    const auto original = fake.effect;
+    Check(filter.enable() && StartFadeInAfterEnable(fade, filter, 100, FadeInDuration::Seconds5, 0), "start confirmed fade");
+    bool restoreRequested = false; fake.cancelFadeOnWrite = &fade; fake.fadeRestoreOnWrite = &restoreRequested;
+    const auto outcome = AdvanceFadeIn(fade, filter, verification, session, 2500, false, false);
+    fake.cancelFadeOnWrite = nullptr; fake.fadeRestoreOnWrite = nullptr;
+    Check(outcome == FadeInStep::Cancelled && !fade.active() && restoreRequested &&
+        fade.confirmedPercent() == 1 && filter.brightnessPercent() == 50, "a completed in-flight write cannot reactivate or confirm a logically canceled plan");
+    Check(filter.disable() && Same(fake.effect, original), "outer owner can immediately fulfill the deferred restoration request with the original");
+}
+void FadeTimerPeriodAndCountdownCoexistence() {
+    CountdownTimerRegistration countdown, fade;
+    const auto owner = reinterpret_cast<HWND>(std::uintptr_t{0x1234});
+    Check(countdown.install(owner, ID_SESSION_TIMER) && fake.countdownInterval == 1000 && fade.install(owner, 3, 100) && fake.countdownInterval == 100 &&
+        fake.countdownSetId == 3 && countdown.installed() && fade.installed(), "separate window timers share checked ownership without changing the countdown default");
+    const auto sets = fake.countdownSets;
+    Check(!fade.install(owner, 3, 0) && fake.countdownSets == sets && fade.installed(), "zero periods are rejected before native mutation without losing ownership");
+    fake.countdownKill = false; Check(!fade.remove() && fade.installed(), "failed fade cleanup retains exact window/id");
+    fake.countdownKill = true;
+    Check(countdown.remove() && fade.installed() && fake.countdownInstalled && fake.countdownId == 3 && fade.remove() && !fake.countdownInstalled,
+        "removing either timer does not stop the other's native registration");
+}
+void FadeProgressAndTimersWithoutAllocation() {
+    MagnificationFilter filter; RedFadeIn fade; BackendVerificationCache verification; SessionTimer session; CountdownTimerRegistration registration;
+    Check(filter.initialize() && PrepareFadeInActivation(filter, 100, FadeInDuration::Seconds5) && filter.enable() &&
+        StartFadeInAfterEnable(fade, filter, 100, FadeInDuration::Seconds5, 0), "prepare allocation-free progress");
+    bool advanced = false, timer = false, noAllocation = false;
+    { TestMemory::FailNextAllocation failure;
+        advanced = AdvanceFadeIn(fade, filter, verification, session, 2500, false, false) == FadeInStep::Applied;
+        timer = registration.install(reinterpret_cast<HWND>(std::uintptr_t{0x1234}), 3, 100) && registration.remove();
+        noAllocation = TestMemory::AllocationFailurePending(); }
+    Check(advanced && timer && noAllocation && filter.brightnessPercent() == 50 && fade.confirmedPercent() == 50, "checked progress and window timer ownership require no C++ heap allocation");
+    fade.cancel(); Check(filter.disable(), "original restoration remains independent of progress storage");
+}
 void PutStartupEntry(std::wstring_view command) {
     fake.startupPresent = true; fake.startupType = REG_SZ;
     fake.startupBytes.resize((command.size() + 1) * sizeof(wchar_t));
@@ -6831,17 +6977,25 @@ LRESULT SendMessageTimeoutA(HWND, unsigned message, WPARAM wparam, LPARAM lparam
 UINT_PTR SetTimer(HWND owner, UINT_PTR id, UINT interval, TIMERPROC callback) {
     ++fake.countdownSets; fake.countdownSetOwner = owner; fake.countdownSetId = id;
     fake.countdownInterval = interval; fake.countdownCallback = callback; fake.countdownErrorBeforeSet = fake.lastError;
-    if (!fake.countdownSet) { if (fake.countdownSetError) fake.lastError = *fake.countdownSetError; return 0; }
+    if (!fake.countdownSet || !fake.countdownReturn) { if (fake.countdownSetError) fake.lastError = *fake.countdownSetError; return 0; }
+    auto slot = std::find_if(fake.windowTimers.begin(), fake.windowTimers.end(), [&](const auto& timer) { return timer.owner == owner && timer.id == id; });
+    if (slot == fake.windowTimers.end()) slot = std::find_if(fake.windowTimers.begin(), fake.windowTimers.end(), [](const auto& timer) { return !timer.owner; });
+    if (slot == fake.windowTimers.end()) { fake.lastError = ERROR_NOT_ENOUGH_MEMORY; return 0; }
+    *slot = {owner, id};
     fake.countdownInstalled = true; fake.countdownOwner = owner; fake.countdownId = id;
     return fake.countdownReturn;
 }
 BOOL KillTimer(HWND owner, UINT_PTR id) {
     ++fake.countdownKills; fake.countdownKillOwner = owner; fake.countdownKillId = id; fake.countdownErrorBeforeKill = fake.lastError;
-    if (!fake.countdownKill || !fake.countdownInstalled || owner != fake.countdownOwner || id != fake.countdownId) {
+    const auto slot = std::find_if(fake.windowTimers.begin(), fake.windowTimers.end(), [&](const auto& timer) { return timer.owner == owner && timer.id == id; });
+    if (!fake.countdownKill || slot == fake.windowTimers.end()) {
         if (fake.countdownKillError) fake.lastError = *fake.countdownKillError;
         return 0;
     }
-    fake.countdownInstalled = false; fake.countdownOwner = nullptr; fake.countdownId = 0;
+    *slot = {};
+    const auto remaining = std::find_if(fake.windowTimers.begin(), fake.windowTimers.end(), [](const auto& timer) { return timer.owner != nullptr; });
+    fake.countdownInstalled = remaining != fake.windowTimers.end();
+    fake.countdownOwner = fake.countdownInstalled ? remaining->owner : nullptr; fake.countdownId = fake.countdownInstalled ? remaining->id : 0;
     return 1;
 }
 DWORD GetCurrentProcessId() { ++fake.processIdReads; return fake.processId; }
@@ -6898,6 +7052,10 @@ BOOL MagGetFullscreenColorEffect(MAGCOLOREFFECT* effect) {
 BOOL MagSetFullscreenColorEffect(MAGCOLOREFFECT* effect) {
     fake.monotonicNow += fake.magWriteMilliseconds;
     ++fake.magWrites;
+    if (fake.cancelFadeOnWrite) {
+        fake.cancelFadeOnWrite->cancel(); fake.cancelFadeOnWrite = nullptr;
+        if (fake.fadeRestoreOnWrite) { *fake.fadeRestoreOnWrite = true; fake.fadeRestoreOnWrite = nullptr; }
+    }
     if (fake.shutdownBusyFlag) fake.shutdownWriteObservedBusy = *fake.shutdownBusyFlag;
     auto result = fake.magSet ? Write::Apply : Write::Fail;
     if (!fake.magWriteResults.empty()) { result = fake.magWriteResults.front(); fake.magWriteResults.pop_front(); }
@@ -7037,6 +7195,11 @@ std::optional<std::string> RecentLogText() noexcept {
 }
 int main() {
     const std::pair<const char*, void(*)()> tests[] = {
+        {"Fade durations/all target progress", FadePolicyDurationsAndAllTargets}, {"Fade wrap/cancel/invalid confirmation", FadePolicyWrapCancellationAndValidation},
+        {"Fade activation/confirmed progress", FadeActivationAndConfirmedProgress}, {"Fade busy/attention/queued restore", FadeBusyAttentionAndQueuedRestore},
+        {"Fade expiry/Gamma isolation", FadeExpiryAndGammaPreferenceIsolation}, {"Fade step failures/original retention", FadeStepFailuresRetainOriginal},
+        {"Fade cancellation during native write", FadeCancellationDuringNativeWrite}, {"Fade/countdown timer ownership coexistence", FadeTimerPeriodAndCountdownCoexistence},
+        {"Fade progress/timers without allocation", FadeProgressAndTimersWithoutAllocation},
         {"Startup default/consent/native targets", StartupDefaultConsentAndExactParameters}, {"Startup portable path bounds", StartupPathBoundsAndRefusal},
         {"Startup executable error provenance", StartupNativePathErrorProvenance}, {"Startup unreadable/malformed refusal", StartupUnreadableOrMalformedEntries},
         {"Startup stale review/proposed path", StartupReviewChangesRequireNewConsent}, {"Startup failed/ambiguous mutations", StartupMutationFailuresPreserveObservedTruth},

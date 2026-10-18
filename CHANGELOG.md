@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Add isolated elapsed-time fade-in progress/backend coordination and checked window-timer period support, preserving the countdown's one-second default and retained cleanup ownership. This is an implementation foundation; production fade-in controls and profile integration remain pending.
 - Define the planned optional red-only activation fade-in, immediate restoration/cancellation rules, timing/ownership boundaries, and required isolated/manual validation before production integration.
 - Add a structured display/backend bug-report form requesting versions, selected mode/backend/brightness, monitor/GPU/color-tool details, recovery observations, and optional support reports/logs, with unavailable-data and redaction guidance.
 - Add optional, disabled-by-default per-user Start with Windows controls with explicit command/entry review, quoted portable executable paths, bounded Unicode Run entries, confirmed removal, refresh/retry, stale-review refusal, and checked read-back after failures. Keep startup consent separate from profiles/reset and preserve filter-off launches, current display state, and restoration ownership.

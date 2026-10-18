@@ -1,6 +1,6 @@
 # Issue-driven development checkpoint — 2026-10-18
 
-The user resumed the issue-driven goal from clean local commit `693d204`. Integrated brightness is committed as `7ced3fe`, optional per-user startup as `b12065a`, and the local issue form as `0e24d03`. This data-only checkpoint defines initial transition semantics on `release/0.6.0-rc1`; runtime code is unchanged from `b12065a`. Continue autonomously through the roadmap until externally interrupted. No production transition implementation is in progress at this checkpoint.
+The user resumed the issue-driven goal from clean local commit `693d204`. Brightness is committed as `7ced3fe`, optional startup as `b12065a`, the local issue form as `0e24d03`, and transition design as `2992d5b`. This checkpoint adds tested fade-in progress/backend coordination and explicit window timer periods on `release/0.6.0-rc1`. Production fade UI/profile/timer routing is still pending. Continue autonomously through the roadmap until externally interrupted; no uncommitted implementation remains at this checkpoint.
 
 ## New issue-driven direction
 
@@ -53,14 +53,15 @@ The focused audit is committed as `4a1dd71`. The detailed state table, ownership
 | `7ced3fe` | Issue #1 integrated 1–100% red brightness, schema-4 profiles, independent Gamma policy, and isolated failure regressions |
 | `b12065a` | Issue #17 consented per-user startup, portable path/entry review and verified removal, fake-registry failure coverage |
 | `0e24d03` | Issue #16 local structured display/backend report form; static-only review, no publication |
-| This checkpoint | Initial issue #3 activation-only red fade-in contract defined before code; implementation pending |
+| `2992d5b` | Initial issue #3 activation-only red fade-in contract defined before code |
+| This checkpoint | Isolated fade progress/backend/cache coordination; checked timer period extension, native integration pending |
 
 All commits are local. Each feature's evidence and unexecuted manual notes are recorded in [release validation](docs/release-validation.md#expert-feature-follow-up-validation).
 
 ## Verified checkpoint
 
 - Release and MSVC `/analyze` builds passed.
-- **427 isolated C++ scenarios passed** across two CTest targets: 404 core/fake-API and 23 fake-filesystem diagnostics scenarios. Brightness adds 15 scenarios and expands all-field preview/comparison coverage to all 128 subsets. Startup adds 11 consent/path/registry/menu/recovery scenarios with exact target assertions.
+- **436 isolated C++ scenarios passed** across two CTest targets: 413 core/fake-API and 23 fake-filesystem diagnostics scenarios. Brightness adds 15, startup 11, and fade coordination 9 scenarios. All-field preview/comparison coverage spans 128 subsets; all backend ownership and startup target assertions remain in force.
 - `tools/Test-TrayIcons.ps1` verifies four deterministic original monochrome resources at seven sizes, distinct shapes, transparency, bounded file layout, and Strict/Luma endpoint contrast. The off-screen asset contact sheet was inspected without launching RedLight.
 - Both test executables passed the KERNEL32-only import gate before execution. RedLight itself was never executed.
 - Static release checks passed: seven reviewed Windows DLLs, x64 GUI executable, ASLR/DEP, version/prerelease metadata, embedded `asInvoker` manifest, and SHA-256.
@@ -87,7 +88,9 @@ cpack --config build/CPackConfig.cmake -C Release -B build/packages
 
 Start with `git status --short` and this handoff. The worktree should be clean. There is no unfinished fix, active build, or required implementation follow-up from this checkpoint. Manual/native qualification remains unauthorized unless the user changes that restriction.
 
-Implement the defined [activation-only fade-in contract](docs/transition-design.md) next. An optional async question offered activation-only (recommended) versus also fading later brightness edits; after a reasonable unanswered interval, the agent stated it would proceed with activation-only. Incorporate any later user steering. No transition code or schema-5 changes exist at this checkpoint. Candidate implementation: supplied-time pure integer progress plus checked backend/cache coordination; extend the existing checked window timer helper with an explicit period while preserving the countdown's 1000-ms default, and ensure the fake timer models both IDs concurrently. Add schema-5 duration only with full production integration. All Restore/Exit/environment recovery stays immediate. Scheduling then needs manual overrides, sleep/resume, clock/DST/missed triggers, and countdown precedence defined. The old diagnostic capability candidate is superseded.
+Integrate the defined [activation-only fade-in contract](docs/transition-design.md) into native controls/preferences next. An optional async question offered activation-only (recommended) versus also fading later brightness edits; after a reasonable unanswered interval the agent stated activation-only. Incorporate later user steering. `FadeInDuration.h` supplies Off/5s/15s/30s/1m tokens; `RedFadeIn.h` separates requested versus confirmed supplied-time progress; `FadeInControl.h` prepares unowned activation brightness, starts only after confirmed 1%, and coordinates checked steps with cached verification/countdown priority. Failures cancel the plan; native integration must then restore immediately. Attention cancels without a color call. Nested cancellation cannot reconfirm a plan after the setter returns.
+
+`CountdownTimerRegistration::install` now takes an optional positive period (default 1000 ms), retaining original owner/id cleanup rules. Reuse a separate instance for a 100-ms fade timer ID 3. Fake timers model concurrent IDs without allocation. No native fade routing, tray duration controls, or schema-5 field exists yet; schema 4 remains current. Add schema-5 duration only with full production integration. Cancel the logical plan before every restoration request (even busy/deferred), shutdown, and window destruction; stop/retain timer cleanup separately. Start the ordinary countdown at initial confirmed enable; expiry outranks another step. Manual brightness stays immediate, and mode/preset changes complete the prior target first or restore on failure. The full contract has the remaining rules. Scheduling then requires override/sleep/clock/missed-trigger semantics. The old diagnostic capability candidate is superseded.
 
 Preserve these integration boundaries:
 
