@@ -2,6 +2,7 @@
 #include "Diagnostics.h"
 #include <cstring>
 #include <limits>
+#include <algorithm>
 
 namespace {
 void FreeClipboardBlock(HGLOBAL block) {
@@ -45,4 +46,56 @@ bool CopyUtf8TextToClipboard(HWND owner, std::string_view text) {
     if (!closed) Diagnostics::LogFormat("CloseClipboard failed (error %lu).", GetLastError());
     if (!transferred) FreeClipboardBlock(block);
     return transferred && closed;
+}
+
+std::optional<std::string> ReadUtf8TextFromClipboard(HWND owner, std::size_t maxBytes) {
+    if (maxBytes == 0 || maxBytes > 65536) return std::nullopt;
+    // Allocate before opening the clipboard so conversion cannot allocate while it is held.
+    std::string text(maxBytes, '\0');
+    if (!OpenClipboard(owner)) {
+        Diagnostics::LogFormat("OpenClipboard(read) failed (error %lu).", GetLastError());
+        return std::nullopt;
+    }
+    const char* failedAction = nullptr;
+    DWORD failureCode = 0;
+    auto failure = [&](const char* action) {
+        if (!failedAction) { failedAction = action; failureCode = GetLastError(); }
+    };
+    bool read = false;
+    int converted = 0;
+    HGLOBAL block = GetClipboardData(CF_UNICODETEXT);
+    if (!block) failure("GetClipboardData");
+    else {
+        const auto bytes = GlobalSize(block);
+        if (bytes < sizeof(wchar_t) || bytes % sizeof(wchar_t) != 0) {
+            failedAction = "invalid UTF-16 memory size";
+            failureCode = ERROR_INVALID_DATA;
+        }
+        else {
+            const auto* buffer = static_cast<const wchar_t*>(GlobalLock(block));
+            if (!buffer) failure("GlobalLock");
+            else {
+                const auto capacity = (std::min)(bytes / sizeof(wchar_t), maxBytes + 1);
+                std::size_t length = 0;
+                while (length < capacity && buffer[length]) ++length;
+                if (length == capacity) {
+                    failedAction = "missing terminator or profile too large";
+                    failureCode = ERROR_INVALID_DATA;
+                } else if (length == 0) read = true;
+                else {
+                    converted = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, buffer, static_cast<int>(length),
+                        text.data(), static_cast<int>(maxBytes), NULL, NULL);
+                    read = converted != 0;
+                    if (!read) failure("WideCharToMultiByte");
+                }
+                SetLastError(ERROR_SUCCESS);
+                if (!GlobalUnlock(block) && GetLastError() != ERROR_SUCCESS) { read = false; failure("GlobalUnlock"); }
+            }
+        }
+    }
+    if (!CloseClipboard()) { read = false; failure("CloseClipboard"); }
+    if (failedAction) Diagnostics::LogFormat("Clipboard read %s failed (error %lu).", failedAction, failureCode);
+    if (!read) return std::nullopt;
+    text.resize(static_cast<std::size_t>(converted));
+    return text;
 }

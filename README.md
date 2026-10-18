@@ -99,6 +99,8 @@ Use the Automatic override if an unavailable saved backend prevents startup. Gam
 
 **Copy settings profile** copies a small versioned text profile containing preferred red mode, luma detail, next-start backend preference, and session limit. Paste it into a text file to keep or share the configuration. It preserves preferred Luma Red settings even while gamma fallback is running, and includes no enabled state, countdown, recovery snapshot, account identity, or file path. A command-line backend override does not replace the saved next-start preference in the export.
 
+**Import settings profile** reads a copied profile, validates it, and previews all choices before applying. Cancel or invalid input changes nothing. On confirmation, RedLight first restores any active filter, saves one complete configuration, applies available mode/luma preferences, and leaves the filter off. Backend selection applies on the next start. A restoration failure aborts import with recovery data intact; a storage failure keeps prior preferences selected and leaves the already-restored display off. Clipboard reads are bounded to 4096 bytes of UTF-8 text and never clear or replace clipboard contents.
+
 The format uses a RedLightProfile section, version 1, and explicit mode/luma/backend/session_minutes fields. Blank lines, whole-line comments, whitespace around fields, and UTF-8 BOMs are accepted by the parser; duplicates, unknown fields, missing fields, unsupported versions, and invalid ranges are rejected. Profiles are data and contain no commands to execute.
 
 ## Compatibility and limitations

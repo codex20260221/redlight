@@ -10,6 +10,7 @@
 #include "Clipboard.h"
 #include "Preferences.h"
 #include "PreferencesStore.h"
+#include "PreferencesImport.h"
 #include <cstdio>
 
 #include "Diagnostics.h"
@@ -28,6 +29,7 @@
 #define ID_TRAY_LOGS 206
 #define ID_TRAY_COPY_REPORT 207
 #define ID_TRAY_COPY_PROFILE 208
+#define ID_TRAY_IMPORT_PROFILE 209
 #define ID_HOTKEY_TOGGLE 1
 #define ID_HOTKEY_RESTORE 2
 #define ID_TRAY_RETRY_TIMER 1
@@ -90,6 +92,7 @@ void SetRedModeFromTray(RedMode mode);
 void ShowAboutDialog(HWND parent);
 void CopySupportReport(HWND owner);
 void CopySettingsProfile(HWND owner);
+void ImportSettingsProfile(HWND owner);
 void ConfirmClipboardCopy(const char* title, const char* message);
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
@@ -711,6 +714,48 @@ void CopySettingsProfile(HWND owner) {
     ConfirmClipboardCopy("RedLight settings profile copied", "Paste into a text file to keep or share your red-only filter preferences.");
 }
 
+void ImportSettingsProfile(HWND owner) {
+    if (g_busy) return;
+    const auto text = ReadUtf8TextFromClipboard(owner);
+    if (!text) {
+        ReportError("A settings profile could not be read from the clipboard. Copy a RedLight profile as text, then retry.");
+        return;
+    }
+    const auto parsed = ParsePreferences(*text);
+    if (!parsed.preferences) {
+        char error[512];
+        sprintf_s(error, "Settings profile rejected at line %u: %s.\nNo preferences or display state were changed.", parsed.line, parsed.error);
+        ReportError(error);
+        return;
+    }
+    const auto candidate = *parsed.preferences;
+    char preview[768];
+    sprintf_s(preview, "Import these preferences?\n\nMode: %s\nLuma detail: %s\nBackend on next start: %s\n"
+        "Session limit: %u minutes (0 = unlimited)\n\n"
+        "The display will be restored and stay off. Backend selection applies on the next start.\n"
+        "Luma preferences are retained for Magnification when the current backend is gamma.",
+        RedModeDisplayName(candidate.mode), LumaProfileName(candidate.luma), BackendPreferenceName(candidate.backend), candidate.sessionMinutes);
+    if (MessageBoxA(owner, preview, "Import RedLight settings", MB_YESNO | MB_DEFBUTTON2 | MB_ICONQUESTION) != IDYES) return;
+    // Recheck after the modal preview: native callbacks may have run while it was open.
+    if (g_busy) return;
+    const auto saved = SaveImportedPreferences(candidate, [] { return RestoreFilter(true); });
+    if (saved == PreferenceImportResult::Rejected || saved == PreferenceImportResult::RestoreFailed) return;
+    if (saved == PreferenceImportResult::SaveFailed) {
+        ReportError("The imported settings could not be saved. Your previous preferences remain selected; the display is off.");
+        return;
+    }
+    g_preferences = candidate;
+    g_backendPreference = candidate.backend;
+    g_preferencesUnsaved = false;
+    if (!ApplyInactivePreferences(candidate)) {
+        ReportError("The profile was saved, but some preferences could not be applied in this session. Restart RedLight to use them.");
+        return;
+    }
+    Diagnostics::Log("Settings profile imported after validation and explicit preview confirmation; display remains off.");
+    RefreshTrayIconTip();
+    ConfirmClipboardCopy("RedLight settings imported", "Preferences saved. The filter remains off; backend preference applies on the next start.");
+}
+
 void ShowAboutDialog(HWND parent) {
     char aboutText[1024];
     sprintf_s(aboutText, "RedLight " REDLIGHT_VERSION "\n\nBackend: %s\nStartup selection: %s%s\nNext start: %s\nMode: %s\nLuma detail: %s\nStatus: %s\nSettings: %s\n\n"
@@ -808,6 +853,7 @@ void ShowTrayMenu(HWND hwnd) {
         AppendMenuA(menu, MF_STRING, ID_TRAY_LOGS, "Open &logs folder") &&
         AppendMenuA(menu, MF_STRING, ID_TRAY_COPY_REPORT, "Copy support &report") &&
         AppendMenuA(menu, MF_STRING, ID_TRAY_COPY_PROFILE, "Copy settings &profile") &&
+        AppendMenuA(menu, MF_STRING, ID_TRAY_IMPORT_PROFILE, "&Import settings profile") &&
         AppendMenuA(menu, MF_STRING, ID_TRAY_ABOUT, "&About") &&
         AppendMenuA(menu, MF_STRING, ID_TRAY_EXIT, "E&xit");
     if (!built) {
@@ -874,6 +920,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         case ID_TRAY_ABOUT: ShowAboutDialog(hwnd); break;
         case ID_TRAY_COPY_REPORT: CopySupportReport(hwnd); break;
         case ID_TRAY_COPY_PROFILE: CopySettingsProfile(hwnd); break;
+        case ID_TRAY_IMPORT_PROFILE: ImportSettingsProfile(hwnd); break;
         case ID_TRAY_EXIT:
             if (!PostMessageA(hwnd, WM_CLOSE, 0, 0)) ReportError("The exit request could not be queued. Please retry.");
             break;

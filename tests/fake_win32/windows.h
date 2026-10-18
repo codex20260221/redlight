@@ -50,3 +50,8 @@ constexpr DWORD REG_BINARY = 3;
 constexpr DWORD REG_DWORD = 4;
 LSTATUS RegGetValueW(HKEY, const wchar_t*, const wchar_t*, DWORD, DWORD*, void*, DWORD*);
 LSTATUS RegSetKeyValueW(HKEY, const wchar_t*, const wchar_t*, DWORD, const void*, DWORD);
+
+constexpr DWORD WC_ERR_INVALID_CHARS = 128;
+HANDLE GetClipboardData(unsigned);
+std::size_t GlobalSize(HGLOBAL);
+int WideCharToMultiByte(unsigned, DWORD, const wchar_t*, int, char*, int, const char*, BOOL*);

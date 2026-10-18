@@ -8,6 +8,7 @@
 #include "SupportReport.h"
 #include "Preferences.h"
 #include "PreferencesStore.h"
+#include "PreferencesImport.h"
 #include <map>
 #include "Clipboard.h"
 #include <limits>
@@ -33,6 +34,8 @@ struct Fake {
     DWORD lastError = 123;
     bool clipAllocate = true, clipLock = true, clipOpen = true, clipEmpty = true, clipSet = true, clipClose = true;
     bool clipConvert = true, clipSecondConvert = true;
+    bool clipRead = true, clipWideConvert = true;
+    int clipReads = 0, clipUnlocks = 0;
     int clipAllocations = 0, clipFrees = 0, clipOpens = 0, clipEmpties = 0, clipSets = 0, clipCloses = 0, clipConversions = 0;
     std::vector<wchar_t> clipMemory;
     std::map<std::wstring, RegistryValue> registry;
@@ -472,6 +475,50 @@ void PreferencesStoreInvalidLegacy() {
     const auto loaded = LoadPreferences();
     Check(loaded.warning && loaded.preferences == AppPreferences{}, "invalid legacy settings use per-field defaults with diagnostics");
 }
+void ClipboardProfileRead() {
+    const auto text = *SerializePreferences(AppPreferences{});
+    fake.clipMemory.assign(text.begin(), text.end()); fake.clipMemory.push_back(0);
+    const auto read = ReadUtf8TextFromClipboard(nullptr);
+    Check(read == text && ParsePreferences(*read).preferences == AppPreferences{}, "profile read and parser integration");
+    Check(fake.clipOpens == 1 && fake.clipCloses == 1 && fake.clipUnlocks == 1, "read releases clipboard and memory lock");
+    Check(fake.clipEmpties == 0 && fake.clipSets == 0 && fake.clipFrees == 0, "reading never mutates or frees clipboard contents");
+}
+void ClipboardReadBoundsAndFailures() {
+    fake.clipMemory.assign(4098, L'x'); fake.clipMemory.back() = 0;
+    Check(!ReadUtf8TextFromClipboard(nullptr) && fake.clipCloses == 1, "oversized input rejected with clipboard closed");
+    fake.clipMemory.assign(10, L'x');
+    Check(!ReadUtf8TextFromClipboard(nullptr) && fake.clipCloses == 2, "unterminated UTF-16 rejected with bounded scan");
+    fake.clipMemory = {L'a', 0}; fake.clipWideConvert = false;
+    Check(!ReadUtf8TextFromClipboard(nullptr) && fake.clipCloses == 3, "conversion failure closes clipboard");
+    fake.clipWideConvert = true; fake.clipRead = false;
+    Check(!ReadUtf8TextFromClipboard(nullptr) && fake.clipCloses == 4, "missing text handle closes clipboard");
+    fake.clipRead = true; fake.clipClose = false;
+    Check(!ReadUtf8TextFromClipboard(nullptr), "read does not claim success after close failure");
+    Check(fake.clipEmpties == 0 && fake.clipFrees == 0, "failed reads do not mutate data or free Windows-owned handles");
+}
+void PreferencesImportRecoveryGate() {
+    MagnificationFilter filter;
+    Check(filter.initialize() && filter.enable(), "active filter");
+    const AppPreferences original;
+    const AppPreferences candidate{RedMode::StrictRed, LumaProfile::EqualDetail, BackendPreference::Gamma, 60};
+    Check(SavePreferences(original), "seed preferences");
+    const int writes = fake.registryWrites;
+    fake.magSet = false;
+    auto imported = SaveImportedPreferences(candidate, [&] { return filter.disable(); });
+    Check(imported == PreferenceImportResult::RestoreFailed && fake.registryWrites == writes && filter.isActive(), "failed restoration blocks persistence and retains recovery state");
+    fake.magSet = true; fake.registryWrite = false;
+    imported = SaveImportedPreferences(candidate, [&] { return filter.disable(); });
+    Check(imported == PreferenceImportResult::SaveFailed && !filter.isActive() && LoadPreferences().preferences == original, "save failure leaves display restored and old preferences intact");
+    fake.registryWrite = true;
+    Check(SaveImportedPreferences(candidate, [&] { return filter.disable(); }) == PreferenceImportResult::Saved &&
+        !filter.isActive() && LoadPreferences().preferences == candidate, "successful import saves one complete record without activation");
+}
+void PreferencesImportValidationGate() {
+    auto candidate = AppPreferences{}; candidate.sessionMinutes = 999;
+    bool restoreCalled = false;
+    const auto result = SaveImportedPreferences(candidate, [&] { restoreCalled = true; return true; });
+    Check(result == PreferenceImportResult::Rejected && !restoreCalled && fake.registryWrites == 0, "invalid import never reaches display restoration or storage");
+}
 void Arguments() {
     using S = StartupAction;
     Check(ParseArguments({}) == S::Tray, "no arguments");
@@ -527,12 +574,19 @@ HGLOBAL GlobalAlloc(unsigned, std::size_t bytes) {
     return &fake.clipMemory;
 }
 void* GlobalLock(HGLOBAL) { return fake.clipLock ? fake.clipMemory.data() : nullptr; }
-BOOL GlobalUnlock(HGLOBAL) { return 0; }
+BOOL GlobalUnlock(HGLOBAL) { ++fake.clipUnlocks; return 0; }
 HGLOBAL GlobalFree(HGLOBAL) { ++fake.clipFrees; return nullptr; }
 BOOL OpenClipboard(HWND) { ++fake.clipOpens; return fake.clipOpen; }
 BOOL EmptyClipboard() { ++fake.clipEmpties; return fake.clipEmpty; }
 HANDLE SetClipboardData(unsigned, HANDLE handle) { ++fake.clipSets; return fake.clipSet ? handle : nullptr; }
 BOOL CloseClipboard() { ++fake.clipCloses; return fake.clipClose; }
+HANDLE GetClipboardData(unsigned) { ++fake.clipReads; return fake.clipRead ? &fake.clipMemory : nullptr; }
+std::size_t GlobalSize(HGLOBAL) { return fake.clipMemory.size() * sizeof(wchar_t); }
+int WideCharToMultiByte(unsigned, DWORD, const wchar_t* input, int length, char* output, int capacity, const char*, BOOL*) {
+    if (!fake.clipWideConvert || length > capacity) return 0;
+    for (int i = 0; i < length; ++i) output[i] = static_cast<char>(input[i]);
+    return length;
+}
 LSTATUS RegGetValueW(HKEY, const wchar_t*, const wchar_t* name, DWORD flags, DWORD* type, void* output, DWORD* size) {
     if (!fake.registryRead) return ERROR_ACCESS_DENIED;
     const auto found = fake.registry.find(name);
@@ -580,6 +634,8 @@ int main() {
         {"Preference profile text conventions", PreferenceProfileWhitespaceAndOrder},
         {"Preferences migration", PreferencesStoreDefaultsAndMigration}, {"Preferences single-record save", PreferencesStoreFailureAtomicity},
         {"Preferences corruption", PreferencesStoreCorruption}, {"Invalid legacy preferences", PreferencesStoreInvalidLegacy},
+        {"Clipboard profile read", ClipboardProfileRead}, {"Clipboard read bounds", ClipboardReadBoundsAndFailures},
+        {"Preference import recovery gate", PreferencesImportRecoveryGate}, {"Preference import validation gate", PreferencesImportValidationGate},
         {"Command line", Arguments}
     };
     int failed = 0;
