@@ -2112,6 +2112,102 @@ void ShortcutFailureSupportReportIsReadOnly() {
     Check(fake.hotkeyRegisters == 0 && fake.hotkeyUnregisters == 0 && fake.magReads == 0 && fake.gammaReads == 0 && fake.registryReads == 0,
         "cached shortcut diagnostics perform no registration, backend, or preference reads");
 }
+void RestorationHistoryBoundAndSnapshots() {
+    RestorationHistory history;
+    Check(history.size() == 0 && !history.newest(0) && history.overwritten() == 0, "new restoration history has no invented events");
+    for (std::uint64_t index = 0; index < 13; ++index)
+        history.record({RestoreReason::Manual, RestoreOutcome::AlreadyClear, index * 1000});
+    Check(history.size() == 8 && history.overwritten() == 5 && !history.newest(8) && !history.newest((std::numeric_limits<std::size_t>::max)()),
+        "history stays at eight events, counts overwritten records, and rejects out-of-range access before indexing");
+    for (std::size_t index = 0; index < history.size(); ++index)
+        Check(history.newest(index)->requestedAt == (12 - index) * 1000 && RestoreRequestAgeSeconds(*history.newest(index), 15000) == 3 + index,
+            "ring rollover retains correct newest-first order and request age");
+    const auto snapshot = history;
+    history.record({RestoreReason::DisplayChange, RestoreOutcome::Restored, 15000});
+    Check(snapshot.newest(0)->requestedAt == 12000 && snapshot.overwritten() == 5 && history.newest(0)->reason == RestoreReason::DisplayChange,
+        "a copied support-report snapshot is stable across subsequent requests");
+}
+void RestorationHistoryNestedAndInterruptedScopes() {
+    RestorationHistory history;
+    bool deferredRecorded = false;
+    try {
+        RecordRestorationRequest outer(history, RestoreReason::Manual, 1000);
+        {
+            RecordRestorationRequest deferred(history, RestoreReason::SessionTransition, 2000);
+            deferred.finish(RestoreOutcome::Deferred);
+        }
+        deferredRecorded = history.size() == 1 && history.newest(0)->outcome == RestoreOutcome::Deferred;
+        throw std::runtime_error("simulate interrupted recovery callback");
+    } catch (const std::runtime_error&) {}
+    Check(deferredRecorded && history.size() == 2 && history.newest(0)->reason == RestoreReason::Manual && history.newest(0)->outcome == RestoreOutcome::Interrupted &&
+        history.newest(0)->requestedAt == 1000 && history.newest(1)->reason == RestoreReason::SessionTransition && history.newest(1)->outcome == RestoreOutcome::Deferred,
+        "unwinding records interruption and nested deferral in scope-completion order with each original request time");
+}
+void RestorationHistoryRetainsBackendRecovery() {
+    MagnificationFilter filter;
+    Check(filter.initialize() && filter.enable(), "prepare owned restoration data");
+    RestorationHistory history;
+    fake.magSet = false;
+    {
+        RecordRestorationRequest request(history, RestoreReason::Countdown, 1000);
+        request.finish(filter.disable() ? RestoreOutcome::Restored : RestoreOutcome::Failed);
+    }
+    Check(filter.isActive() && filter.needsRestore() && history.newest(0)->outcome == RestoreOutcome::Failed,
+        "recording a failed restore cannot clear the active backend or original recovery snapshot");
+    fake.magSet = true;
+    {
+        RecordRestorationRequest request(history, RestoreReason::Manual, 6000);
+        request.finish(filter.disable() ? RestoreOutcome::Restored : RestoreOutcome::Failed);
+    }
+    SupportReportState state; state.restorationHistory = history; state.reportTick = 7000;
+    const auto reads = fake.magReads, writes = fake.magWrites;
+    const auto statistics = filter.statistics();
+    const auto report = BuildSupportReport(state);
+    Check(report.find("1 seconds ago: Manual control - Backend restoration succeeded") != std::string::npos &&
+        report.find("6 seconds ago: Countdown expiry/retry - Backend restoration failed") != std::string::npos &&
+        !filter.isActive() && !filter.needsRestore() && fake.magReads == reads && fake.magWrites == writes && filter.statistics() == statistics,
+        "history keeps both failed and recovered requests, and viewing it performs no backend calls or bookkeeping changes");
+}
+void RestorationHistoryNoCppAllocation() {
+    RestorationHistory history;
+    bool allocationUnused = false;
+    {
+        TestMemory::FailNextAllocation fail;
+        for (std::uint64_t index = 0; index < 20; ++index) {
+            RecordRestorationRequest request(history, RestoreReason::CallbackFailure, index);
+            request.finish(RestoreOutcome::Deferred);
+        }
+        allocationUnused = TestMemory::AllocationFailurePending();
+    }
+    Check(allocationUnused && history.size() == 8 && history.overwritten() == 12,
+        "recording and overwriting recovery diagnostics uses only bounded in-memory storage during allocation pressure");
+}
+void RestorationHistoryClockWrapAndNames() {
+    const RestoreEvent event{RestoreReason::PowerTransition, RestoreOutcome::Restored, (std::numeric_limits<std::uint64_t>::max)() - 499};
+    Check(RestoreRequestAgeSeconds(event, 499) == 0 && RestoreRequestAgeSeconds(event, 500) == 1,
+        "history ages use whole elapsed seconds across unsigned monotonic wrap");
+    for (const auto reason : {RestoreReason::Manual, RestoreReason::Countdown, RestoreReason::TimerFailure, RestoreReason::DisplayChange,
+        RestoreReason::PowerTransition, RestoreReason::SessionTransition, RestoreReason::ExplorerRestart, RestoreReason::TrayFailure,
+        RestoreReason::ExternalRequest, RestoreReason::Preferences, RestoreReason::Exit, RestoreReason::CallbackFailure, RestoreReason::DeferredRequest})
+        Check(std::string_view(RestoreReasonName(reason)) != "Unknown", "each routed trigger has a readable diagnostic name");
+    for (const auto outcome : {RestoreOutcome::Interrupted, RestoreOutcome::Deferred, RestoreOutcome::AlreadyClear, RestoreOutcome::Restored, RestoreOutcome::Failed})
+        Check(std::string_view(RestoreOutcomeName(outcome)) != "Unknown", "each observed outcome has a readable diagnostic name");
+}
+void RestorationHistorySupportReportBound() {
+    SupportReportState state;
+    Check(BuildSupportReport(state).find("  none recorded\r\nOlder restoration records overwritten: 0") != std::string::npos,
+        "an empty in-memory history is explicit in support reports");
+    for (unsigned index = 0; index < 50; ++index)
+        state.restorationHistory.record({RestoreReason::ExternalRequest, RestoreOutcome::Deferred, index * 1000});
+    state.reportTick = 50000;
+    const auto report = BuildSupportReport(state);
+    std::size_t position = 0, records = 0;
+    while ((position = report.find("External restore request - Deferred while busy", position)) != std::string::npos) { ++records; ++position; }
+    Check(records == 8 && report.find("Older restoration records overwritten: 42") != std::string::npos && report.size() < 5000,
+        "long sessions keep bounded report history and show when earlier events were replaced");
+    Check(fake.magWrites == 0 && fake.gammaWrites == 0 && fake.clipOpens == 0 && fake.registryReads == 0,
+        "formatting restoration history has no native output, clipboard, or settings effects");
+}
 } // namespace
 
 DWORD GetLastError() { return fake.lastError; }
@@ -2401,6 +2497,9 @@ int main() {
         {"Shortcut startup failure diagnostics/retry", ShortcutFailureStartupAndRetryDiagnostics}, {"Shortcut failure retained after rollback", ShortcutFailureSurvivesSuccessfulRollback},
         {"Shortcut rollback failure diagnostics/recovery", ShortcutFailureRollbackAndRecoveryDiagnostics}, {"Shortcut release failure diagnostics", ShortcutFailureReleaseDiagnostics},
         {"Read-only shortcut failure reports", ShortcutFailureSupportReportIsReadOnly},
+        {"Restoration history bound/snapshots", RestorationHistoryBoundAndSnapshots}, {"Restoration history nested/interrupted scopes", RestorationHistoryNestedAndInterruptedScopes},
+        {"Restoration history retains backend recovery", RestorationHistoryRetainsBackendRecovery}, {"Restoration history without C++ allocation", RestorationHistoryNoCppAllocation},
+        {"Restoration history wrap/names", RestorationHistoryClockWrapAndNames}, {"Restoration history bounded support report", RestorationHistorySupportReportBound},
         {"Command line", Arguments}
     };
     int failed = 0;

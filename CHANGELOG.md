@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Added an eight-record in-memory tray restoration history to support reports, showing explicit triggers, request ages, deferred/no-op/restored/failed/interrupted outcomes, nested completion order, and overwritten-record counts without changing recovery decisions or allocating during recording.
 - Added cached shortcut API/error/ID and rollback-failure details to About/support reports, preserving original error codes across logging and successful rollback while clearing diagnostics after healthy retries; actual binding ownership and retry behavior remain unchanged.
 - Added offline `--normalize-profile=<file>` to upgrade valid older profiles and standardize current-format output for comparison/backups, reusing checked bounded read-only input with no preference/backend changes and no stdout on invalid input or file failures.
 - Added monotonic age and inspection duration for the last explicit backend check in About/support reports and duration diagnostics, with absent-versus-zero timing, wrapped-clock handling, and result/timing invalidation together after filter operations; reporting remains read-only.

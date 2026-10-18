@@ -1,6 +1,7 @@
 #pragma once
 #include "DisplayFilter.h"
 #include "ShortcutDiagnostics.h"
+#include "RestorationHistory.h"
 #include <cstdint>
 #include <optional>
 #include <sstream>
@@ -35,6 +36,8 @@ struct SupportReportState {
     std::string_view expiryWarning = "Off";
     BackendStatistics backendStatistics{};
     std::optional<std::uint64_t> remainingSeconds;
+    RestorationHistory restorationHistory;
+    std::uint64_t reportTick = 0;
 };
 inline std::string BuildSupportReport(const SupportReportState& state) {
     std::ostringstream report;
@@ -98,6 +101,15 @@ inline std::string BuildSupportReport(const SupportReportState& state) {
     counts("Verify (mismatch/unavailable counted as failures)", state.backendStatistics.verification);
     counts("Shutdown", state.backendStatistics.shutdown);
     report << "\r\nCounters include idempotent requests and nested recovery calls."
+        << "\r\nRecent tray restoration requests (newest completed scope first; age since request):";
+    if (!state.restorationHistory.size()) report << "\r\n  none recorded";
+    for (std::size_t index = 0; index < state.restorationHistory.size(); ++index) {
+        const auto& event = *state.restorationHistory.newest(index);
+        report << "\r\n  " << RestoreRequestAgeSeconds(event, state.reportTick) << " seconds ago: " << RestoreReasonName(event.reason)
+            << " - " << RestoreOutcomeName(event.outcome);
+    }
+    report << "\r\nOlder restoration records overwritten: " << state.restorationHistory.overwritten()
+        << "\r\nHistory is in-memory control activity; it does not measure display output."
         << "\r\nFile logging: " << state.fileLogging << "\r\nMissing file records: " << state.droppedLogLines
         << "\r\nTruncated records: " << state.truncatedLogLines << "\r\nLast file error: " << state.lastFileError
         << "\r\nLast backend error: " << (state.lastError.empty() ? "none" : state.lastError)

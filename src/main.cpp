@@ -7,6 +7,7 @@
 #include "BuildInfo.h"
 #include "BuildMetadata.h"
 #include "VerificationCache.h"
+#include "RestorationHistory.h"
 #include "SessionTimer.h"
 #include "SessionControl.h"
 #include "BackendSelection.h"
@@ -63,12 +64,13 @@ bool g_startupPreferenceWarning = false;
 bool g_preferencesApplying = false;
 bool g_uiErrorVisible = false;
 BackendVerificationCache g_verification;
+RestorationHistory g_restorationHistory;
 
 }
 
 bool ApplyInactivePreferences(const AppPreferences& preferences);
 void SetBackendPreference(BackendPreference preference);
-bool RestoreFilter(bool showError, bool notifyFailure = true);
+bool RestoreFilter(RestoreReason reason, bool showError, bool notifyFailure = true);
 void StopSessionTimer();
 bool StartSessionTimer(bool restartOnly = false);
 void RestartCountdown();
@@ -436,15 +438,19 @@ void ReportError(const char* message, bool modal) {
     }
 }
 
-bool RestoreFilter(bool showError, bool notifyFailure) {
-    if (g_busy) { g_pendingRestore = true; return false; }
+bool RestoreFilter(RestoreReason reason, bool showError, bool notifyFailure) {
+    RecordRestorationRequest request(g_restorationHistory, reason, GetTickCount64());
+    if (g_busy) { request.finish(RestoreOutcome::Deferred); g_pendingRestore = true; return false; }
     g_pendingRestore = false;
     g_verification = {};
     bool restored = false;
+    bool ownedRestoration = false;
     {
         ScopedFlag busy(g_busy);
-        restored = !g_displayFilter->needsRestore() || g_displayFilter->disable();
+        ownedRestoration = g_displayFilter->needsRestore();
+        restored = !ownedRestoration || g_displayFilter->disable();
     }
+    request.finish(!restored ? RestoreOutcome::Failed : (ownedRestoration ? RestoreOutcome::Restored : RestoreOutcome::AlreadyClear));
     if (restored) {
         g_pendingRestore = false;
         StopSessionTimer();
@@ -464,7 +470,7 @@ void UpdateTrayIconTip(const char* tip) {
     if (g_trayAdded && !Shell_NotifyIconA(NIM_MODIFY, &nid)) {
         Diagnostics::Log("Tray update failed; restoring display before retrying tray registration.");
         g_trayAdded = false;
-        RestoreFilter(false);
+        RestoreFilter(RestoreReason::TrayFailure, false);
         if (!AddTrayIcon()) ScheduleTrayRecovery();
     }
 }
@@ -494,7 +500,7 @@ void ToggleRedlight() {
         return;
     }
     if (g_displayFilter->needsRestore()) {
-        RestoreFilter(true);
+        RestoreFilter(RestoreReason::Manual, true);
     } else {
         Diagnostics::LogFormat("Enable request: %s (%s)", g_displayFilter->name(), RedModeDisplayName(g_displayFilter->redMode()));
         bool enabled = false;
@@ -505,7 +511,7 @@ void ToggleRedlight() {
             enabled = g_displayFilter->enable();
             if (!enabled) strcpy_s(enableError, g_displayFilter->lastError());
         }
-        if (g_pendingRestore) RestoreFilter(false);
+        if (g_pendingRestore) RestoreFilter(RestoreReason::DeferredRequest, false);
         if (enabled && g_displayFilter->isActive()) StartSessionTimer();
         if (!enabled) {
             char message[768];
@@ -535,7 +541,7 @@ bool StartSessionTimer(bool restartOnly) {
     if (!SetTimer(nid.hWnd, ID_SESSION_TIMER, 1000, NULL)) {
         Diagnostics::LogFormat("SetTimer(session) failed (error %lu).", GetLastError());
         g_sessionTimer.cancel();
-        const bool restored = RestoreFilter(false);
+        const bool restored = RestoreFilter(RestoreReason::TimerFailure, false);
         ReportError(restored ? "The auto-restore timer could not be started. The display was restored." :
             "The auto-restore timer could not be started, and restoration needs attention. Use Restore display to retry.");
         return false;
@@ -586,7 +592,7 @@ void OnSessionTimer() {
     if (!g_busy && g_sessionTimer.restoreDue(now)) {
         if (!g_autoRestoreFailureNotified) Diagnostics::Log("Session time limit reached; requesting display restoration.");
         g_sessionTimer.noteRestoreAttempt(now);
-        const bool restored = RestoreFilter(false, !g_autoRestoreFailureNotified);
+        const bool restored = RestoreFilter(RestoreReason::Countdown, false, !g_autoRestoreFailureNotified);
         g_autoRestoreFailureNotified = !restored;
     } else {
         if (!g_busy && !g_preferencesApplying && g_displayFilter->isActive() &&
@@ -627,7 +633,7 @@ void RetrySessionRecovery() {
     if (g_busy || g_preferencesApplying) return;
     bool registered = false;
     { ScopedFlag busy(g_busy); registered = g_sessionNotifications.ensure(nid.hWnd); }
-    const bool restored = !g_pendingRestore || RestoreFilter(false);
+    const bool restored = !g_pendingRestore || RestoreFilter(RestoreReason::DeferredRequest, false);
     if (!registered) {
         ReportError("Session recovery notifications are still unavailable. Restore display remains available. See About and the diagnostics log, then retry session recovery.");
     } else if (restored) {
@@ -639,7 +645,7 @@ void RetrySelectedShortcuts() {
     if (g_busy || g_preferencesApplying) return;
     bool ready = false;
     { ScopedFlag busy(g_busy); ready = g_hotkeys.change(g_preferences.shortcuts); }
-    const bool restored = !g_pendingRestore || RestoreFilter(false);
+    const bool restored = !g_pendingRestore || RestoreFilter(RestoreReason::DeferredRequest, false);
     if (!ready) {
         ReportError("The selected shortcut profile is not fully applied. About shows the available combinations. See the log and retry after resolving conflicts or registration errors.");
     } else if (restored) {
@@ -703,7 +709,7 @@ bool InitializeTrayIcon(HINSTANCE hInstance) {
     if (!AddTrayIcon()) return false;
     const bool shortcutsReady = g_hotkeys.initialize(nid.hWnd, g_preferences.shortcuts);
     { ScopedFlag busy(g_busy); g_sessionNotifications.ensure(nid.hWnd); }
-    if (g_pendingRestore) RestoreFilter(false);
+    if (g_pendingRestore) RestoreFilter(RestoreReason::DeferredRequest, false);
     if (g_displayFilter == &g_gammaRampFilter) {
         ReportError("Using the legacy Strict Red fallback. Driver and multi-monitor support varies. See About and the README for details.", false);
     }
@@ -717,7 +723,7 @@ void SetShortcutProfile(ShortcutProfile profile) {
     if (g_busy || g_preferencesApplying || !IsValidShortcutProfile(static_cast<unsigned>(profile))) return;
     bool changed = false;
     { ScopedFlag busy(g_busy); changed = g_hotkeys.change(profile); }
-    if (g_pendingRestore) RestoreFilter(false);
+    if (g_pendingRestore) RestoreFilter(RestoreReason::DeferredRequest, false);
     if (!changed) {
         ReportError("The shortcut profile could not be applied. The prior preference was kept and rollback was attempted. About lists the actual active bindings.");
         return;
@@ -767,7 +773,7 @@ void SetLumaProfile(LumaProfile profile) {
         result = UpdateLumaPreference(*g_displayFilter, g_preferences, profile);
         if (result == LumaPreferenceResult::BackendFailed) strcpy_s(error, g_displayFilter->lastError());
     }
-    const bool restored = !g_pendingRestore || RestoreFilter(false);
+    const bool restored = !g_pendingRestore || RestoreFilter(RestoreReason::DeferredRequest, false);
     if (result == LumaPreferenceResult::BackendFailed) {
         ReportError(error);
         return;
@@ -808,7 +814,7 @@ void SetRedModeFromTray(RedMode mode) {
         changed = g_displayFilter->setRedMode(mode);
         if (!changed) strcpy_s(modeError, g_displayFilter->lastError());
     }
-    if (g_pendingRestore) RestoreFilter(false);
+    if (g_pendingRestore) RestoreFilter(RestoreReason::DeferredRequest, false);
     if (!changed) {
         Diagnostics::LogFormat("Red mode change to %s failed.", RedModeDisplayName(mode));
         ReportError(modeError);
@@ -842,6 +848,8 @@ void CopySupportReport(HWND owner) {
     state.verificationError = g_verification.result().errorCode;
     state.verificationAgeSeconds = g_verification.ageSeconds(GetTickCount64());
     state.verificationDurationMilliseconds = g_verification.durationMilliseconds();
+    state.restorationHistory = g_restorationHistory;
+    state.reportTick = GetTickCount64();
     state.redMode = RedModeDisplayName(g_displayFilter->redMode());
     state.lumaProfile = g_displayFilter->supportsRedMode(RedMode::LumaRed) ?
         LumaProfileName(g_displayFilter->lumaProfile()) : "Unavailable on gamma";
@@ -924,7 +932,7 @@ void ConfirmPreferences(HWND owner, const AppPreferences& candidate, const char*
     // Recheck after the modal preview: native callbacks may have run while it was open.
     if (g_busy || g_preferencesApplying) return;
     ScopedFlag transaction(g_preferencesApplying);
-    const auto saved = SaveImportedPreferences(candidate, [] { return RestoreFilter(true); });
+    const auto saved = SaveImportedPreferences(candidate, [] { return RestoreFilter(RestoreReason::Preferences, true); });
     if (saved == PreferenceImportResult::Rejected || saved == PreferenceImportResult::RestoreFailed) return;
     if (saved == PreferenceImportResult::SaveFailed) {
         ReportError("The preferences could not be saved. Your previous preferences remain selected; the display is off.");
@@ -959,7 +967,7 @@ void VerifyBackendState(HWND owner) {
         Diagnostics::LogFormat("Explicit verification completed in %llu ms.",
             static_cast<unsigned long long>(g_verification.durationMilliseconds().value_or(0)));
     }
-    if (g_pendingRestore) RestoreFilter(false);
+    if (g_pendingRestore) RestoreFilter(RestoreReason::DeferredRequest, false);
     RefreshTrayIconTip();
     const auto& report = g_verification.result();
     const char* message = BackendVerificationName(report.state);
@@ -1073,9 +1081,12 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             const bool mayChangeFilter = uMsg == WM_COMMAND ? CommandMayChangeFilter(LOWORD(wParam), g_displayFilter->supportsRedMode(RedMode::LumaRed)) :
                 (uMsg == WM_REDLIGHT_UI_ERROR ? wParam != 0 : uMsg != WM_TRAYICON);
             const auto recovery = RecoveryAfterUiFailure(mayChangeFilter, g_pendingRestore, g_busy);
-            if (recovery == UiFailureRecovery::Defer) g_pendingRestore = true;
+            if (recovery == UiFailureRecovery::Defer) {
+                g_pendingRestore = true;
+                g_restorationHistory.record({RestoreReason::CallbackFailure, RestoreOutcome::Deferred, GetTickCount64()});
+            }
             else if (recovery == UiFailureRecovery::Restore) {
-                try { RestoreFilter(false); }
+                try { RestoreFilter(RestoreReason::CallbackFailure, false); }
                 catch (...) {
                     g_pendingRestore = true;
                     Diagnostics::Log("C++ failure during emergency restoration; restore request and recovery data retained.");
@@ -1091,7 +1102,7 @@ LRESULT HandleWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
     if (g_taskbarCreated && uMsg == g_taskbarCreated) {
         g_trayAdded = false;
         Diagnostics::Log("Explorer restarted; restoring display and tray control.");
-        RestoreFilter(false);
+        RestoreFilter(RestoreReason::ExplorerRestart, false);
         if (!AddTrayIcon()) ScheduleTrayRecovery();
         return 0;
     }
@@ -1155,7 +1166,7 @@ LRESULT HandleWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             return 0;
         }
         if (wParam == ID_HOTKEY_TOGGLE) ToggleRedlight();
-        else if (wParam == ID_HOTKEY_RESTORE) RestoreFilter(true);
+        else if (wParam == ID_HOTKEY_RESTORE) RestoreFilter(RestoreReason::Manual, true);
         return 0;
     case WM_COMMAND:
         if (LOWORD(wParam) >= ID_EXPIRY_WARNING_BASE && LOWORD(wParam) <= ID_EXPIRY_WARNING_BASE + 3) {
@@ -1187,7 +1198,7 @@ LRESULT HandleWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             }
             break;
         case ID_TRAY_RESTART_COUNTDOWN: RestartCountdown(); break;
-        case ID_TRAY_RESTORE: RestoreFilter(true); break;
+        case ID_TRAY_RESTORE: RestoreFilter(RestoreReason::Manual, true); break;
         case ID_TRAY_MODE_STRICT_RED: SetRedModeFromTray(RedMode::StrictRed); break;
         case ID_TRAY_MODE_LUMA_RED: SetRedModeFromTray(RedMode::LumaRed); break;
         case ID_TRAY_ABOUT: ShowAboutDialog(hwnd); break;
@@ -1225,35 +1236,35 @@ LRESULT HandleWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         return 0;
     case WM_REDLIGHT_RESTORE:
         Diagnostics::Log("External restore request received.");
-        return RestoreFilter(false) ? TRUE : FALSE;
+        return RestoreFilter(RestoreReason::ExternalRequest, false) ? TRUE : FALSE;
     case WM_DISPLAYCHANGE:
         Diagnostics::Log("Display configuration changed; restoring filter. Re-enable manually.");
-        RestoreFilter(false);
+        RestoreFilter(RestoreReason::DisplayChange, false);
         return 0;
     case WM_POWERBROADCAST:
         if (wParam == PBT_APMSUSPEND || wParam == PBT_APMRESUMEAUTOMATIC || wParam == PBT_APMRESUMESUSPEND) {
             Diagnostics::Log("Power transition; restoring filter. Re-enable manually.");
-            RestoreFilter(false);
+            RestoreFilter(RestoreReason::PowerTransition, false);
         }
         return TRUE;
     case WM_WTSSESSION_CHANGE:
         if (wParam == WTS_SESSION_LOCK || wParam == WTS_SESSION_UNLOCK ||
             wParam == WTS_CONSOLE_DISCONNECT || wParam == WTS_REMOTE_DISCONNECT) {
             Diagnostics::Log("Session transition; restoring filter. Re-enable manually.");
-            RestoreFilter(false);
+            RestoreFilter(RestoreReason::SessionTransition, false);
         }
         return 0;
     case WM_QUERYENDSESSION:
-        RestoreFilter(false);
+        RestoreFilter(RestoreReason::Exit, false);
         return TRUE;
     case WM_ENDSESSION:
         if (wParam) {
-            RestoreFilter(false);
+            RestoreFilter(RestoreReason::Exit, false);
             DestroyTrayWindow(hwnd);
         }
         return 0;
     case WM_CLOSE:
-        if (RestoreFilter(true)) DestroyTrayWindow(hwnd);
+        if (RestoreFilter(RestoreReason::Exit, true)) DestroyTrayWindow(hwnd);
         return 0;
     case WM_DESTROY:
         StopSessionTimer();
