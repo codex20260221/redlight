@@ -87,6 +87,18 @@ BOOL UnregisterHotKey(HWND, int);
 using ULONGLONG = unsigned long long;
 struct LARGE_INTEGER { long long QuadPart; };
 struct SYSTEMTIME { WORD wYear, wMonth, wDayOfWeek, wDay, wHour, wMinute, wSecond, wMilliseconds; };
+struct FILETIME { DWORD dwLowDateTime, dwHighDateTime; };
+struct DYNAMIC_TIME_ZONE_INFORMATION {
+    long Bias; wchar_t StandardName[32]; SYSTEMTIME StandardDate; long StandardBias;
+    wchar_t DaylightName[32]; SYSTEMTIME DaylightDate; long DaylightBias;
+    wchar_t TimeZoneKeyName[128]; unsigned char DynamicDaylightTimeDisabled;
+};
+constexpr DWORD TIME_ZONE_ID_UNKNOWN = 0, TIME_ZONE_ID_STANDARD = 1, TIME_ZONE_ID_DAYLIGHT = 2, TIME_ZONE_ID_INVALID = 0xfffffffful;
+BOOL QueryUnbiasedInterruptTime(ULONGLONG*);
+void GetSystemTimeAsFileTime(FILETIME*);
+DWORD GetDynamicTimeZoneInformation(DYNAMIC_TIME_ZONE_INFORMATION*);
+BOOL FileTimeToSystemTime(const FILETIME*, SYSTEMTIME*);
+BOOL SystemTimeToTzSpecificLocalTimeEx(const DYNAMIC_TIME_ZONE_INFORMATION*, const SYSTEMTIME*, SYSTEMTIME*);
 struct SRWLOCK { std::mutex mutex; };
 #define SRWLOCK_INIT {}
 #define INVALID_HANDLE_VALUE reinterpret_cast<HANDLE>(static_cast<std::intptr_t>(-1))

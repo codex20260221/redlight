@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Add an independently compiled, read-only scheduling clock adapter using one UTC/local snapshot, semantic time-zone identity, checked awake-time/capture bounds, and documented native error handling. Fake-API regression coverage is isolated; there is no production caller or scheduling activation yet.
 - Document per-monitor control research and add an isolated geometry preflight for reviewed selections, full bounds, source/coordinate assumptions, overlap/arithmetic/capacity failures, and global recovery gating. No native control probe or production per-monitor feature is enabled or claimed qualified.
 - Add an isolated supplied-time daily schedule prototype with calendar/clock validation, once-only events, missed/busy-event suppression, manual rebasing, and DST/date-rollback guards. It is excluded from the application and changes no runtime activation, timers, preferences, or display APIs.
 - Define optional daily scheduling behavior before implementation: future-only activation, explicit consent, manual override, skipped missed events, clock/DST rules, and restoration/countdown priority. The isolated policy exists; production scheduling remains unimplemented pending native integration review, including complete single-response preferences, consent/timer transactions, and checked UTC/local/awake-time capture.

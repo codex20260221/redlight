@@ -52,6 +52,7 @@
 #include "TrayTooltip.h"
 #include "Prototypes/DailySchedule.h"
 #include "Prototypes/MonitorPlan.h"
+#include "ScheduleClock.h"
 #include "BuildMetadata.h"
 #include "VerificationCache.h"
 #include <map>
@@ -76,6 +77,16 @@ struct RegistryValue { DWORD type; std::vector<char> bytes; };
 struct FakeIconRequest { HINSTANCE instance; unsigned resource, type; int width, height; unsigned flags; DWORD errorBefore; };
 struct FakeWindowTimer { HWND owner = nullptr; UINT_PTR id = 0; };
 struct Fake {
+    bool clockSampling = false, clockUtcConversion = true, clockLocalConversion = true;
+    std::array<bool, 2> clockAwakeSuccess{true, true};
+    std::array<std::uint64_t, 2> clockTicks{1000, 1002}, clockAwake{10000000, 10020000};
+    std::uint64_t clockFiletime = 134368199991230000ull, clockFiletimeInput = 0;
+    SYSTEMTIME clockUtc{2026, 10, 0, 18, 17, 59, 59, 123}, clockLocal{2026, 10, 0, 18, 17, 59, 59, 123}, clockUtcInput{};
+    DYNAMIC_TIME_ZONE_INFORMATION clockZone{}, clockZoneInput{};
+    DWORD clockZoneStatus = TIME_ZONE_ID_UNKNOWN;
+    std::optional<DWORD> clockError = 4321;
+    std::array<DWORD, 3> clockErrorBefore{999, 999, 999};
+    unsigned clockTickIndex = 0, clockAwakeIndex = 0, clockUtcReads = 0, clockZoneReads = 0, clockUtcConversions = 0, clockLocalConversions = 0;
     std::wstring modulePath = L"C:\\RedLight\\RedLight.exe";
     bool modulePathAvailable = true, moduleTargetInvalid = false;
     std::optional<DWORD> modulePathError;
@@ -6412,6 +6423,168 @@ void ScheduleCalendarAndTimingLimits() {
     Check(policy.configure({true, 1080, 420}) && policy.rebase(before) &&
         policy.observe(ScheduleSample(2026, 10, 18, 1080, 0, 4001), true) == Event::Rebased, "larger supplied-clock disagreement rebases without enabling");
 }
+ScheduleClockResult ReadFakeScheduleClock() {
+    fake.clockTickIndex = fake.clockAwakeIndex = 0;
+    fake.clockSampling = true;
+    const auto result = ReadScheduleClock();
+    fake.clockSampling = false;
+    return result;
+}
+void ScheduleClockSingleSnapshotAndSuccessStatuses() {
+    for (const auto status : {TIME_ZONE_ID_UNKNOWN, TIME_ZONE_ID_STANDARD, TIME_ZONE_ID_DAYLIGHT}) {
+        Reset(); fake.clockZoneStatus = status;
+        const auto result = ReadFakeScheduleClock();
+        Check(result.reading && result.stage == ScheduleClockStage::None && result.nativeError == 0 &&
+            result.reading->year == 2026 && result.reading->month == 10 && result.reading->day == 18 && result.reading->minute == 1079 &&
+            result.reading->millisecondsInMinute == 59123 && result.reading->utcMilliseconds == 13436819999123ull &&
+            result.reading->awakeMilliseconds == 1001 && result.reading->captureMilliseconds == 2,
+            "zero/standard/daylight statuses are successful checked captures with millisecond UTC/local/awake data");
+        Check(fake.clockUtcReads == 1 && fake.clockZoneReads == 1 && fake.clockUtcConversions == 1 && fake.clockLocalConversions == 1 &&
+            fake.clockFiletimeInput == fake.clockFiletime && fake.clockUtcInput.wHour == 17 && fake.clockUtcInput.wMilliseconds == 123 &&
+            fake.clockErrorBefore == std::array<DWORD, 3>{0, 0, 0}, "one UTC snapshot is passed to both conversions with cleared documented error state");
+    }
+}
+void ScheduleClockOffsetsMidnightAndFraction() {
+    for (const int offset : {345, -210, 480}) {
+        Reset(); fake.clockZone.Bias = -offset;
+        if (offset == 345) { fake.clockLocal.wHour = 23; fake.clockLocal.wMinute = 44; }
+        if (offset == -210) { fake.clockLocal.wHour = 14; fake.clockLocal.wMinute = 29; }
+        if (offset == 480) { fake.clockLocal.wDay = 19; fake.clockLocal.wDayOfWeek = 1; fake.clockLocal.wHour = 1; }
+        fake.clockFiletime += 9999; // FILETIME retains submillisecond precision; SYSTEMTIME does not.
+        const auto result = ReadFakeScheduleClock();
+        Check(result.reading && result.reading->minute == fake.clockLocal.wHour * 60u + fake.clockLocal.wMinute &&
+            result.reading->day == fake.clockLocal.wDay && result.reading->zone.bias == -offset &&
+            result.reading->utcMilliseconds == 13436819999123ull && fake.clockZoneInput.Bias == -offset,
+            "non-hour/negative offsets and local midnight use the supplied zone and consistently floor submillisecond UTC");
+    }
+}
+void ScheduleClockNativeFailureErrorProvenance() {
+    constexpr ScheduleClockStage stages[] = {ScheduleClockStage::AwakeClock, ScheduleClockStage::TimeZone, ScheduleClockStage::UtcConversion,
+        ScheduleClockStage::LocalConversion, ScheduleClockStage::AwakeClock};
+    for (unsigned failure = 0; failure < 5; ++failure) for (const bool supplied : {false, true}) {
+        Reset(); fake.lastError = 0xbad; fake.clockError = supplied ? std::optional<DWORD>(4321) : std::nullopt;
+        if (failure == 0) fake.clockAwakeSuccess[0] = false;
+        if (failure == 1) fake.clockZoneStatus = TIME_ZONE_ID_INVALID;
+        if (failure == 2) fake.clockUtcConversion = false;
+        if (failure == 3) fake.clockLocalConversion = false;
+        if (failure == 4) fake.clockAwakeSuccess[1] = false;
+        const auto result = ReadFakeScheduleClock();
+        const bool extendedError = failure > 0 && failure < 4;
+        Check(!result.reading && result.stage == stages[failure] && result.nativeError == (extendedError && supplied ? 4321u : 0u),
+            "failed reads never produce an observation; only documented APIs report supplied codes, excluding stale and unbiased-clock error values");
+        Check(fake.clockUtcReads == (failure ? 1u : 0u) && fake.clockUtcConversions == (failure >= 2 ? 1u : 0u) &&
+            fake.clockLocalConversions == (failure >= 3 ? 1u : 0u), "each failed stage stops before dependent native work");
+        for (unsigned index = 0; index < 3 && index < failure; ++index)
+            Check(fake.clockErrorBefore[index] == 0, "documented native failures begin with no stale error");
+    }
+}
+void ScheduleClockRejectsMalformedNativeOutput() {
+    for (unsigned invalid = 0; invalid < 14; ++invalid) {
+        Reset();
+        if (invalid == 0) fake.clockZoneStatus = 99;
+        if (invalid == 1) std::fill(std::begin(fake.clockZone.TimeZoneKeyName), std::end(fake.clockZone.TimeZoneKeyName), L'x');
+        if (invalid == 2) fake.clockZone.StandardDate = {0, 11, 0, 1, 2, 0, 0, 0};
+        if (invalid == 3 || invalid == 4) {
+            fake.clockZone.StandardDate = {0, 11, 0, 1, 2, 0, 0, 0}; fake.clockZone.DaylightDate = {0, 3, 0, 2, 2, 0, 0, 0};
+            if (invalid == 3) fake.clockZone.DaylightDate.wDay = 6;
+            else fake.clockZone.DaylightDate.wHour = 24;
+        }
+        if (invalid == 5) fake.clockUtc.wYear = 1600;
+        if (invalid == 6) fake.clockFiletime += 10000;
+        if (invalid == 7) { fake.clockUtc.wMonth = 2; fake.clockUtc.wDay = 30; }
+        if (invalid == 8) fake.clockLocal.wDay = 0;
+        if (invalid == 9) fake.clockLocal.wHour = 24;
+        if (invalid == 10) fake.clockLocal.wDayOfWeek = 7;
+        if (invalid == 11) fake.clockLocal.wYear = 30828;
+        if (invalid == 12) fake.clockLocal.wSecond = 58;
+        if (invalid == 13) fake.clockLocal.wDay = 20;
+        const auto result = ReadFakeScheduleClock();
+        Check(!result.reading && result.stage == ScheduleClockStage::InvalidData && result.nativeError == 0,
+            "invalid zone/date/range/UTC/local output is rejected without pretending a native API supplied the validation error");
+    }
+}
+void ScheduleClockSemanticZoneIdentity() {
+    const auto baseline = ReadFakeScheduleClock(); Check(baseline.reading.has_value(), "prepare fixed-zone identity");
+    fake.clockZone.StandardName[0] = L'x'; fake.clockZone.DaylightName[0] = L'y';
+    fake.clockZone.TimeZoneKeyName[127] = L'z'; // Beyond the first terminator.
+    fake.clockZone.StandardBias = 13; fake.clockZone.DaylightBias = -17;
+    fake.clockZone.StandardDate.wHour = 99; fake.clockZone.DaylightDate.wYear = 65535; // Month zero means unused.
+    const auto cosmetic = ReadFakeScheduleClock();
+    Check(cosmetic.reading && cosmetic.reading->zone == baseline.reading->zone, "localized names, trailing key storage and unused transition fields do not create false rule changes");
+    fake.clockZone.StandardDate = {0, 11, 0, 1, 2, 0, 0, 0}; fake.clockZone.DaylightDate = {0, 3, 0, 2, 2, 0, 0, 0};
+    const auto rules = ReadFakeScheduleClock();
+    Check(rules.reading && rules.reading->zone != baseline.reading->zone, "rule changes are visible even with an unchanged current UTC/local offset");
+    fake.clockZone.DaylightDate.wHour = 3;
+    const auto changed = ReadFakeScheduleClock();
+    Check(changed.reading && changed.reading->zone != rules.reading->zone, "individual semantic transition fields participate in identity");
+    fake.clockZone.DynamicDaylightTimeDisabled = 1;
+    const auto disabled = ReadFakeScheduleClock();
+    Check(disabled.reading && disabled.reading->zone != changed.reading->zone, "dynamic DST policy changes invalidate identity independently");
+    fake.clockZone.TimeZoneKeyName[0] = L'Z'; fake.clockZone.TimeZoneKeyName[1] = 0;
+    const auto named = ReadFakeScheduleClock();
+    Check(named.reading && named.reading->zone != disabled.reading->zone, "time-zone registry key changes are visible without exporting a localized name");
+}
+void ScheduleClockCaptureBoundsAndWrap() {
+    const auto maximum = (std::numeric_limits<std::uint64_t>::max)();
+    fake.clockTicks = {maximum - 1, 0};
+    auto capture = ReadFakeScheduleClock();
+    Check(capture.reading && capture.reading->captureMilliseconds == 2, "biased capture latency tolerates unsigned tick wrap");
+    fake.clockTicks = {1000, 3000}; fake.clockAwake = {10000000, 30000000};
+    capture = ReadFakeScheduleClock();
+    Check(capture.reading && capture.reading->captureMilliseconds == 2000, "two-second capture latency bound is inclusive");
+    for (unsigned slow = 0; slow < 4; ++slow) {
+        fake.clockTicks = {1000, 1002}; fake.clockAwake = {10000000, 10020000};
+        if (slow == 0) fake.clockTicks[1] = 3001;
+        if (slow == 1) fake.clockAwake[1] = 30010000;
+        if (slow == 2) fake.clockTicks[1] = 999;
+        if (slow == 3) fake.clockAwake[1] = 9999999;
+        const auto result = ReadFakeScheduleClock();
+        Check(!result.reading && result.stage == ScheduleClockStage::CaptureTooSlow && result.nativeError == 0,
+            "slow or inconsistent elapsed capture cannot publish a stale usable observation");
+    }
+}
+void ScheduleClockReadingFeedsOnlySuppliedPolicy() {
+    using namespace SchedulePrototype;
+    DailySchedule policy; Check(policy.configure({true, 1080, 420}), "prepare policy alongside the native adapter seam");
+    const auto before = ReadFakeScheduleClock(); Check(before.reading.has_value(), "capture prior minute");
+    const auto sample = [](const ScheduleClockReading& value) {
+        return Sample{value.year, value.month, value.day, value.minute, value.millisecondsInMinute, value.utcMilliseconds, value.awakeMilliseconds};
+    };
+    Check(policy.observe(sample(*before.reading), true) == Event::Rebased, "first capture remains future-only");
+    fake.clockFiletime += 10000000; fake.clockUtc.wHour = 18; fake.clockUtc.wMinute = fake.clockUtc.wSecond = 0; fake.clockLocal = fake.clockUtc;
+    fake.clockAwake = {20000000, 20020000};
+    const auto after = ReadFakeScheduleClock();
+    Check(after.reading && after.reading->zone == before.reading->zone && policy.observe(sample(*after.reading), true) == Event::Enable,
+        "coherent fake UTC/local/awake snapshots can produce an intent without invoking filtering");
+    policy.invalidate();
+    Check(policy.observe(sample(*after.reading), true) == Event::Rebased, "native recovery can invalidate continuity independently of the reading");
+}
+void ScheduleClockAllocationAndDisplayRecoveryIsolation() {
+    MagnificationFilter filter; Check(filter.initialize() && filter.enable(), "prepare original display ownership beside clock capture");
+    fake.magWriteResults = {Write::FailAfterApply}; Check(!filter.disable(), "retain display recovery for clock isolation");
+    const auto error = std::string(filter.lastError()); const auto stats = filter.statistics(); const auto effect = fake.effect;
+    const auto reads = fake.magReads, writes = fake.magWrites; const auto storage = fake.registryWrites; const auto timers = fake.countdownSets;
+    ScheduleClockResult result; bool noAllocation = false;
+    { TestMemory::FailNextAllocation failure; result = ReadFakeScheduleClock(); noAllocation = TestMemory::AllocationFailurePending(); }
+    Check(result.reading && noAllocation && fake.magReads == reads && fake.magWrites == writes && fake.registryWrites == storage && fake.countdownSets == timers &&
+        filter.needsRestore() && filter.statistics() == stats && Same(effect, fake.effect) && error == filter.lastError(),
+        "clock capture allocates nothing and cannot read/write/re-own a display, save settings, arm timers, or clear backend errors");
+    Check(filter.disable(), "original restoration retry remains independent of clock capture");
+}
+void ScheduleClockEpochAndCalendarLimits() {
+    for (const unsigned year : {1601u, 30827u}) {
+        Reset(); const bool epoch = year == 1601;
+        fake.clockUtc = {static_cast<WORD>(year), static_cast<WORD>(epoch ? 1 : 12), 1,
+            static_cast<WORD>(epoch ? 1 : 31), static_cast<WORD>(epoch ? 0 : 23), static_cast<WORD>(epoch ? 0 : 59),
+            static_cast<WORD>(epoch ? 0 : 59), static_cast<WORD>(epoch ? 0 : 999)};
+        fake.clockLocal = fake.clockUtc;
+        const auto supplied = ScheduleSample(year, fake.clockUtc.wMonth, fake.clockUtc.wDay, epoch ? 0 : 1439, epoch ? 0 : 59999, 0);
+        fake.clockFiletime = supplied.utcMilliseconds * 10000;
+        const auto result = ReadFakeScheduleClock();
+        Check(result.reading && result.reading->utcMilliseconds == supplied.utcMilliseconds && result.reading->year == year &&
+            result.reading->minute == supplied.minute, "FILETIME zero and the maximum supported Gregorian year remain valid observations without narrowing/overflow");
+    }
+}
 void FadePolicyDurationsAndAllTargets() {
     RedFadeIn fade;
     Check(!fade.active() && !fade.due(0), "no implicit animation before confirmed enable");
@@ -7312,7 +7485,35 @@ BOOL PostMessageA(HWND owner, unsigned message, WPARAM wparam, LPARAM lparam) {
     if (!fake.commandPost) { fake.lastError = fake.commandPostError; return FALSE; }
     return TRUE;
 }
-std::uint64_t GetTickCount64() { ++fake.backendClockReads; return fake.monotonicNow; }
+std::uint64_t GetTickCount64() {
+    ++fake.backendClockReads;
+    if (fake.clockSampling) return fake.clockTicks[(std::min)(fake.clockTickIndex++, 1u)];
+    return fake.monotonicNow;
+}
+BOOL QueryUnbiasedInterruptTime(ULONGLONG* output) {
+    const auto index = (std::min)(fake.clockAwakeIndex++, 1u);
+    if (!fake.clockAwakeSuccess[index]) { if (fake.clockError) fake.lastError = *fake.clockError; return FALSE; }
+    *output = fake.clockAwake[index]; return TRUE;
+}
+void GetSystemTimeAsFileTime(FILETIME* output) {
+    ++fake.clockUtcReads; output->dwLowDateTime = static_cast<DWORD>(fake.clockFiletime); output->dwHighDateTime = static_cast<DWORD>(fake.clockFiletime >> 32);
+}
+DWORD GetDynamicTimeZoneInformation(DYNAMIC_TIME_ZONE_INFORMATION* output) {
+    ++fake.clockZoneReads; fake.clockErrorBefore[0] = fake.lastError;
+    if (fake.clockZoneStatus == TIME_ZONE_ID_INVALID) { if (fake.clockError) fake.lastError = *fake.clockError; return TIME_ZONE_ID_INVALID; }
+    *output = fake.clockZone; fake.lastError = 0xbad; return fake.clockZoneStatus;
+}
+BOOL FileTimeToSystemTime(const FILETIME* input, SYSTEMTIME* output) {
+    ++fake.clockUtcConversions; fake.clockErrorBefore[1] = fake.lastError;
+    fake.clockFiletimeInput = (static_cast<std::uint64_t>(input->dwHighDateTime) << 32) | input->dwLowDateTime;
+    if (!fake.clockUtcConversion) { if (fake.clockError) fake.lastError = *fake.clockError; return FALSE; }
+    *output = fake.clockUtc; fake.lastError = 0xbad; return TRUE;
+}
+BOOL SystemTimeToTzSpecificLocalTimeEx(const DYNAMIC_TIME_ZONE_INFORMATION* zone, const SYSTEMTIME* utc, SYSTEMTIME* output) {
+    ++fake.clockLocalConversions; fake.clockErrorBefore[2] = fake.lastError; fake.clockZoneInput = *zone; fake.clockUtcInput = *utc;
+    if (!fake.clockLocalConversion) { if (fake.clockError) fake.lastError = *fake.clockError; return FALSE; }
+    *output = fake.clockLocal; fake.lastError = 0xbad; return TRUE;
+}
 int GetSystemMetrics(int metric) {
     ++fake.metricReads;
     switch (metric) {
@@ -7695,6 +7896,11 @@ std::optional<std::string> RecentLogText() noexcept {
 }
 int main() {
     const std::pair<const char*, void(*)()> tests[] = {
+        {"Schedule clock snapshot/status success", ScheduleClockSingleSnapshotAndSuccessStatuses}, {"Schedule clock offsets/midnight/fraction", ScheduleClockOffsetsMidnightAndFraction},
+        {"Schedule clock native failure/error provenance", ScheduleClockNativeFailureErrorProvenance}, {"Schedule clock malformed native output", ScheduleClockRejectsMalformedNativeOutput},
+        {"Schedule clock semantic zone identity", ScheduleClockSemanticZoneIdentity}, {"Schedule clock capture limits/wrap", ScheduleClockCaptureBoundsAndWrap},
+        {"Schedule clock supplied-policy boundary", ScheduleClockReadingFeedsOnlySuppliedPolicy}, {"Schedule clock allocation/display recovery isolation", ScheduleClockAllocationAndDisplayRecoveryIsolation},
+        {"Schedule clock epoch/calendar limits", ScheduleClockEpochAndCalendarLimits},
         {"Monitor plan negative/full bounds", MonitorPlanNegativeOriginsAndExactBounds}, {"Monitor plan all/none/recovery gate", MonitorPlanAllNoneAndRecoveryGates},
         {"Monitor plan invalid/stale snapshot", MonitorPlanMalformedAndStaleSnapshots}, {"Monitor plan isolation/coordinate requirements", MonitorPlanIsolationAndCoordinateRequirements},
         {"Monitor plan capacity/publication", MonitorPlanCapacityAndPublication}, {"Monitor plan arithmetic bounds", MonitorPlanArithmeticBounds},
