@@ -889,6 +889,77 @@ void GammaOwnershipAbandonmentCleanupFailure() {
     Check(filter.disable() && !filter.needsRestore() && !fake.mutexOwned && !filter.enable() && fake.gammaWrites == 0,
         "cleanup can recover without authorizing uncertain calibration capture");
 }
+void CountdownOverdueBoundaryAndCancellation() {
+    SessionTimer timer;
+    Check(!timer.overdueMilliseconds(0) && timer.configure(0, 100, true) && !timer.overdueMilliseconds(100000),
+        "unarmed and unlimited sessions have no recorded overdue duration");
+    Check(timer.configure(1, 100, true) && !timer.overdueMilliseconds(60099) && timer.overdueMilliseconds(60100) == 0 && timer.overdueMilliseconds(60101) == 1,
+        "before deadline is absent, exact deadline has genuine zero, and late milliseconds are exact");
+    timer.noteRestoreAttempt(60100); timer.noteWarningAttempt();
+    Check(timer.overdueMilliseconds(65099) == 4999 && timer.restoreRetryMilliseconds(65099) == 1 && timer.restoreAttempted() && timer.warningAttempted(),
+        "overdue reporting uses the unchanged session deadline and does not restart the recovery retry delay");
+    timer.cancel();
+    Check(!timer.overdueMilliseconds(70000) && !timer.restoreAttempted() && !timer.warningAttempted(), "cancellation removes old overdue/retry/warning state");
+    Check(timer.configure(1, 70000, false) && !timer.overdueMilliseconds(900000) && timer.configure(0, 70000, true) && !timer.overdueMilliseconds(900000),
+        "inactive configuration and unlimited replacement remain unarmed without stale overdue data");
+}
+void CountdownOverdueAllLimitsWrapAndAllocation() {
+    const auto start = (std::numeric_limits<std::uint64_t>::max)() - 30000;
+    for (unsigned minutes = 1; minutes <= SessionTimer::maxMinutes; ++minutes) {
+        SessionTimer timer; Check(timer.configure(minutes, start, true), "configure every supported countdown length");
+        const auto due = start + static_cast<std::uint64_t>(minutes) * 60000;
+        std::optional<std::uint64_t> before, exact, late; bool unused = false;
+        { TestMemory::FailNextAllocation fail; before = timer.overdueMilliseconds(due - 1); exact = timer.overdueMilliseconds(due); late = timer.overdueMilliseconds(due + 123); unused = TestMemory::AllocationFailurePending(); }
+        Check(!before && exact == 0 && late == 123 && unused && timer.minutes() == minutes && timer.armed() && !timer.restoreAttempted() &&
+            timer.restoreDue(due + 123) && !timer.canRestart(due + 123, true),
+            "all countdown limits cross monotonic wrap without allocation, new retry state, or postponing an expired deadline");
+    }
+    Check(fake.backendClockReads == 0 && fake.gammaReads == 0 && fake.magReads == 0 && fake.countdownSets == 0,
+        "overdue derivation samples no clock, display, or native timer registration");
+}
+void CountdownOverdueRetainsRecoveryAndRetry() {
+    GammaRampFilter filter; SessionTimer timer;
+    Check(filter.initialize() && filter.enable() && timer.configure(1, 100, true), "prepare active timed Gamma session");
+    fake.writes = {Write::FailAfterApply};
+    Check(!filter.disable() && !filter.isActive() && filter.needsRestore(), "failed deadline restoration retains original and ownership");
+    timer.noteRestoreAttempt(60100); timer.noteWarningAttempt();
+    const auto statistics = filter.statistics(); const auto clocks = fake.backendClockReads;
+    const auto reads = fake.gammaReads, writes = fake.gammaWrites, releases = fake.mutexReleases; const auto error = std::string(filter.lastError());
+    for (auto now : {60100ull, 65099ull, 65100ull, 70000ull}) {
+        Check(timer.overdueMilliseconds(now) == now - 60100 &&
+            !CanChangeSessionLimit(timer, now, filter, BackendVerification::Matches, false) && !CanRestartCountdown(timer, now, filter, BackendVerification::Matches, false),
+            "viewing overdue time cannot bypass recovery priority or restart/change an expired countdown");
+    }
+    Check(timer.restoreRetryMilliseconds(65099) == 1 && timer.restoreDue(65100) && timer.minutes() == 1 && timer.armed() && timer.restoreAttempted() && timer.warningAttempted() &&
+        filter.statistics() == statistics && fake.backendClockReads == clocks && fake.gammaReads == reads && fake.gammaWrites == writes &&
+        fake.mutexReleases == releases && error == filter.lastError() && fake.mutexOwned,
+        "overdue reads retain exact retry cadence, warning history, error, stored calibration, and global ownership without API calls");
+    Check(filter.disable() && filter.shutdown(), "original Gamma calibration stays recoverable"); timer.cancel();
+    Check(!timer.overdueMilliseconds(70000), "successful recovery cancellation removes overdue state");
+}
+void CountdownOverdueSupportSnapshot() {
+    SessionTimer timer; Check(timer.configure(1, 1000, true), "configure shared snapshot deadline");
+    timer.noteRestoreAttempt(61000);
+    BackendVerificationCache verification; verification.record({BackendVerification::Unavailable}, 998, 1000);
+    SupportReportState state; state.reportTick = 65000; state.sessionMinutes = 1; state.remainingSeconds = 0;
+    state.verification = verification.result().state; state.verificationAgeSeconds = verification.ageSeconds(state.reportTick);
+    state.verificationDurationMilliseconds = verification.durationMilliseconds();
+    state.expiryOverdueMilliseconds = timer.overdueMilliseconds(state.reportTick); state.expiryRetryMilliseconds = timer.restoreRetryMilliseconds(state.reportTick);
+    state.restorationHistory.record({RestoreReason::Countdown, RestoreOutcome::Failed, 61000, 0});
+    const auto report = BuildSupportReport(state);
+    Check(state.verificationAgeSeconds == 64 && state.expiryOverdueMilliseconds == 4000 && state.expiryRetryMilliseconds == 1000 &&
+        RestoreRequestAgeSeconds(*state.restorationHistory.newest(0), state.reportTick) == 4 &&
+        report.find("Countdown overdue: 4000 milliseconds since session deadline") != std::string::npos && report.find("1000 milliseconds until retry allowed") != std::string::npos,
+        "countdown overdue, recovery retry, verification age, and history age share one supplied snapshot tick");
+    timer.cancel(); verification = {};
+    Check(BuildSupportReport(state) == report, "copied overdue diagnostics remain historical after later timer/cache changes");
+    state.expiryOverdueMilliseconds = 0;
+    Check(BuildSupportReport(state).find("Countdown overdue: 0 milliseconds since session deadline") != std::string::npos,
+        "exact expiration zero is printed as a real overdue sample");
+    state.expiryOverdueMilliseconds.reset();
+    Check(BuildSupportReport(state).find("Countdown overdue: not recorded (not expired or not armed)") != std::string::npos && fake.backendClockReads == 0,
+        "absent overdue data is distinct from zero and formatting samples no native clock");
+}
 void SessionTimerBoundaries() {
     SessionTimer timer;
     timer.start(100);
@@ -6165,6 +6236,8 @@ int main() {
         {"Gamma rejected-wait cleanup", GammaOwnershipRejectedWaitCleanupRetry}, {"Gamma abandoned ownership", GammaOwnershipAbandonmentRefusesCapture},
         {"Gamma abandoned-owner cleanup", GammaOwnershipAbandonmentCleanupFailure},
         {"Session timer boundaries", SessionTimerBoundaries},
+        {"Countdown overdue boundaries/cancellation", CountdownOverdueBoundaryAndCancellation}, {"Countdown overdue limits/wrap/allocation", CountdownOverdueAllLimitsWrapAndAllocation},
+        {"Countdown overdue preserves recovery/retry", CountdownOverdueRetainsRecoveryAndRetry}, {"Countdown overdue cached support snapshot", CountdownOverdueSupportSnapshot},
         {"Session timer retries", SessionTimerRetryAndCancellation}, {"Session timer clock", SessionTimerChangesAndClockWrap},
         {"Backend default selection", BackendSelectionPolicies}, {"Backend strict/fallback selection", BackendSelectionStrictAndFallback},
         {"Startup fallback reason policy/allocation", StartupFallbackReasonPolicyAndAllocation}, {"Startup fallback retained initialization failure", StartupFallbackRetainsInitializationFailure},

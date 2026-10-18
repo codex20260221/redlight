@@ -49,6 +49,7 @@ struct SupportReportState {
     std::optional<CountdownTimerFailure> countdownTimerFailure;
     bool expiryRestoreAttempted = false, expiryWarningAttempted = false;
     std::optional<std::uint64_t> expiryRetryMilliseconds;
+    std::optional<std::uint64_t> expiryOverdueMilliseconds;
     RestorationHistory restorationHistory;
     std::uint64_t reportTick = 0;
     DisplayContextCache displayContext;
@@ -126,6 +127,9 @@ inline std::string BuildSupportReport(const SupportReportState& state) {
     if (!state.expiryRetryMilliseconds) report << "not applicable (countdown off or unexpired)";
     else if (*state.expiryRetryMilliseconds == 0) report << "retry allowed now (message processing/busy state may delay)";
     else report << *state.expiryRetryMilliseconds << " milliseconds until retry allowed";
+    report << "\r\nCountdown overdue: ";
+    if (state.expiryOverdueMilliseconds) report << *state.expiryOverdueMilliseconds << " milliseconds since session deadline (processing/restoration may be delayed)";
+    else report << "not recorded (not expired or not armed)";
     report << "\r\nBackend counters since startup/last reset (requests / failures):";
     const auto counts = [&](const char* name, const BackendOperationStatistics& value) {
         report << "\r\n  " << name << ": " << value.requests << " / " << value.failures;

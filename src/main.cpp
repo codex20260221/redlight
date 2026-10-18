@@ -950,6 +950,7 @@ void CopyStatusJson(HWND owner) {
 
 void CopySupportReport(HWND owner) {
     SupportReportState state;
+    state.reportTick = GetTickCount64();
     state.version = REDLIGHT_VERSION;
     state.buildRevision = REDLIGHT_BUILD_REVISION;
     state.sourceState = REDLIGHT_SOURCE_STATE;
@@ -970,11 +971,10 @@ void CopySupportReport(HWND owner) {
     state.verification = g_verification.result().state;
     state.readback = g_verification.result().readback;
     state.verificationError = g_verification.result().errorCode;
-    state.verificationAgeSeconds = g_verification.ageSeconds(GetTickCount64());
+    state.verificationAgeSeconds = g_verification.ageSeconds(state.reportTick);
     state.verificationDurationMilliseconds = g_verification.durationMilliseconds();
     state.restorationHistory = g_restorationHistory;
     state.displayContext = g_displayContext;
-    state.reportTick = GetTickCount64();
     state.redMode = RedModeDisplayName(g_displayFilter->redMode());
     state.lumaProfile = g_displayFilter->supportsRedMode(RedMode::LumaRed) ?
         LumaProfileName(g_displayFilter->lumaProfile()) : "Unavailable on gamma";
@@ -1004,6 +1004,7 @@ void CopySupportReport(HWND owner) {
     state.expiryRestoreAttempted = g_sessionTimer.restoreAttempted();
     state.expiryWarningAttempted = g_sessionTimer.warningAttempted();
     state.expiryRetryMilliseconds = g_sessionTimer.restoreRetryMilliseconds(state.reportTick);
+    state.expiryOverdueMilliseconds = g_sessionTimer.overdueMilliseconds(state.reportTick);
     if (g_sessionTimer.armed()) state.remainingSeconds = (g_sessionTimer.remainingMilliseconds(state.reportTick) + 999) / 1000;
     if (!CopyUtf8TextToClipboard(owner, BuildSupportReport(state))) {
         ReportError("The support report could not be copied. Another program may be using the clipboard. Please retry.");

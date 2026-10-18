@@ -31,6 +31,13 @@ public:
         const auto duration = static_cast<std::uint64_t>(minutes_) * 60000;
         return elapsed >= duration ? 0 : duration - elapsed;
     }
+    std::optional<std::uint64_t> overdueMilliseconds(std::uint64_t now) const noexcept {
+        if (!armed_) return std::nullopt;
+        const auto elapsed = now - started_;
+        const auto duration = static_cast<std::uint64_t>(minutes_) * 60000;
+        if (elapsed < duration) return std::nullopt;
+        return elapsed - duration;
+    }
     bool canRestart(std::uint64_t now, bool filterActive) const {
         return filterActive && armed_ && remainingMilliseconds(now) != 0;
     }

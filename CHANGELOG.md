@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Show milliseconds past an armed countdown's deadline in cached support reports, distinguishing exact-expiry zero from unarmed/unexpired state and preserving recovery retry cadence; use one supplied capture tick for countdown, verification, display-context, and restoration-history ages.
 - Include the retained Magnification startup failure in support reports when Automatic selection falls back to Gamma, distinguishing explicit Gamma selection and unavailable failure metadata while preserving startup policy, next-start preferences, and current recovery diagnostics without another backend operation.
 - Show mean elapsed milliseconds per completed timed backend scope in support reports, distinguish genuine zero from absent timing, and mark capped sample counts/totals with an unavailable mean; derive summaries from cached counters without new timing or recovery-state changes.
 - Advertise restoration-history and verification JSON schema versions in build discovery using the same constants as the clipboard exporters, preserving bounded read-only output and existing protocol fields.
