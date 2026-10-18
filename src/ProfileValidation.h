@@ -1,6 +1,7 @@
 #pragma once
 
-// Read-only bounded disk-file validation. 0 valid, 4 invalid, 1 I/O/output failure.
+// Read-only bounded disk-file validation with schema/default/resolved-preference JSON.
+// 0 valid, 4 invalid, 1 I/O/output failure.
 int ValidateSettingsProfileFile(const wchar_t* path) noexcept;
 
 // Read-only input, canonical current-format profile on stdout; no settings import.

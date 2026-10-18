@@ -14,7 +14,7 @@ inline constexpr char CommandHelpBody[] =
     "--build-info: report this binary's build metadata as JSON\n"
     "--settings: report saved/default preferences as JSON\n"
     "--status: report cached tray state as JSON without starting it\n"
-    "--validate-profile=<file>: validate a settings file offline (JSON)\n"
+    "--validate-profile=<file>: inspect/validate a file offline (schema/settings JSON)\n"
     "--normalize-profile=<file>: write a canonical current-format profile\n"
     "--compare-profile=<file>: compare with saved preferences (JSON)\n"
     "--save-profile=<file>: explicitly save for next start (JSON; no running instance)\n"

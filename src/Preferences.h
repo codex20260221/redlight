@@ -65,6 +65,8 @@ struct PreferencesParseResult {
     std::optional<AppPreferences> preferences;
     const char* error = nullptr;
     unsigned line = 0;
+    // Provenance is exposed only after the complete profile has passed validation.
+    unsigned inputSchema = 0;
 };
 inline std::string_view TrimProfileField(std::string_view value) {
     while (!value.empty() && (value.front() == ' ' || value.front() == '\t' || value.front() == '\r')) value.remove_prefix(1);
@@ -141,5 +143,5 @@ inline PreferencesParseResult ParsePreferences(std::string_view input) {
     if (version == 1 && (seen & 32)) return {std::nullopt, "Shortcut settings require profile version 2", lineNumber};
     if (version < 3 && (seen & 64)) return {std::nullopt, "Expiry warnings require profile version 3", lineNumber};
     if (!header || seen != (version == 3 ? 127u : (version == 2 ? 63u : 31u))) return {std::nullopt, "Profile section or required fields are missing", lineNumber};
-    return {value, nullptr, 0};
+    return {value, nullptr, 0, version};
 }

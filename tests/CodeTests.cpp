@@ -1394,6 +1394,94 @@ void ProfileFileValidationOutputFailures() {
     Reset();
     Check(ValidateSettingsProfileFile(nullptr) == 1 && fake.profileOpens == 0 && fake.stdoutText.find("\"stage\":\"arguments\"") != std::string::npos, "defensive null path check never reaches file APIs");
 }
+void ProfileParserValidatedSchemaProvenance() {
+    const std::string common = "\xef\xbb\xbf# Unicode \xe2\x82\xac\n[RedLightProfile]\nmode=strict\nluma=equal\nbackend=gamma\nsession_minutes=240\n";
+    for (unsigned version = 1; version <= 3; ++version) {
+        auto input = common + "version = " + std::to_string(version) + "\n";
+        if (version >= 2) input += "hotkeys=disabled\n";
+        if (version >= 3) input += "expiry_warning=5m\n";
+        const auto parsed = ParsePreferences(input);
+        Check(parsed.preferences && parsed.inputSchema == version && !parsed.error && parsed.line == 0 &&
+            parsed.preferences->shortcuts == (version >= 2 ? ShortcutProfile::Disabled : ShortcutProfile::Default) &&
+            parsed.preferences->expiryWarning == (version >= 3 ? ExpiryWarning::FiveMinutes : ExpiryWarning::Off),
+            "validated source schema survives BOM/comments/reordered fields and defined older-version defaults");
+        const auto duplicate = ParsePreferences(input + "version=" + std::to_string(version) + "\n");
+        Check(!duplicate.preferences && duplicate.inputSchema == 0, "duplicate version never exposes apparently validated source provenance");
+    }
+}
+void ProfileValidationResolvedMetadata() {
+    const std::string base = "[RedLightProfile]\nmode=strict\nluma=equal\nbackend=magnification\nsession_minutes=240\n";
+    constexpr std::string_view defaults[] = {"[\"hotkeys\",\"expiry_warning\"]", "[\"expiry_warning\"]", "[]"};
+    for (unsigned version = 1; version <= 3; ++version) {
+        Reset();
+        fake.profileData = base + "version=" + std::to_string(version) + "\n";
+        if (version >= 2) fake.profileData += "hotkeys=disabled\n";
+        if (version >= 3) fake.profileData += "expiry_warning=5m\n";
+        fake.profileChunk = 7;
+        Check(ValidateSettingsProfileFile(L"schema.profile") == 0 &&
+            fake.stdoutText.find("\"input_schema\":" + std::to_string(version)) != std::string::npos &&
+            fake.stdoutText.find("\"profile_schema\":3") != std::string::npos &&
+            fake.stdoutText.find(version < 3 ? "\"schema_upgrade_required\":true" : "\"schema_upgrade_required\":false") != std::string::npos &&
+            fake.stdoutText.find(std::string("\"defaulted_fields\":") + std::string(defaults[version - 1])) != std::string::npos,
+            "valid JSON reports input/current schemas and exactly the fields supplied by version defaults");
+        Check(fake.stdoutText.find("\"preferences\":{\"mode\":\"strict\",\"luma\":\"equal\",\"backend\":\"magnification\",\"session_minutes\":240") != std::string::npos &&
+            fake.stdoutText.find(version >= 2 ? "\"hotkeys\":\"disabled\"" : "\"hotkeys\":\"default\"") != std::string::npos &&
+            fake.stdoutText.find(version >= 3 ? "\"expiry_warning\":\"5m\"" : "\"expiry_warning\":\"off\"") != std::string::npos &&
+            fake.stdoutText.size() < 1024 && fake.stdoutText.ends_with("}}\n") && fake.stdoutWhileProfileOpen == 0 && fake.stdoutErrorMode == 2,
+            "all resolved preferences use canonical tokens and complete checked output follows input/mode cleanup");
+    }
+    Reset(); fake.profileData = *SerializePreferences(AppPreferences{});
+    Check(ValidateSettingsProfileFile(L"explicit-defaults.profile") == 0 && fake.stdoutText.find("\"defaulted_fields\":[]") != std::string::npos,
+        "explicit current-schema default choices are not misreported as defaulted missing fields");
+}
+void ProfileValidationMetadataFailureIsolation() {
+    const auto valid = *SerializePreferences(AppPreferences{});
+    for (const auto& input : {valid + "mode=strict\n", std::string("[RedLightProfile]\nversion=999\n"),
+        std::string("[RedLightProfile]\nversion=2\n"), valid + "unknown=value\n", std::string("# \xff\n") + valid}) {
+        Reset(); fake.profileData = input;
+        const auto parsed = ParsePreferences(input);
+        Check(!parsed.preferences && parsed.inputSchema == 0 && ValidateSettingsProfileFile(L"invalid.profile") == 4 &&
+            fake.stdoutText.find("\"valid\":false") != std::string::npos && fake.stdoutText.find("\"input_schema\"") == std::string::npos &&
+            fake.stdoutText.find("\"preferences\"") == std::string::npos && fake.stdoutText.find("defaulted_fields") == std::string::npos,
+            "invalid profiles preserve existing diagnostics without exposing unvalidated schema/settings metadata");
+    }
+    Reset(); fake.profileData = valid; fake.profileClose = false;
+    Check(ValidateSettingsProfileFile(L"close-failure.profile") == 1 && fake.stdoutText.find("\"status\":\"file-error\"") != std::string::npos &&
+        fake.stdoutText.find("input_schema") == std::string::npos && fake.stdoutText.find("preferences") == std::string::npos,
+        "failed input cleanup cannot emit a valid inspection snapshot");
+}
+void ProfileValidationMetadataNoAllocation() {
+    fake.profileData = *SerializePreferences(AppPreferences{RedMode::LumaRed, LumaProfile::GreenDetail, BackendPreference::Magnification,
+        240, ShortcutProfile::Disabled, ExpiryWarning::FiveMinutes});
+    fake.stdoutText.reserve(2048);
+    int result = 1;
+    bool unused = false;
+    {
+        TestMemory::FailNextAllocation fail;
+        result = ValidateSettingsProfileFile(L"prepared.profile");
+        unused = TestMemory::AllocationFailurePending();
+    }
+    Check(result == 0 && unused && fake.stdoutText.find("\"schema_upgrade_required\":false") != std::string::npos &&
+        fake.stdoutText.find("\"hotkeys\":\"disabled\"") != std::string::npos, "bounded read/parse/metadata formatting uses no C++ heap allocation with prepared fake output storage");
+}
+void ProfileValidationMetadataPreservesGammaRecovery() {
+    GammaRampFilter filter;
+    Check(filter.initialize(), "prepare gamma backend");
+    fake.writes = {Write::FailAfterApply, Write::Fail};
+    Check(!filter.enable() && filter.needsRestore() && !filter.isActive(), "retain unconfirmed gamma output for recovery");
+    const auto reads = fake.gammaReads, writes = fake.gammaWrites, releases = fake.mutexReleases;
+    const auto statistics = filter.statistics();
+    const auto error = std::string(filter.lastError());
+    fake.registryRead = false;
+    fake.profileData = *SerializePreferences(AppPreferences{RedMode::LumaRed, LumaProfile::GreenDetail, BackendPreference::Magnification,
+        17, ShortcutProfile::F10, ExpiryWarning::OneMinute});
+    Check(ValidateSettingsProfileFile(L"candidate.profile") == 0 && fake.stdoutText.find("\"mode\":\"luma\"") != std::string::npos &&
+        fake.registryReads == 0 && fake.registryWrites == 0 && fake.gammaReads == reads && fake.gammaWrites == writes && fake.mutexReleases == releases &&
+        filter.statistics() == statistics && error == filter.lastError() && filter.needsRestore() && !filter.isActive() && fake.mutexOwned &&
+        filter.redMode() == RedMode::StrictRed && filter.lumaProfile() == LumaProfile::Classic,
+        "resolved file settings are independent of unreadable storage, effective gamma settings, counters, errors, and recovery ownership");
+    Check(filter.disable(), "original gamma calibration remains recoverable after metadata inspection");
+}
 void BoundedJsonStringEncoding() {
     std::array<char, 128> output{};
     Check(QuoteJsonString("quote\"slash\\", output) == "\"quote\\\"slash\\\\\"", "quotes and slashes escaped");
@@ -4086,6 +4174,9 @@ int main() {
         {"Profile validation owned path", ProfileValidationOwnedPathArguments}, {"Profile validation read-only file", ProfileFileValidationReadOnly},
         {"Profile validation file bounds/encoding", ProfileFileValidationBoundsAndEncoding}, {"Profile validation I/O failures", ProfileFileValidationIoFailures},
         {"Profile validation output failures", ProfileFileValidationOutputFailures}, {"Bounded JSON string encoding", BoundedJsonStringEncoding},
+        {"Validated profile source schema", ProfileParserValidatedSchemaProvenance}, {"Profile validation resolved schema/settings", ProfileValidationResolvedMetadata},
+        {"Profile validation metadata failure isolation", ProfileValidationMetadataFailureIsolation}, {"Profile validation metadata without allocation", ProfileValidationMetadataNoAllocation},
+        {"Profile validation metadata preserves recovery", ProfileValidationMetadataPreservesGammaRecovery},
         {"UTF-8 scalar boundaries", Utf8ScalarBoundaries}, {"Strict profile encoding", ProfileUtf8Validation}, {"Clipboard embedded NUL rejection", ClipboardEmbeddedNulRejection},
         {"Saved profile export defaults/migration", SavedProfileExportDefaultsAndMigration}, {"Saved profile export failure isolation", SavedProfileExportPreservesRecoveryOnFailures},
         {"Saved profile export command policy", SavedProfileExportCommandPolicy},

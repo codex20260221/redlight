@@ -95,6 +95,25 @@ int WriteResult(std::string_view text, int exitCode) noexcept {
     Diagnostics::Log("Offline profile command could not write standard output; discard any partial output.");
     return 1;
 }
+int WriteValidatedProfile(const PreferencesParseResult& parsed) noexcept {
+    if (!parsed.preferences || parsed.inputSchema == 0 || parsed.inputSchema > PreferencesProfileVersion) return 1;
+    const auto& value = *parsed.preferences;
+    const char* defaulted = parsed.inputSchema == 1 ? "\"hotkeys\",\"expiry_warning\"" :
+        (parsed.inputSchema == 2 ? "\"expiry_warning\"" : "");
+    char output[1024];
+    const int length = std::snprintf(output, sizeof(output),
+        "{\"protocol\":1,\"status\":\"valid-profile\",\"valid\":true,\"input_schema\":%u,\"profile_schema\":%u,"
+        "\"schema_upgrade_required\":%s,\"defaulted_fields\":[%s],\"preferences\":{"
+        "\"mode\":\"%s\",\"luma\":\"%s\",\"backend\":\"%s\",\"session_minutes\":%u,\"hotkeys\":\"%s\",\"expiry_warning\":\"%s\"}}\n",
+        parsed.inputSchema, PreferencesProfileVersion, parsed.inputSchema < PreferencesProfileVersion ? "true" : "false", defaulted,
+        PreferenceModeToken(value.mode), PreferenceLumaToken(value.luma), PreferenceBackendToken(value.backend), value.sessionMinutes,
+        ShortcutProfileToken(value.shortcuts), ExpiryWarningToken(value.expiryWarning));
+    if (length < 0 || static_cast<std::size_t>(length) >= sizeof(output)) {
+        Diagnostics::Log("Offline profile inspection could not fit its checked JSON buffer; no output was written.");
+        return 1;
+    }
+    return WriteResult(std::string_view(output, static_cast<std::size_t>(length)), 0);
+}
 int ProfileFileCommand(const wchar_t* path, ProfileFileAction action) {
     const bool normalize = action == ProfileFileAction::Normalize;
     const auto read = ReadProfile(path);
@@ -117,7 +136,7 @@ int ProfileFileCommand(const wchar_t* path, ProfileFileAction action) {
                 if (!text) { Diagnostics::Log("Offline profile normalization could not serialize the validated settings."); return 1; }
                 return WriteResult(*text, 0);
             }
-            return WriteResult("{\"protocol\":1,\"status\":\"valid-profile\",\"valid\":true}\n", 0);
+            return WriteValidatedProfile(parsed);
         }
         if (normalize) {
             Diagnostics::LogFormat("Offline profile normalization rejected invalid data at line %u: %s.",
