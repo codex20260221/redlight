@@ -37,7 +37,21 @@ UINT Checked(bool value) { return MF_STRING | (value ? MF_CHECKED : MF_UNCHECKED
 }
 
 HMENU BuildTrayMenu(const TrayMenuState& state) {
-    Menu root, session, warning, luma, backend, shortcuts, expert, diagnostics;
+    Menu root, session, warning, luma, backend, shortcuts, expert, diagnostics, brightness;
+    for (const unsigned percent : {10u, 25u, 50u, 75u, 100u}) {
+        char label[32];
+        if (percent == 100) strcpy_s(label, "&Full (100%)");
+        else sprintf_s(label, "&%u%%", percent);
+        if (!brightness.add(ID_RED_BRIGHTNESS_BASE + percent, label,
+            Checked(state.brightnessPercent == percent) | (state.canChangeBrightness ? MF_ENABLED : MF_GRAYED))) return NULL;
+    }
+    const bool customBrightness = state.brightnessPercent != 10 && state.brightnessPercent != 25 && state.brightnessPercent != 50 &&
+        state.brightnessPercent != 75 && state.brightnessPercent != 100;
+    char brightnessLabel[64];
+    if (customBrightness) sprintf_s(brightnessLabel, "&Custom (%u%%)...", state.brightnessPercent);
+    else strcpy_s(brightnessLabel, "&Custom...");
+    if (!brightness.add(0, NULL, MF_SEPARATOR) || !brightness.add(ID_TRAY_CUSTOM_BRIGHTNESS, brightnessLabel,
+        Checked(customBrightness) | (state.canChangeBrightness ? MF_ENABLED : MF_GRAYED))) return NULL;
     for (unsigned i = 0; i < ExpiryWarningOptions.size(); ++i) {
         const auto option = ExpiryWarningOptions[i];
         if (!warning.add(ID_EXPIRY_WARNING_BASE + i, ExpiryWarningName(option), Checked(state.expiryWarning == option))) return NULL;
@@ -98,6 +112,7 @@ HMENU BuildTrayMenu(const TrayMenuState& state) {
         !root.add(ID_TRAY_MODE_STRICT_RED, "&Strict Red", Checked(state.mode == RedMode::StrictRed)) ||
         !root.add(ID_TRAY_MODE_LUMA_RED, "L&uma Red", Checked(state.mode == RedMode::LumaRed) | (state.supportsLuma ? MF_ENABLED : MF_GRAYED)) ||
         !root.child(luma, state.supportsLuma ? "Luma color &detail" : "Preferred Luma &detail (Magnification)") ||
+        !root.child(brightness, state.supportsBrightness ? "Red &brightness" : "Preferred red &brightness (Magnification)") ||
         !root.child(session, "Auto-restore &time limit") ||
         !root.add(0, NULL, MF_SEPARATOR) || !root.child(expert, "&Expert controls") ||
         !root.add(ID_TRAY_LOGS, "Open &logs folder") || !root.add(ID_TRAY_ABOUT, "&About") ||

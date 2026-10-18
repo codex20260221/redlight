@@ -46,7 +46,7 @@ int CompareSavedSettingsProfile(const AppPreferences& candidate) noexcept {
         used += static_cast<std::size_t>(length);
         const auto tokens = [](const AppPreferences& value) {
             return std::array<const char*, ProfileDifferenceFieldNames.size()>{PreferenceModeToken(value.mode), PreferenceLumaToken(value.luma),
-                PreferenceBackendToken(value.backend), nullptr, ShortcutProfileToken(value.shortcuts), ExpiryWarningToken(value.expiryWarning)};
+                PreferenceBackendToken(value.backend), nullptr, ShortcutProfileToken(value.shortcuts), ExpiryWarningToken(value.expiryWarning), nullptr};
         };
         const auto savedTokens = tokens(loaded.preferences), candidateTokens = tokens(candidate);
         first = true;
@@ -57,7 +57,9 @@ int CompareSavedSettingsProfile(const AppPreferences& candidate) noexcept {
                     "%s\"%s\":{\"saved\":\"%s\",\"candidate\":\"%s\"}", first ? "" : ",", ProfileDifferenceFieldNames[index], savedTokens[index], candidateTokens[index]);
             } else {
                 length = std::snprintf(output + used, sizeof(output) - used,
-                    "%s\"%s\":{\"saved\":%u,\"candidate\":%u}", first ? "" : ",", ProfileDifferenceFieldNames[index], loaded.preferences.sessionMinutes, candidate.sessionMinutes);
+                    "%s\"%s\":{\"saved\":%u,\"candidate\":%u}", first ? "" : ",", ProfileDifferenceFieldNames[index],
+                    index == 3 ? loaded.preferences.sessionMinutes : loaded.preferences.brightnessPercent,
+                    index == 3 ? candidate.sessionMinutes : candidate.brightnessPercent);
             }
             if (length < 0 || static_cast<std::size_t>(length) >= sizeof(output) - used) return ComparisonFormatFailure();
             used += static_cast<std::size_t>(length);

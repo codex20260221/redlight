@@ -1,6 +1,7 @@
 #pragma once
 #include "LumaProfile.h"
 #include "BackendStatistics.h"
+#include "RedBrightness.h"
 #include <optional>
 
 enum class RedMode {
@@ -72,6 +73,9 @@ public:
     virtual bool setLumaProfile(LumaProfile profile) = 0;
     virtual LumaProfile lumaProfile() const = 0;
     virtual bool supportsRedMode(RedMode mode) const = 0;
+    virtual bool supportsBrightness() const noexcept = 0;
+    virtual unsigned brightnessPercent() const noexcept = 0;
+    virtual bool setBrightnessPercent(unsigned percent) = 0;
     // Keep resources and restore data available when recovery fails.
     virtual bool shutdown() = 0;
     virtual const char* name() const = 0;

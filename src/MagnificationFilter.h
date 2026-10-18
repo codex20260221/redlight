@@ -25,6 +25,9 @@ public:
     bool setLumaProfile(LumaProfile profile) override;
     LumaProfile lumaProfile() const override;
     bool supportsRedMode(RedMode mode) const override;
+    bool supportsBrightness() const noexcept override { return true; }
+    unsigned brightnessPercent() const noexcept override { return brightnessPercent_; }
+    bool setBrightnessPercent(unsigned percent) override;
     bool shutdown() override;
     const char* name() const override;
     const char* lifecycleDescription() const noexcept; // Cached flags only; no API, clock, or logging.
@@ -42,6 +45,7 @@ private:
     bool restorePending_;
     RedMode redMode_;
     LumaProfile lumaProfile_;
+    unsigned brightnessPercent_ = DefaultRedBrightness;
     MAGCOLOREFFECT restoreEffect_;
     char lastError_[256];
     mutable BackendStatistics statistics_{};

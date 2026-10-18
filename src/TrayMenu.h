@@ -21,6 +21,8 @@ struct TrayMenuState {
     bool canClearRestorationHistory = true;
     bool backendActive = false, restoreRequested = false, canToggle = true;
     bool canClearRecentDiagnostics = true;
+    unsigned brightnessPercent = DefaultRedBrightness;
+    bool supportsBrightness = true, canChangeBrightness = true;
 };
 // Ownership of the returned root menu transfers to the caller.
 HMENU BuildTrayMenu(const TrayMenuState& state);

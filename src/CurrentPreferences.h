@@ -28,10 +28,11 @@ inline std::optional<std::uint64_t> PackCurrentPreferences(const CurrentPreferen
     put(static_cast<unsigned>(value.backend), 3); put(value.sessionMinutes, 5); put(static_cast<unsigned>(value.shortcuts), 13);
     put(static_cast<unsigned>(value.expiryWarning), 15); put(snapshot.settingsUnsaved, 24); put(snapshot.busy, 25);
     put(static_cast<unsigned>(snapshot.startupSource), 26); put(snapshot.startupLoadWarning, 28); put(PreferencesProfileVersion, 29);
+    put(value.brightnessPercent, 37); // Schema 4; older clients already reject a differing profile schema.
     return word;
 }
 inline std::optional<CurrentPreferencesSnapshot> UnpackCurrentPreferences(std::uint64_t word) noexcept {
-    constexpr auto payloadMask = (1ull << 37) - 1;
+    constexpr auto payloadMask = (1ull << 44) - 1;
     if ((word >> 48) != 0x5202 || (word & 0x0000ffffffffffffull & ~payloadMask) != 0 ||
         ((word >> 29) & 255) != PreferencesProfileVersion) return std::nullopt;
     const auto get = [&](unsigned shift, unsigned mask) { return static_cast<unsigned>((word >> shift) & mask); };
@@ -42,5 +43,6 @@ inline std::optional<CurrentPreferencesSnapshot> UnpackCurrentPreferences(std::u
     result.preferences.expiryWarning = static_cast<ExpiryWarning>(get(15, 511));
     result.settingsUnsaved = get(24, 1) != 0; result.busy = get(25, 1) != 0;
     result.startupSource = static_cast<PreferenceSource>(get(26, 3)); result.startupLoadWarning = get(28, 1) != 0;
+    result.preferences.brightnessPercent = get(37, 127);
     return ValidCurrentPreferences(result) ? std::optional<CurrentPreferencesSnapshot>(result) : std::nullopt;
 }

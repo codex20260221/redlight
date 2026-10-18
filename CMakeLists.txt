@@ -27,7 +27,7 @@ add_custom_target(RedLightBuildInfo
 add_executable(RedLight WIN32
     src/Diagnostics.cpp src/Clipboard.cpp src/PreferencesStore.cpp src/TrayMenu.cpp src/SessionLimitDialog.cpp src/HotkeyManager.cpp src/StandardOutput.cpp src/StatusQuery.cpp src/StartupOptions.cpp src/ProfileValidation.cpp src/ProfileExport.cpp src/SessionNotifications.cpp src/BuildMetadata.cpp src/ProfileComparison.cpp src/ProfileSave.cpp src/DisplayContext.cpp src/SavedSettings.cpp src/CommandHelp.cpp src/StatusClipboard.cpp src/RecentDiagnosticsClipboard.cpp src/main.cpp
     src/GammaRampFilter.cpp src/MagnificationFilter.cpp src/TrayCommand.cpp src/PreferencesClipboard.cpp src/CurrentPreferences.cpp src/PreferencesQuery.cpp src/CountdownTimerRegistration.cpp src/RestorationHistoryJson.cpp src/RestorationHistoryClipboard.cpp src/VerificationJson.cpp src/VerificationClipboard.cpp src/ProcessContext.cpp
-    src/TrayIcons.cpp resources/app.rc
+    src/TrayIcons.cpp src/BrightnessDialog.cpp resources/app.rc
 )
 add_dependencies(RedLight RedLightBuildInfo)
 target_include_directories(RedLight PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated" resources)

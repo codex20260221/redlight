@@ -199,6 +199,12 @@ bool GammaRampFilter::setLumaProfile(LumaProfile) {
 
 LumaProfile GammaRampFilter::lumaProfile() const { return LumaProfile::Classic; }
 
+bool GammaRampFilter::setBrightnessPercent(unsigned percent) {
+    if (percent == DefaultRedBrightness) return true; // No write or cleanup, including pending recovery.
+    SetError("adjustable brightness requires Magnification; gamma stays at 100%", ERROR_INVALID_PARAMETER);
+    return false;
+}
+
 bool GammaRampFilter::supportsRedMode(RedMode mode) const {
     return mode == RedMode::StrictRed;
 }

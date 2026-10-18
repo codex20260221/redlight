@@ -40,6 +40,8 @@
 #include "ProfileExport.h"
 #include "SessionNotifications.h"
 #include "LumaPreference.h"
+#include "BrightnessPreference.h"
+#include "BrightnessDialog.h"
 #include "RecentDiagnosticsClipboard.h"
 #include "TrayCommand.h"
 #include "PreferencesClipboard.h"
@@ -112,6 +114,7 @@ void RetrySessionRecovery();
 void RetrySelectedShortcuts();
 
 void SetLumaProfile(LumaProfile profile);
+void SetRedBrightness(unsigned percent);
 void LogSystemInfo();
 void RefreshDisplayContext(DisplayContextReason reason);
 bool ResetDisplay();
@@ -575,9 +578,9 @@ void RefreshTrayIconTip() {
     if (g_displayFilter->redMode() == RedMode::LumaRed) {
         sprintf_s(profile, " [%s]", LumaProfileName(g_displayFilter->lumaProfile()));
     }
-    sprintf_s(tip, "RedLight %s - %s - %s%s%s",
+    sprintf_s(tip, "RedLight %s - %s - %s%s - %u%% red%s",
         FilterStatusText(),
-        g_displayFilter->name(), RedModeDisplayName(g_displayFilter->redMode()), profile, remaining);
+        g_displayFilter->name(), RedModeDisplayName(g_displayFilter->redMode()), profile, g_displayFilter->brightnessPercent(), remaining);
     UpdateTrayIconTip(tip);
 }
 
@@ -823,6 +826,7 @@ bool ApplyInactivePreferences(const AppPreferences& preferences) {
     bool applied = true;
     if (g_displayFilter->supportsRedMode(preferences.mode)) applied = g_displayFilter->setRedMode(preferences.mode);
     if (g_displayFilter->supportsRedMode(RedMode::LumaRed)) applied = g_displayFilter->setLumaProfile(preferences.luma) && applied;
+    if (g_displayFilter->supportsBrightness()) applied = g_displayFilter->setBrightnessPercent(preferences.brightnessPercent) && applied;
     StopSessionTimer();
     return g_sessionTimer.configure(preferences.sessionMinutes, 0, false) && applied;
 }
@@ -873,6 +877,30 @@ void SetLumaProfile(LumaProfile profile) {
     Diagnostics::LogFormat("Luma detail preference: %s (%s).", LumaProfileName(profile),
         result == LumaPreferenceResult::PreferredOnly ? "preferred for Magnification; current backend unchanged" : "selected on current backend");
     RefreshTrayIconTip();
+}
+
+void SetRedBrightness(unsigned percent) {
+    if (g_busy || g_preferencesApplying || !ValidRedBrightness(percent)) return;
+    if (g_pendingRestore) { RestoreFilter(RestoreReason::DeferredRequest, false); return; }
+    BrightnessPreferenceResult result;
+    char error[256] = {};
+    {
+        ScopedFlag busy(g_busy);
+        g_verification.beforeBrightnessSelection(*g_displayFilter, percent);
+        result = UpdateBrightnessPreference(*g_displayFilter, g_preferences, percent);
+        if (result == BrightnessPreferenceResult::BackendFailed) strcpy_s(error, g_displayFilter->lastError());
+    }
+    const bool restored = !g_pendingRestore || RestoreFilter(RestoreReason::DeferredRequest, false);
+    RefreshTrayIconTip();
+    if (result == BrightnessPreferenceResult::BackendFailed) { ReportError(error); return; }
+    if (result == BrightnessPreferenceResult::Rejected) { ReportError("Restore display before changing red brightness."); return; }
+    g_preferencesUnsaved = !SavePreferences(g_preferences);
+    if (g_preferencesUnsaved) ReportError("The brightness preference changed but could not be saved. Retry saving current preferences in Expert controls.");
+    else if (result == BrightnessPreferenceResult::PreferredOnly && restored)
+        ShowTrayInfo("RedLight preferred brightness saved", "This brightness is saved for Magnification. Gamma stays in Strict Red at 100% brightness.");
+    Diagnostics::LogFormat("Red brightness preference: %u%% (%s); backend selection: %u%%.", percent,
+        result == BrightnessPreferenceResult::PreferredOnly ? "preferred for Magnification" : "selected on current backend", g_displayFilter->brightnessPercent());
+    // A live brightness change never restarts the existing session countdown.
 }
 
 void SetRedModeFromTray(RedMode mode) {
@@ -987,6 +1015,9 @@ void CopySupportReport(HWND owner) {
         LumaProfileName(g_displayFilter->lumaProfile()) : "Unavailable on gamma";
     state.preferredRedMode = RedModeDisplayName(g_preferences.mode);
     state.preferredLumaProfile = LumaProfileName(g_preferences.luma);
+    state.brightnessPercent = g_displayFilter->brightnessPercent();
+    state.preferredBrightnessPercent = g_preferences.brightnessPercent;
+    state.adjustableBrightness = g_displayFilter->supportsBrightness();
     state.lastError = g_displayFilter->lastError();
     state.backendLifecycle = g_displayFilter == &g_magnificationFilter ? g_magnificationFilter.lifecycleDescription() :
         g_displayFilter == &g_gammaRampFilter ? g_gammaRampFilter.lifecycleDescription() : "Not reported";
@@ -1162,7 +1193,7 @@ void ShowAboutDialog(HWND parent) {
     if (g_sessionNotifications.isRegistered()) strcpy_s(sessionRecovery, "Available");
     else sprintf_s(sessionRecovery, "Unavailable (error %lu); retry in Expert controls", g_sessionNotifications.lastError());
     const auto logging = Diagnostics::GetStatus();
-    sprintf_s(aboutText, "RedLight " REDLIGHT_VERSION "\nBuild revision: " REDLIGHT_BUILD_REVISION " (" REDLIGHT_SOURCE_STATE ")\n\nBackend: %s\nStartup selection: %s%s\nNext start: %s\nMode: %s\nLuma detail: %s\nPreferred mode/detail: %s / %s\nStatus: %s\nVerification: %s\nLast check: %s\nSettings: %s\nStartup preferences: %s%s\n\n"
+    sprintf_s(aboutText, "RedLight " REDLIGHT_VERSION "\nBuild revision: " REDLIGHT_BUILD_REVISION " (" REDLIGHT_SOURCE_STATE ")\n\nBackend: %s\nStartup selection: %s%s\nNext start: %s\nMode: %s\nLuma detail: %s\nPreferred mode/detail: %s / %s\nRed brightness: %u%% (%s)\nPreferred red brightness: %u%%\nStatus: %s\nVerification: %s\nLast check: %s\nSettings: %s\nStartup preferences: %s%s\n\n"
         "Toggle shortcut: %s\nRestore shortcut: %s\nShortcut preference: %s\nShortcut preference applied: %s\nLast shortcut error: %s\nSession recovery: %s\nExpiry warning: %s\n\n"
         "File logging: %s\nMissing file records: %llu\nTruncated records: %llu\nLast file error: %lu\n\n"
         "Logs: %%LOCALAPPDATA%%\\RedLight\nUnsigned release candidate\n"
@@ -1172,6 +1203,7 @@ void ShowAboutDialog(HWND parent) {
         RedModeDisplayName(g_displayFilter->redMode()),
         g_displayFilter->supportsRedMode(RedMode::LumaRed) ? LumaProfileName(g_displayFilter->lumaProfile()) : "Unavailable on gamma",
         RedModeDisplayName(g_preferences.mode), LumaProfileName(g_preferences.luma),
+        g_displayFilter->brightnessPercent(), g_displayFilter->supportsBrightness() ? "adjustable" : "fixed on Gamma", g_preferences.brightnessPercent,
         FilterStatusText(),
         BackendVerificationName(g_verification.result().state), verificationTiming,
         g_preferencesUnsaved ? "Unsaved changes" : "Saved/default",
@@ -1212,7 +1244,8 @@ void ShowTrayMenu(HWND hwnd) {
         !g_busy && !g_preferencesApplying && CanRestartCountdown(g_sessionTimer, now, *g_displayFilter, g_verification.result().state, g_pendingRestore),
         !g_busy && !g_preferencesApplying && g_restorationHistory.inProgress() == 0,
         g_displayFilter->isActive(), g_pendingRestore, !g_busy && !g_preferencesApplying,
-        !g_busy && !g_preferencesApplying};
+        !g_busy && !g_preferencesApplying, g_preferences.brightnessPercent, g_displayFilter->supportsBrightness(),
+        CanChangeBrightness(*g_displayFilter, g_busy, g_preferencesApplying, g_pendingRestore)};
     HMENU menu = BuildTrayMenu(state);
     if (!menu) { ReportError("Could not build the tray menu."); return; }
     if (!SetForegroundWindow(hwnd)) Diagnostics::Log("SetForegroundWindow failed for tray menu.");
@@ -1230,7 +1263,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         [&](const char* error) -> LRESULT {
             Diagnostics::LogFormat("C++ failure in window message %u: %s", uMsg, error);
             if (IsReadOnlyTrayQueryMessage(uMsg)) return 0; // Read-only automation never restores or opens an error dialog.
-            const bool mayChangeFilter = uMsg == WM_COMMAND ? CommandMayChangeFilter(LOWORD(wParam), g_displayFilter->supportsRedMode(RedMode::LumaRed)) :
+            const bool mayChangeFilter = uMsg == WM_COMMAND ? CommandMayChangeFilter(LOWORD(wParam), g_displayFilter->supportsRedMode(RedMode::LumaRed), g_displayFilter->supportsBrightness()) :
                 (uMsg == WM_REDLIGHT_UI_ERROR ? wParam != 0 : uMsg != WM_TRAYICON);
             const auto recovery = RecoveryAfterUiFailure(mayChangeFilter, g_pendingRestore, g_busy);
             if (recovery == UiFailureRecovery::Defer) {
@@ -1305,6 +1338,10 @@ LRESULT HandleWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         else if (wParam == ID_HOTKEY_RESTORE) RestoreFilter(RestoreReason::Manual, true);
         return 0;
     case WM_COMMAND:
+        if (LOWORD(wParam) >= ID_RED_BRIGHTNESS_BASE + 1 && LOWORD(wParam) <= ID_RED_BRIGHTNESS_BASE + 100) {
+            SetRedBrightness(LOWORD(wParam) - ID_RED_BRIGHTNESS_BASE);
+            return 0;
+        }
         if (LOWORD(wParam) >= ID_EXPIRY_WARNING_BASE && LOWORD(wParam) <= ID_EXPIRY_WARNING_BASE + 3) {
             SetExpiryWarning(ExpiryWarningOptions[LOWORD(wParam) - ID_EXPIRY_WARNING_BASE]);
             return 0;
@@ -1329,6 +1366,11 @@ LRESULT HandleWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         switch (LOWORD(wParam)) {
         case ID_TRAY_TOGGLE: ToggleRedlight(); break;
         case ID_TRAY_ENABLE: EnableRedlight(); break;
+        case ID_TRAY_CUSTOM_BRIGHTNESS:
+            if (CanChangeBrightness(*g_displayFilter, g_busy, g_preferencesApplying, g_pendingRestore)) {
+                if (const auto percent = ShowRedBrightnessDialog(hwnd, g_preferences.brightnessPercent)) SetRedBrightness(*percent);
+            }
+            break;
         case ID_TRAY_CUSTOM_SESSION:
             if (!g_busy && !g_preferencesApplying && CanChangeSessionLimit(g_sessionTimer, GetTickCount64(), *g_displayFilter, g_verification.result().state, g_pendingRestore)) {
                 if (const auto minutes = ShowSessionLimitDialog(hwnd, g_sessionTimer.minutes())) SetSessionLimit(*minutes);

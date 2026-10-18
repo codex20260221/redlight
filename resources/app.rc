@@ -46,3 +46,15 @@ BEGIN
  DEFPUSHBUTTON "&Apply", IDOK, 116, 96, 52, 14
  PUSHBUTTON "&Cancel", IDCANCEL, 176, 96, 52, 14
 END
+
+IDD_RED_BRIGHTNESS DIALOGEX 0, 0, 240, 124
+STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Red brightness"
+FONT 9, "Segoe UI"
+BEGIN
+ LTEXT "Red brightness (&percent, 1-100):", -1, 12, 12, 216, 12
+ EDITTEXT IDC_RED_BRIGHTNESS, 12, 29, 64, 15, ES_NUMBER | ES_AUTOHSCROLL | WS_TABSTOP
+ LTEXT "100% keeps the existing filter brightness. Gamma stays at 100%; your choice is kept for Magnification.", -1, 12, 54, 216, 32
+ DEFPUSHBUTTON "&Apply", IDOK, 116, 100, 52, 14
+ PUSHBUTTON "&Cancel", IDCANCEL, 176, 100, 52, 14
+END

@@ -1,12 +1,14 @@
 # Issue-driven development checkpoint — 2026-10-18
 
-The user resumed development from `6cc97cb` with a new issue-driven objective, then **cleared the open-ended goal** while the first tray-visibility change was in progress. This checkpoint closes out that focused change on `release/0.6.0-rc1`; stop afterward and do not resume development until the user asks. No feature implementation remains in progress. The earlier Magnification audit remains complete.
+The user resumed the issue-driven goal from clean local commit `693d204`. This checkpoint completes integrated red brightness for issue #1 on `release/0.6.0-rc1`. Continue autonomously through the roadmap until externally interrupted, keeping focused local commits and all restrictions below. The earlier Magnification audit and tray visibility change remain complete. No later feature implementation is in progress at this checkpoint.
 
 ## New issue-driven direction
 
-Read the actual open GitHub issue descriptions and every available comment, then compared them with local code. [Issue roadmap](docs/issue-roadmap.md) records priorities, dependencies, and implemented-versus-missing status. Do not resume the old series of specialized diagnostics. Next user-facing priority, if resumed, is #1 adjustable red brightness, followed by #17 optional disabled-by-default startup. Transitions and scheduling require defined semantics first; per-monitor work remains isolated research only.
+Read the actual open GitHub issue descriptions and every available comment, then compared them with local code; issue #1 and its comments were rechecked during brightness implementation. [Issue roadmap](docs/issue-roadmap.md) records priorities, dependencies, and implemented-versus-missing status. Do not resume the old series of specialized diagnostics. Next user-facing priority is #17 optional disabled-by-default startup. Transitions and scheduling require defined semantics first; per-monitor work remains isolated research only.
 
-Issue #27 is addressed locally with four bright monochrome tray symbols (off ring, Strict filled circle, Luma diamond, recovery/unconfirmed triangle), complete shared resource loading, cached state selection, fake-API regressions, and reproducible original pixel assets. Existing tray callbacks, identity, tooltip, menu/shortcuts, recovery priorities, and restore-before-retry behavior remain intact. Native Explorer/DPI/theme/filtered-display acceptance is pending. Brightness, startup, transitions, scheduling, and per-monitor implementations have not been started.
+Issue #27 is addressed locally with four bright monochrome tray symbols (off ring, Strict filled circle, Luma diamond, recovery/unconfirmed triangle), complete shared resource loading, cached state selection, fake-API regressions, and reproducible original pixel assets. Existing tray callbacks, identity, tooltip, menu/shortcuts, recovery priorities, and restore-before-retry behavior remain intact. Native Explorer/DPI/theme/filtered-display acceptance is pending.
+
+Issue #1 now provides whole 1–100% Magnification red brightness, unchanged coefficients at 100%, exact black/green/blue zeros, live checked writes and rollback retaining the original, tray presets/custom input, schema-4 saved preferences/profiles, and preferred/backend-selected diagnostics. Gamma independently remains fixed at 100%; its menu only changes a future Magnification preference without touching ramps/errors/verification/recovery. Schemas 1–3 pin brightness to 100%, reset uses 100%, and save failures retain the applied live value as unsaved for retry. Countdown deadlines and immediate restoration are unchanged. Native dialog/display qualification remains pending. Startup, transitions, schedules, and per-monitor implementations have not been started.
 
 ## Restrictions that persist on resume
 
@@ -45,14 +47,15 @@ The focused audit is committed as `4a1dd71`. The detailed state table, ownership
 | `26e1d99` | Validated UTC support capture stamps, independent of monotonic scheduling |
 | `f882ec1` | Cached startup self process/session IDs, without owner detection |
 | `f39c0aa` | Session-hook native failure history retained after retry/cleanup; stale-error exclusion |
-| This checkpoint | Issue #27 high-contrast tray symbols, fake resource/state regressions, and reviewed issue-driven roadmap |
+| `693d204` | Issue #27 high-contrast tray symbols, fake resource/state regressions, and reviewed issue-driven roadmap |
+| This checkpoint | Issue #1 integrated 1–100% red brightness, schema-4 profiles, independent Gamma policy, and isolated failure regressions |
 
 All commits are local. Each feature's evidence and unexecuted manual notes are recorded in [release validation](docs/release-validation.md#expert-feature-follow-up-validation).
 
 ## Verified checkpoint
 
 - Release and MSVC `/analyze` builds passed.
-- **401 isolated C++ scenarios passed** across two CTest targets: 378 core/fake-API and 23 fake-filesystem diagnostics scenarios.
+- **416 isolated C++ scenarios passed** across two CTest targets: 393 core/fake-API and 23 fake-filesystem diagnostics scenarios. Brightness adds 15 scenarios and expands all-field preview/comparison coverage to all 128 subsets.
 - `tools/Test-TrayIcons.ps1` verifies four deterministic original monochrome resources at seven sizes, distinct shapes, transparency, bounded file layout, and Strict/Luma endpoint contrast. The off-screen asset contact sheet was inspected without launching RedLight.
 - Both test executables passed the KERNEL32-only import gate before execution. RedLight itself was never executed.
 - Static release checks passed: seven reviewed Windows DLLs, x64 GUI executable, ASLR/DEP, version/prerelease metadata, embedded `asInvoker` manifest, and SHA-256.
@@ -79,13 +82,13 @@ cpack --config build/CPackConfig.cmake -C Release -B build/packages
 
 Start with `git status --short` and this handoff. The worktree should be clean. There is no unfinished fix, active build, or required implementation follow-up from this checkpoint. Manual/native qualification remains unauthorized unless the user changes that restriction.
 
-Choose the next meaningful user-facing task from [issue roadmap](docs/issue-roadmap.md) if the user resumes development. Brightness is next; no changes for it are present. The old static backend-mode discovery candidate was not started and is superseded by the issue-driven priorities.
+Choose the next meaningful user-facing task from [issue roadmap](docs/issue-roadmap.md). Optional startup is next; no implementation for it is present. It must remain disabled by default, require explicit per-user consent, handle portable quoted paths/removal/verification/failures, and never be silently enabled by profile import. The old static backend-mode discovery candidate was not started and is superseded by the issue-driven priorities.
 
 Preserve these integration boundaries:
 
-- Backends are selected at startup; preference edits apply on the next start.
+- Backends are selected at startup; backend-preference edits apply on the next start. Magnification mode/preset/brightness changes can apply live through checked writes/rollback.
 - Gamma's global mutex coordinates cooperating RedLight builds only; failed restore retains calibration/DC/ownership, and cleanup-only retries do not rewrite restored calibration. Abandoned ownership blocks activation for the process lifetime.
-- Status uses all 48 payload bits. Current-settings uses its separate scalar packet. Do not repurpose existing wire fields casually.
+- Status uses all 48 payload bits and remains protocol 1 without brightness. Current-settings uses its separate scalar packet; schema 4 adds brightness in bits 37–43 and rejects different profile schemas. JSON keeps protocol 1 with an additive preferred brightness field.
 - Clipboard history and verification schemas are currently protocol 1, with shared version constants and no CLI/IPC query. Exported verification is the last explicit check and cannot clear recovery.
-- Profile schema is 3; accepted input schemas are 1/2/3, maximum input is 4096 UTF-8 bytes, and session limits remain 0–240 minutes.
+- Profile schema is 4; accepted input schemas are 1/2/3/4, older schemas/legacy storage pin 100% brightness, maximum input is 4096 UTF-8 bytes, and session limits remain 0–240 minutes.
 - Keep monotonic countdown/age/timing policy independent of the UTC wall-clock label. Cached diagnostic history must not become a new restoration or ownership state machine.

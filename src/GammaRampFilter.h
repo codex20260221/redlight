@@ -23,6 +23,9 @@ public:
     bool setLumaProfile(LumaProfile profile) override;
     LumaProfile lumaProfile() const override;
     bool supportsRedMode(RedMode mode) const override;
+    bool supportsBrightness() const noexcept override { return false; }
+    unsigned brightnessPercent() const noexcept override { return DefaultRedBrightness; }
+    bool setBrightnessPercent(unsigned percent) override;
     bool shutdown() override;
     const char* name() const override;
     const char* lifecycleDescription() const noexcept; // Cached flags only; no API, clock, or logging.

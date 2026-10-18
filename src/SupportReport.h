@@ -21,6 +21,8 @@
 struct SupportReportState {
     std::string_view version, backend, startupPolicy, nextStartupPolicy, redMode, lumaProfile, lastError;
     std::string_view preferredRedMode = "Not reported", preferredLumaProfile = "Not reported";
+    std::optional<unsigned> brightnessPercent, preferredBrightnessPercent;
+    std::optional<bool> adjustableBrightness;
     std::string_view buildRevision = "unversioned", sourceState = "unknown";
     std::string_view backendLifecycle = "Not reported";
     std::string_view startupFallbackReason = "Not reported";
@@ -83,7 +85,16 @@ inline std::string BuildSupportReport(const SupportReportState& state) {
         << "\r\nNext-start preference: " << state.nextStartupPolicy << "\r\nMode: " << state.redMode
         << "\r\nLuma detail: " << state.lumaProfile
         << "\r\nPreferred red mode: " << state.preferredRedMode << "\r\nPreferred Luma detail: " << state.preferredLumaProfile
-        << "\r\nState: "
+        << "\r\nRed brightness selection: ";
+    if (state.brightnessPercent) report << *state.brightnessPercent << '%';
+    else report << "not reported";
+    report << "\r\nPreferred red brightness: ";
+    if (state.preferredBrightnessPercent) report << *state.preferredBrightnessPercent << '%';
+    else report << "not reported";
+    report << "\r\nAdjustable brightness on current backend: ";
+    if (state.adjustableBrightness) report << (*state.adjustableBrightness ? "yes" : "no; fixed at 100% (preference retained for Magnification)");
+    else report << "not reported";
+    report << "\r\nState: "
         << FilterStatusDescription(state.active, state.needsRestore, !state.lastError.empty(), state.verification, state.restoreRequested)
         << "\r\nBackend verification: " << BackendVerificationName(state.verification);
     report << "\r\nVerification age: ";

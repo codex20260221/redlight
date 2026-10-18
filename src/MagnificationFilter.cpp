@@ -18,16 +18,17 @@ constexpr MAGCOLOREFFECT kIdentityEffect = {{
     {0.0f, 0.0f, 0.0f, 0.0f, 1.0f},
 }};
 
-MAGCOLOREFFECT ColorEffectForMode(RedMode mode, LumaProfile profile) {
+MAGCOLOREFFECT ColorEffectForMode(RedMode mode, LumaProfile profile, unsigned brightness) {
     MAGCOLOREFFECT effect = {};
     effect.transform[3][3] = 1.0f;
     effect.transform[4][4] = 1.0f;
     if (mode == RedMode::StrictRed) {
-        effect.transform[0][0] = 1.0f;
+        effect.transform[0][0] = static_cast<float>(brightness) / 100.0f;
     } else {
         const auto weights = LumaProfileWeights(profile);
         // Input-channel rows, red output column. No green/blue output or black offset.
-        for (int i = 0; i < 3; ++i) effect.transform[i][0] = weights[i];
+        const float scale = static_cast<float>(brightness) / 100.0f;
+        for (int i = 0; i < 3; ++i) effect.transform[i][0] = weights[i] * scale;
     }
     return effect;
 }
@@ -120,7 +121,7 @@ bool MagnificationFilter::enable() {
     sprintf_s(action, sizeof(action), "MagSetFullscreenColorEffect(%s)", RedModeDisplayName(redMode_));
     // A failed write is unconfirmed, rather than proof that display state was unchanged.
     restorePending_ = true;
-    if (!SetColorEffect(ColorEffectForMode(redMode_, lumaProfile_), action, BackendComparison::MatrixPurpose::RedOnly)) {
+    if (!SetColorEffect(ColorEffectForMode(redMode_, lumaProfile_, brightnessPercent_), action, BackendComparison::MatrixPurpose::RedOnly)) {
         char applyError[sizeof(lastError_)];
         std::memcpy(applyError, lastError_, sizeof(applyError));
         if (disable()) {
@@ -132,7 +133,7 @@ bool MagnificationFilter::enable() {
 
     active_ = true;
     restorePending_ = false;
-    Diagnostics::LogFormat("%s enable succeeded using %s.", kFilterName, RedModeDisplayName(redMode_));
+    Diagnostics::LogFormat("%s enable succeeded using %s at %u%% red brightness.", kFilterName, RedModeDisplayName(redMode_), brightnessPercent_);
     return operation.success();
 }
 
@@ -182,7 +183,7 @@ BackendVerificationReport MagnificationFilter::inspectState() const {
         else Diagnostics::Log("Magnification verification read failed; no native error code was provided.");
         return {BackendVerification::Unavailable, std::nullopt, error};
     }
-    const auto expected = ColorEffectForMode(redMode_, lumaProfile_);
+    const auto expected = ColorEffectForMode(redMode_, lumaProfile_, brightnessPercent_);
     const auto details = BackendComparison::Matrix(actual.transform, expected.transform, BackendComparison::MatrixPurpose::RedOnly);
     Diagnostics::LogFormat("Magnification verification: %u/%u mismatches, maximum finite coefficient difference %.9g, nonfinite=%s, unexpected G/B=%s; no filter reapplied.",
         details.mismatches, details.values, details.maximumDifference, details.nonFiniteValues ? "yes" : "no", details.unexpectedGreenBlue ? "yes" : "no");
@@ -206,7 +207,7 @@ bool MagnificationFilter::setRedMode(RedMode mode) {
     if (active_) {
         char action[128];
         sprintf_s(action, sizeof(action), "MagSetFullscreenColorEffect(%s)", RedModeDisplayName(mode));
-        if (!SetLiveColorEffect(ColorEffectForMode(mode, lumaProfile_), action)) {
+        if (!SetLiveColorEffect(ColorEffectForMode(mode, lumaProfile_, brightnessPercent_), action)) {
             return false;
         }
     }
@@ -231,13 +232,31 @@ bool MagnificationFilter::setLumaProfile(LumaProfile profile) {
         return false;
     }
     if (active_ && redMode_ == RedMode::LumaRed &&
-        !SetLiveColorEffect(ColorEffectForMode(redMode_, profile), "change luma profile")) return false;
+        !SetLiveColorEffect(ColorEffectForMode(redMode_, profile, brightnessPercent_), "change luma profile")) return false;
     lumaProfile_ = profile;
     Diagnostics::LogFormat("MagnificationFilter luma profile: %s.", LumaProfileName(profile));
     return true;
 }
 
 LumaProfile MagnificationFilter::lumaProfile() const { return lumaProfile_; }
+
+bool MagnificationFilter::setBrightnessPercent(unsigned percent) {
+    if (!ValidRedBrightness(percent)) {
+        LogError("red brightness must be from 1 to 100 percent", ERROR_INVALID_PARAMETER);
+        return false;
+    }
+    if (percent == brightnessPercent_) return true;
+    if (restorePending_ && !active_) {
+        LogError("change brightness while restoration is pending", ERROR_INVALID_STATE);
+        return false;
+    }
+    char action[96];
+    sprintf_s(action, "change red brightness to %u%%", percent);
+    if (active_ && !SetLiveColorEffect(ColorEffectForMode(redMode_, lumaProfile_, percent), action)) return false;
+    brightnessPercent_ = percent; // Commit only after confirmed live application.
+    Diagnostics::LogFormat("MagnificationFilter red brightness: %u%%.", brightnessPercent_);
+    return true;
+}
 
 bool MagnificationFilter::supportsRedMode(RedMode mode) const {
     return mode == RedMode::StrictRed || mode == RedMode::LumaRed;
@@ -330,7 +349,7 @@ bool MagnificationFilter::SetLiveColorEffect(const MAGCOLOREFFECT& effect, const
     std::memcpy(applyError, lastError_, sizeof(applyError));
     active_ = false;
     restorePending_ = true;
-    if (SetColorEffect(ColorEffectForMode(redMode_, lumaProfile_), "rollback confirmed red transform", BackendComparison::MatrixPurpose::RedOnly)) {
+    if (SetColorEffect(ColorEffectForMode(redMode_, lumaProfile_, brightnessPercent_), "rollback confirmed red transform", BackendComparison::MatrixPurpose::RedOnly)) {
         active_ = true;
         restorePending_ = false;
         std::memcpy(lastError_, applyError, sizeof(lastError_));

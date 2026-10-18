@@ -15,6 +15,10 @@ public:
             filter.supportsRedMode(RedMode::LumaRed) && filter.redMode() == RedMode::LumaRed &&
             filter.lumaProfile() != profile) *this = {};
     }
+    void beforeBrightnessSelection(const DisplayFilter& filter, unsigned percent) {
+        if (ValidRedBrightness(percent) && filter.isActive() && filter.supportsBrightness() &&
+            filter.brightnessPercent() != percent) *this = {};
+    }
     void record(const BackendVerificationReport& report, std::uint64_t started, std::uint64_t completed) noexcept {
         if (report.state == BackendVerification::NotChecked) {
             *this = {};
