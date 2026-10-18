@@ -5,13 +5,20 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <cwchar>
+#include <string_view>
+#include <type_traits>
 
 namespace {
 HANDLE g_logFile = INVALID_HANDLE_VALUE;
 bool g_initialized = false;
 SRWLOCK g_lock = SRWLOCK_INIT;
 SRWLOCK g_recentLock = SRWLOCK_INIT;
-std::array<std::wstring, 4> g_paths;
+constexpr std::size_t kCachedPathCharacters = 32768;
+// Late backend destructors can log after a failed Shutdown. These cached paths
+// have no dynamic destructor and remain usable throughout static teardown.
+constinit std::array<std::array<wchar_t, kCachedPathCharacters>, 4> g_paths{};
+static_assert(std::is_trivially_destructible_v<decltype(g_paths)>);
 Diagnostics::Status g_status;
 RecentDiagnosticsBuffer g_recent;
 constexpr ULONGLONG kMaxLogSizeBytes = 1ull << 20;
@@ -64,14 +71,25 @@ bool PreparePaths() {
     DWORD directoryError = 0;
     const auto directory = BuildLogDirectory(&directoryError);
     if (directory.empty()) { FileFailure("directory", directoryError ? directoryError : ERROR_PATH_NOT_FOUND); return false; }
-    constexpr const wchar_t* names[] = {L"redlight.log", L"redlight.1.log", L"redlight.2.log", L"redlight.3.log"};
-    std::array<std::wstring, 4> paths;
-    for (unsigned i = 0; i < paths.size(); ++i) paths[i] = directory + L"\\" + names[i];
-    g_paths = std::move(paths);
+    constexpr std::wstring_view names[] = {L"redlight.log", L"redlight.1.log", L"redlight.2.log", L"redlight.3.log"};
+    // Validate every destination before changing the cache; include separator/NUL.
+    for (const auto name : names) {
+        if (directory.size() >= kCachedPathCharacters - 1 || name.size() >= kCachedPathCharacters - directory.size() - 1) {
+            FileFailure("file path capacity", ERROR_FILENAME_EXCED_RANGE);
+            return false;
+        }
+    }
+    for (std::size_t index = 0; index < g_paths.size(); ++index) {
+        auto& path = g_paths[index];
+        std::wmemcpy(path.data(), directory.data(), directory.size());
+        path[directory.size()] = L'\\';
+        std::wmemcpy(path.data() + directory.size() + 1, names[index].data(), names[index].size());
+        path[directory.size() + 1 + names[index].size()] = L'\0';
+    }
     return true;
 }
 bool OpenCurrentLog() noexcept {
-    g_logFile = CreateFileW(g_paths[0].c_str(), FILE_APPEND_DATA | FILE_READ_ATTRIBUTES,
+    g_logFile = CreateFileW(g_paths[0].data(), FILE_APPEND_DATA | FILE_READ_ATTRIBUTES,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (g_logFile == INVALID_HANDLE_VALUE) { FileFailure("open", GetLastError()); return false; }
     return true;
@@ -85,7 +103,7 @@ bool CloseCurrentLog() noexcept {
 bool RotateLogs() noexcept {
     if (!CloseCurrentLog()) return false;
     for (int archive = 3; archive > 0; --archive) {
-        if (!MoveFileExW(g_paths[archive - 1].c_str(), g_paths[archive].c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        if (!MoveFileExW(g_paths[archive - 1].data(), g_paths[archive].data(), MOVEFILE_REPLACE_EXISTING)) {
             const DWORD error = GetLastError();
             if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) continue;
             OpenCurrentLog(); // Keep recovery possible even after a partial archive move.

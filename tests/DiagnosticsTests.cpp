@@ -362,6 +362,48 @@ void RecentLogStatusIndependentOfFileHealth() {
     Check(Diagnostics::RetryFileLogging() && Diagnostics::GetStatus().droppedLines == 1 &&
         Diagnostics::GetRecentLogStatus() == Diagnostics::RecentLogStatus{3, 32, 0}, "file recovery preserves the earlier memory/file histories and adds its own ordinary record");
 }
+void CachedPathsSurviveFailedCloseAndCleanupLogging() {
+    const auto original = Path(), archive = Path(1);
+    {
+        struct CleanupRecord { ~CleanupRecord() { Diagnostics::Log("late cleanup keeps the original cached path"); } } cleanup;
+        Diagnostics::Initialize();
+        Check(Diagnostics::GetStatus().file == Diagnostics::FileState::Available, "prepare a usable cached file path");
+        fake.files.at(original)->bytes.resize(1u << 20, 's');
+        fake.failClose = true;
+        Diagnostics::Shutdown();
+        Check(Diagnostics::GetStatus().file == Diagnostics::FileState::Degraded, "failed close retains the logger for late cleanup");
+        fake.environment = L"C:\\ChangedAfterInitialization";
+        fake.environmentPresent = false;
+        fake.failClose = false;
+    }
+    Check(fake.files.contains(original) && fake.files.contains(archive) && fake.files.at(archive)->bytes.size() == (1u << 20),
+        "destructor-style logging can rotate using original cached paths after close failure without consulting changed/unavailable environment");
+    const auto& bytes = fake.files.at(original)->bytes;
+    Check(std::string_view(bytes.data(), bytes.size()).find("late cleanup keeps the original cached path") != std::string_view::npos &&
+        Diagnostics::GetStatus().file == Diagnostics::FileState::Available && Diagnostics::GetStatus().droppedLines == 0,
+        "late cleanup record reaches the correct current file after retained-handle recovery");
+}
+void CachedPathCapacityBoundAndRetry() {
+    // Synthetic fake directories exercise the cache bound, not filesystem support.
+    fake.environment.assign(32743, L'x');
+    Check(Path(3).size() == 32767, "longest archive name exactly fits with a terminator");
+    Diagnostics::Initialize();
+    Check(Diagnostics::GetStatus().file == Diagnostics::FileState::Available && fake.files.contains(Path()), "exact-fit cached paths are not truncated");
+    fake.files.at(Path())->bytes.resize(1u << 20, 's');
+    Diagnostics::Log("exact-fit archive rotation");
+    Check(fake.files.contains(Path(1)) && Diagnostics::GetStatus().droppedLines == 0, "all cached archive names preserve the maximum accepted prefix through rotation");
+    Reset();
+    fake.environment.assign(32744, L'x');
+    Diagnostics::Initialize();
+    Check(Diagnostics::GetStatus().file == Diagnostics::FileState::Unavailable && Diagnostics::GetStatus().lastFileError == ERROR_FILENAME_EXCED_RANGE &&
+        fake.files.empty() && Diagnostics::RecentLogText()->find("file path capacity") != std::string::npos,
+        "one character beyond any archive capacity is visibly rejected before a current file opens");
+    Diagnostics::Log("oversized path fallback remains available");
+    fake.environment = L"C:\\Recovered-测试";
+    Check(Diagnostics::RetryFileLogging() && fake.files.contains(Path()) && Diagnostics::GetStatus().droppedLines == 1 &&
+        Diagnostics::RecentLogText()->find("oversized path fallback remains available") != std::string::npos,
+        "retry replaces a prior long cache with correctly terminated shorter Unicode paths while retaining missing-record history");
+}
 Handle* OpenHandle(HANDLE raw) {
     if (!raw || raw == INVALID_HANDLE_VALUE) { lastError = ERROR_INVALID_HANDLE; return nullptr; }
     auto* handle = static_cast<Handle*>(raw);
@@ -451,7 +493,8 @@ int main() {
         {"Recent log concurrent clear/snapshots", RecentLogConcurrentClearAndSnapshots},
         {"Recent log snapshot during locked file I/O", RecentLogSnapshotWhileFileWriteOwnsLock},
         {"Recent log clear during locked file I/O", RecentLogClearWhileFileWriteOwnsLock},
-        {"Recent log retention status/lifecycle", RecentLogStatusRetentionAndClear}, {"Recent log status independent of file health", RecentLogStatusIndependentOfFileHealth}
+        {"Recent log retention status/lifecycle", RecentLogStatusRetentionAndClear}, {"Recent log status independent of file health", RecentLogStatusIndependentOfFileHealth},
+        {"Cached paths after failed close/cleanup", CachedPathsSurviveFailedCloseAndCleanupLogging}, {"Cached path capacity/retry", CachedPathCapacityBoundAndRetry}
     };
     int failures = 0;
     for (const auto& [name, run] : tests) {

@@ -76,6 +76,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Support Unicode diagnostics paths and report log-write failures to the debugger.
 
 ### Fixed
+- Keep cached diagnostic file paths in bounded trivially destructible storage for late backend cleanup logging, validate every complete filename before cache mutation, preserve original paths through failed-close recovery, and report oversized cache inputs without truncation.
 - Correct custom time-limit deadline guidance for unchanged values, add Minutes/Apply/Cancel access keys and room for the explanation, and refocus/select invalid input with checked focus diagnostics for easier keyboard correction.
 - Defer native OS-version diagnostics until actual tray startup or display recovery, avoiding redundant module lookup for machine commands, help/invalid arguments, startup-parser failures, and duplicate launches while retaining command/build/error logging.
 - Separate diagnostic memory-history locking from serialized file logging so snapshots/clearing can finish during pending file I/O, retain incoming records before file-lock waits, and avoid lock-order cycles while preserving checked file/error handling.
