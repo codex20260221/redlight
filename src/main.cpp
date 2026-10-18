@@ -9,6 +9,7 @@
 #include "SupportReport.h"
 #include "Clipboard.h"
 #include "Preferences.h"
+#include "PreferencesStore.h"
 #include <cstdio>
 
 #include "Diagnostics.h"
@@ -55,13 +56,13 @@ bool g_autoRestoreFailureNotified = false;
 BackendPreference g_backendPreference = BackendPreference::Automatic;
 BackendPreference g_startupBackendPreference = BackendPreference::Automatic;
 bool g_backendOverride = false;
-RedMode g_preferredRedMode = RedMode::LumaRed;
-LumaProfile g_preferredLumaProfile = LumaProfile::Classic;
+AppPreferences g_preferences;
+bool g_preferencesUnsaved = false;
 
 }
 
 StartupOptions GetStartupOptions();
-BackendPreference LoadBackendPreference();
+bool ApplyInactivePreferences(const AppPreferences& preferences);
 void SetBackendPreference(BackendPreference preference);
 bool RestoreFilter(bool showError, bool notifyFailure = true);
 void StopSessionTimer();
@@ -76,8 +77,7 @@ bool AddTrayIcon();
 void ScheduleTrayRecovery();
 void ShowTrayMenu(HWND hwnd);
 void SaveRedMode(RedMode mode);
-void LoadRedMode();
-void LoadLumaProfile();
+
 void SetLumaProfile(LumaProfile profile);
 void LogSystemInfo();
 bool ResetDisplay();
@@ -144,7 +144,9 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
         return 0;
     }
 
-    g_backendPreference = LoadBackendPreference();
+    const LoadedPreferences loadedPreferences = LoadPreferences();
+    g_preferences = loadedPreferences.preferences;
+    g_backendPreference = g_preferences.backend;
     g_backendOverride = options.backendOverride.has_value();
     g_startupBackendPreference = options.backendOverride.value_or(g_backendPreference);
     Diagnostics::LogFormat("Startup backend preference: %s (%s)",
@@ -160,17 +162,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
     Diagnostics::LogFormat("Selected backend: %s; red mode: %s", g_displayFilter->name(), RedModeDisplayName(g_displayFilter->redMode()));
 
     Diagnostics::LogFormat("Monitor count: %d", GetSystemMetrics(SM_CMONITORS));
-    LoadRedMode();
-    LoadLumaProfile();
-    DWORD sessionMinutes = 0;
-    DWORD sessionSize = sizeof(sessionMinutes);
-    const LSTATUS sessionLoad = RegGetValueW(HKEY_CURRENT_USER, L"Software\\RedLight", L"SessionLimitMinutes",
-        RRF_RT_REG_DWORD, NULL, &sessionMinutes, &sessionSize);
-    if (sessionLoad == ERROR_SUCCESS && sessionMinutes <= SessionTimer::maxMinutes) {
-        g_sessionTimer.configure(sessionMinutes, 0, false);
-    } else if (sessionLoad != ERROR_FILE_NOT_FOUND) {
-        Diagnostics::LogFormat("Invalid/unavailable saved session limit (error %ld).", sessionLoad);
-    }
+    const bool preferencesApplied = ApplyInactivePreferences(g_preferences);
     if (!InitializeTrayIcon(hInstance)) {
         ReportError("The tray controls could not be created. RedLight will exit with the filter off.");
         g_displayFilter->shutdown();
@@ -178,6 +170,10 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
         CloseInstanceMutex(hMutex);
         Diagnostics::Shutdown();
         return 1;
+    }
+
+    if (loadedPreferences.warning || !preferencesApplied) {
+        ReportError("Some saved settings could not be loaded or applied. Defaults were used where needed. See the diagnostics log.", false);
     }
 
     MSG msg = {};
@@ -500,11 +496,9 @@ void SetSessionLimit(unsigned minutes) {
         RefreshTrayIconTip();
         return;
     }
-    const DWORD value = minutes;
-    const LSTATUS saved = RegSetKeyValueW(HKEY_CURRENT_USER, L"Software\\RedLight", L"SessionLimitMinutes",
-        REG_DWORD, &value, sizeof(value));
-    if (saved != ERROR_SUCCESS) {
-        Diagnostics::LogFormat("Saving session limit failed (error %ld).", saved);
+    g_preferences.sessionMinutes = minutes;
+    g_preferencesUnsaved = !SavePreferences(g_preferences);
+    if (g_preferencesUnsaved) {
         ReportError("The session limit changed, but could not be saved for the next start.");
     }
     Diagnostics::LogFormat("Session limit changed to %u minutes (0 = unlimited).", minutes);
@@ -588,71 +582,33 @@ bool InitializeTrayIcon(HINSTANCE hInstance) {
     return true;
 }
 
-BackendPreference LoadBackendPreference() {
-    DWORD value = 0;
-    DWORD size = sizeof(value);
-    const LSTATUS result = RegGetValueW(HKEY_CURRENT_USER, L"Software\\RedLight", L"BackendPreference",
-        RRF_RT_REG_DWORD, NULL, &value, &size);
-    if (result == ERROR_SUCCESS && IsValidBackendPreference(value)) return static_cast<BackendPreference>(value);
-    if (result != ERROR_FILE_NOT_FOUND) Diagnostics::LogFormat("Invalid/unavailable saved backend preference (error %ld); using Automatic.", result);
-    return BackendPreference::Automatic;
+bool ApplyInactivePreferences(const AppPreferences& preferences) {
+    if (!ValidPreferences(preferences) || g_displayFilter->needsRestore() || g_displayFilter->isActive()) return false;
+    bool applied = true;
+    if (g_displayFilter->supportsRedMode(preferences.mode)) applied = g_displayFilter->setRedMode(preferences.mode);
+    if (g_displayFilter->supportsRedMode(RedMode::LumaRed)) applied = g_displayFilter->setLumaProfile(preferences.luma) && applied;
+    StopSessionTimer();
+    return g_sessionTimer.configure(preferences.sessionMinutes, 0, false) && applied;
 }
 
 void SetBackendPreference(BackendPreference preference) {
     if (!IsValidBackendPreference(static_cast<unsigned>(preference))) return;
-    const DWORD value = static_cast<DWORD>(preference);
-    const LSTATUS result = RegSetKeyValueW(HKEY_CURRENT_USER, L"Software\\RedLight", L"BackendPreference",
-        REG_DWORD, &value, sizeof(value));
-    if (result != ERROR_SUCCESS) {
-        Diagnostics::LogFormat("Saving backend preference failed (error %ld).", result);
+    auto candidate = g_preferences;
+    candidate.backend = preference;
+    if (!SavePreferences(candidate)) {
         ReportError("The backend preference could not be saved. The previous selection remains in effect.");
         return;
     }
+    g_preferences = candidate;
+    g_preferencesUnsaved = false;
     g_backendPreference = preference;
     Diagnostics::LogFormat("Backend preference saved for next start: %s", BackendPreferenceName(preference));
 }
 
 void SaveRedMode(RedMode mode) {
-    g_preferredRedMode = mode;
-    const DWORD value = mode == RedMode::LumaRed ? 1 : 0;
-    const LSTATUS result = RegSetKeyValueW(HKEY_CURRENT_USER, L"Software\\RedLight", L"RedMode",
-        REG_DWORD, &value, sizeof(value));
-    if (result != ERROR_SUCCESS) {
-        Diagnostics::LogFormat("Saving red mode failed (error %ld).", result);
-        ReportError("The mode was applied, but could not be saved for the next start.");
-    }
-}
-
-void LoadRedMode() {
-    DWORD value = 0;
-    DWORD size = sizeof(value);
-    const LSTATUS result = RegGetValueW(HKEY_CURRENT_USER, L"Software\\RedLight", L"RedMode",
-        RRF_RT_REG_DWORD, NULL, &value, &size);
-    if (result == ERROR_FILE_NOT_FOUND) return;
-    if (result != ERROR_SUCCESS || value > 1) {
-        Diagnostics::LogFormat("Invalid/unavailable saved mode (error %ld); using backend default.", result);
-        return;
-    }
-    const RedMode mode = value == 1 ? RedMode::LumaRed : RedMode::StrictRed;
-    g_preferredRedMode = mode;
-    if (g_displayFilter->supportsRedMode(mode) && !g_displayFilter->setRedMode(mode)) {
-        Diagnostics::LogFormat("Loading saved mode failed: %s", g_displayFilter->lastError());
-    }
-}
-
-void LoadLumaProfile() {
-    DWORD value = 0;
-    DWORD size = sizeof(value);
-    const LSTATUS result = RegGetValueW(HKEY_CURRENT_USER, L"Software\\RedLight", L"LumaProfile",
-        RRF_RT_REG_DWORD, NULL, &value, &size);
-    if (result == ERROR_FILE_NOT_FOUND) return;
-    if (result != ERROR_SUCCESS || !IsValidLumaProfile(value)) {
-        Diagnostics::LogFormat("Invalid/unavailable luma profile (error %ld); using Classic.", result);
-        return;
-    }
-    g_preferredLumaProfile = static_cast<LumaProfile>(value);
-    if (g_displayFilter->supportsRedMode(RedMode::LumaRed) &&
-        !g_displayFilter->setLumaProfile(g_preferredLumaProfile)) Diagnostics::Log(g_displayFilter->lastError());
+    g_preferences.mode = mode;
+    g_preferencesUnsaved = !SavePreferences(g_preferences);
+    if (g_preferencesUnsaved) ReportError("The mode was applied, but could not be saved for the next start.");
 }
 
 void SetLumaProfile(LumaProfile profile) {
@@ -668,12 +624,9 @@ void SetLumaProfile(LumaProfile profile) {
         ReportError(error);
         return;
     }
-    g_preferredLumaProfile = profile;
-    const DWORD value = static_cast<DWORD>(profile);
-    const LSTATUS saved = RegSetKeyValueW(HKEY_CURRENT_USER, L"Software\\RedLight", L"LumaProfile",
-        REG_DWORD, &value, sizeof(value));
-    if (saved != ERROR_SUCCESS) {
-        Diagnostics::LogFormat("Saving luma profile failed (error %ld).", saved);
+    g_preferences.luma = profile;
+    g_preferencesUnsaved = !SavePreferences(g_preferences);
+    if (g_preferencesUnsaved) {
         ReportError("The luma profile was applied but could not be saved for the next start.");
     }
     RefreshTrayIconTip();
@@ -719,6 +672,7 @@ void CopySupportReport(HWND owner) {
     state.startupPolicy = BackendPreferenceName(g_startupBackendPreference);
     state.nextStartupPolicy = BackendPreferenceName(g_backendPreference);
     state.commandLineOverride = g_backendOverride;
+    state.preferencesUnsaved = g_preferencesUnsaved;
     state.redMode = RedModeDisplayName(g_displayFilter->redMode());
     state.lumaProfile = g_displayFilter->supportsRedMode(RedMode::LumaRed) ?
         LumaProfileName(g_displayFilter->lumaProfile()) : "Unavailable on gamma";
@@ -748,8 +702,7 @@ void ConfirmClipboardCopy(const char* title, const char* message) {
 }
 
 void CopySettingsProfile(HWND owner) {
-    const AppPreferences preferences{g_preferredRedMode, g_preferredLumaProfile, g_backendPreference, g_sessionTimer.minutes()};
-    const auto profile = SerializePreferences(preferences);
+    const auto profile = SerializePreferences(g_preferences);
     if (!profile || !CopyUtf8TextToClipboard(owner, *profile)) {
         ReportError("The settings profile could not be copied. Please retry when the clipboard is available.");
         return;
@@ -760,7 +713,7 @@ void CopySettingsProfile(HWND owner) {
 
 void ShowAboutDialog(HWND parent) {
     char aboutText[1024];
-    sprintf_s(aboutText, "RedLight " REDLIGHT_VERSION "\n\nBackend: %s\nStartup selection: %s%s\nNext start: %s\nMode: %s\nLuma detail: %s\nStatus: %s\n\n"
+    sprintf_s(aboutText, "RedLight " REDLIGHT_VERSION "\n\nBackend: %s\nStartup selection: %s%s\nNext start: %s\nMode: %s\nLuma detail: %s\nStatus: %s\nSettings: %s\n\n"
         "Ctrl+Alt+R: %s\nCtrl+Alt+Shift+R: %s\nSession recovery: %s\n\n"
         "Logs: %%LOCALAPPDATA%%\\RedLight\nUnsigned release candidate\n"
         "github.com/michaelmawhinney/redlight",
@@ -770,6 +723,7 @@ void ShowAboutDialog(HWND parent) {
         g_displayFilter->supportsRedMode(RedMode::LumaRed) ? LumaProfileName(g_displayFilter->lumaProfile()) : "Unavailable on gamma",
         g_displayFilter->needsRestore() && g_displayFilter->lastError()[0] ? "Recovery needed" :
         (g_displayFilter->isActive() ? "ON" : "off"),
+        g_preferencesUnsaved ? "Unsaved changes" : "Saved/default",
         g_toggleHotkey ? "Toggle filter" : "Unavailable (shortcut in use)",
         g_restoreHotkey ? "Restore display" : "Unavailable (shortcut in use)",
         g_sessionNotifications ? "Available" : "Unavailable (registration failed)");

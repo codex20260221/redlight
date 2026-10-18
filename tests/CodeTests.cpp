@@ -7,6 +7,8 @@
 #include "BackendSelection.h"
 #include "SupportReport.h"
 #include "Preferences.h"
+#include "PreferencesStore.h"
+#include <map>
 #include "Clipboard.h"
 #include <limits>
 #include <array>
@@ -19,6 +21,7 @@
 
 namespace {
 enum class Write { Apply, Fail, Ignore, FailAfterApply, LowByteLeak };
+struct RegistryValue { DWORD type; std::vector<char> bytes; };
 struct Fake {
     bool magInit = true, magGet = true, magSet = true, magUninit = true;
     bool dc = true, gammaGet = true, release = true;
@@ -32,6 +35,9 @@ struct Fake {
     bool clipConvert = true, clipSecondConvert = true;
     int clipAllocations = 0, clipFrees = 0, clipOpens = 0, clipEmpties = 0, clipSets = 0, clipCloses = 0, clipConversions = 0;
     std::vector<wchar_t> clipMemory;
+    std::map<std::wstring, RegistryValue> registry;
+    bool registryRead = true, registryWrite = true;
+    int registryWrites = 0;
 } fake;
 
 void Reset() {
@@ -419,6 +425,53 @@ void PreferenceProfileWhitespaceAndOrder() {
     const std::string bom{static_cast<char>(0xef), static_cast<char>(0xbb), static_cast<char>(0xbf)};
     Check(ParsePreferences(bom + text).preferences == parsed.preferences, "UTF-8 BOM accepted");
 }
+void PutLegacy(const wchar_t* name, DWORD value) {
+    std::vector<char> bytes(sizeof(value));
+    std::memcpy(bytes.data(), &value, sizeof(value));
+    fake.registry[name] = {REG_DWORD, bytes};
+}
+void PreferencesStoreDefaultsAndMigration() {
+    Check(LoadPreferences().preferences == AppPreferences{} && fake.registryWrites == 0, "defaults require no writes");
+    PutLegacy(L"RedMode", 0);
+    PutLegacy(L"LumaProfile", 2);
+    PutLegacy(L"BackendPreference", 2);
+    PutLegacy(L"SessionLimitMinutes", 30);
+    const AppPreferences expected{RedMode::StrictRed, LumaProfile::EqualDetail, BackendPreference::Gamma, 30};
+    const auto loaded = LoadPreferences();
+    Check(loaded.preferences == expected && loaded.legacy && !loaded.warning && fake.registryWrites == 0, "read-only migration preserves all legacy choices");
+    Check(SavePreferences(loaded.preferences) && fake.registryWrites == 1, "one save writes one record");
+    PutLegacy(L"RedMode", 1);
+    Check(LoadPreferences().preferences == expected && !LoadPreferences().legacy, "new record takes precedence over stale legacy keys");
+}
+void PreferencesStoreFailureAtomicity() {
+    const AppPreferences before{RedMode::StrictRed, LumaProfile::Classic, BackendPreference::Magnification, 15};
+    Check(SavePreferences(before), "seed saved profile");
+    auto after = before; after.luma = LumaProfile::EqualDetail; after.sessionMinutes = 60;
+    fake.registryWrite = false;
+    Check(!SavePreferences(after), "failed registry write is reported");
+    Check(LoadPreferences().preferences == before, "failed save cannot partially persist individual settings");
+    fake.registryWrite = true;
+    after.sessionMinutes = 999;
+    const int writes = fake.registryWrites;
+    Check(!SavePreferences(after) && fake.registryWrites == writes, "invalid preferences never reach registry");
+}
+void PreferencesStoreCorruption() {
+    PutLegacy(L"RedMode", 0);
+    fake.registry[L"SettingsProfile"] = {REG_BINARY, {'b', 'a', 'd'}};
+    auto loaded = LoadPreferences();
+    Check(loaded.warning && loaded.preferences == AppPreferences{} && !loaded.legacy, "corrupt new profile is visible and never falls back to stale legacy values");
+    fake.registry[L"SettingsProfile"] = {REG_BINARY, std::vector<char>(4097, 'x')};
+    Check(LoadPreferences().warning, "oversized persisted record rejected");
+    fake.registryRead = false;
+    Check(LoadPreferences().warning && fake.registryWrites == 0, "read failure is visible and never writes defaults");
+}
+void PreferencesStoreInvalidLegacy() {
+    PutLegacy(L"RedMode", 99);
+    PutLegacy(L"SessionLimitMinutes", 241);
+    PutLegacy(L"BackendPreference", 0);
+    const auto loaded = LoadPreferences();
+    Check(loaded.warning && loaded.preferences == AppPreferences{}, "invalid legacy settings use per-field defaults with diagnostics");
+}
 void Arguments() {
     using S = StartupAction;
     Check(ParseArguments({}) == S::Tray, "no arguments");
@@ -480,6 +533,27 @@ BOOL OpenClipboard(HWND) { ++fake.clipOpens; return fake.clipOpen; }
 BOOL EmptyClipboard() { ++fake.clipEmpties; return fake.clipEmpty; }
 HANDLE SetClipboardData(unsigned, HANDLE handle) { ++fake.clipSets; return fake.clipSet ? handle : nullptr; }
 BOOL CloseClipboard() { ++fake.clipCloses; return fake.clipClose; }
+LSTATUS RegGetValueW(HKEY, const wchar_t*, const wchar_t* name, DWORD flags, DWORD* type, void* output, DWORD* size) {
+    if (!fake.registryRead) return ERROR_ACCESS_DENIED;
+    const auto found = fake.registry.find(name);
+    if (found == fake.registry.end()) return ERROR_FILE_NOT_FOUND;
+    const auto& value = found->second;
+    if ((flags == RRF_RT_REG_BINARY && value.type != REG_BINARY) ||
+        (flags == RRF_RT_REG_DWORD && value.type != REG_DWORD)) return ERROR_UNSUPPORTED_TYPE;
+    if (type) *type = value.type;
+    const DWORD needed = static_cast<DWORD>(value.bytes.size());
+    if (*size < needed) { *size = needed; return ERROR_MORE_DATA; }
+    if (output) std::memcpy(output, value.bytes.data(), needed);
+    *size = needed;
+    return ERROR_SUCCESS;
+}
+LSTATUS RegSetKeyValueW(HKEY, const wchar_t*, const wchar_t* name, DWORD type, const void* data, DWORD bytes) {
+    ++fake.registryWrites;
+    if (!fake.registryWrite) return ERROR_ACCESS_DENIED;
+    const auto* begin = static_cast<const char*>(data);
+    fake.registry[name] = {type, std::vector<char>(begin, begin + bytes)};
+    return ERROR_SUCCESS;
+}
 namespace Diagnostics {
 void Log(const char*) {}
 void LogFormat(const char*, ...) {}
@@ -504,6 +578,8 @@ int main() {
         {"Clipboard ownership transfer", ClipboardTransferOwnership}, {"Clipboard conversion failure", ClipboardConversionFailure},
         {"Preference profile round trip", PreferenceProfileRoundTrip}, {"Preference profile validation", PreferenceProfileStrictValidation},
         {"Preference profile text conventions", PreferenceProfileWhitespaceAndOrder},
+        {"Preferences migration", PreferencesStoreDefaultsAndMigration}, {"Preferences single-record save", PreferencesStoreFailureAtomicity},
+        {"Preferences corruption", PreferencesStoreCorruption}, {"Invalid legacy preferences", PreferencesStoreInvalidLegacy},
         {"Command line", Arguments}
     };
     int failed = 0;

@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added command-line help/version dialogs and explicit rejection of unknown or conflicting options.
 
 ### Changed
+- Persist preferences in one validated, versioned record to avoid partial multi-key saves; migrate prior values read-only until the next save, report invalid storage, and show unsaved changes in About/support reports.
 - Capture the most recent display state before every activation; refuse activation when capture fails.
 - Keep recovery data and backend resources available after failed restoration. Normal Exit stays open when display restoration fails.
 - Attempt restoration and leave the filter off on display, power, and session changes; re-enable manually.

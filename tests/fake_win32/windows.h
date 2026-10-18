@@ -36,3 +36,17 @@ BOOL OpenClipboard(HWND);
 BOOL EmptyClipboard();
 HANDLE SetClipboardData(unsigned, HANDLE);
 BOOL CloseClipboard();
+
+using LSTATUS = long;
+using HKEY = void*;
+constexpr HKEY HKEY_CURRENT_USER = nullptr;
+constexpr DWORD ERROR_FILE_NOT_FOUND = 2;
+constexpr DWORD ERROR_ACCESS_DENIED = 5;
+constexpr DWORD ERROR_MORE_DATA = 234;
+constexpr DWORD ERROR_UNSUPPORTED_TYPE = 1630;
+constexpr DWORD RRF_RT_REG_BINARY = 8;
+constexpr DWORD RRF_RT_REG_DWORD = 16;
+constexpr DWORD REG_BINARY = 3;
+constexpr DWORD REG_DWORD = 4;
+LSTATUS RegGetValueW(HKEY, const wchar_t*, const wchar_t*, DWORD, DWORD*, void*, DWORD*);
+LSTATUS RegSetKeyValueW(HKEY, const wchar_t*, const wchar_t*, DWORD, const void*, DWORD);

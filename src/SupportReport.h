@@ -8,6 +8,7 @@
 struct SupportReportState {
     std::string_view version, backend, startupPolicy, nextStartupPolicy, redMode, lumaProfile, lastError;
     bool commandLineOverride = false;
+    bool preferencesUnsaved = false;
     bool active = false, needsRestore = false;
     bool toggleHotkey = false, restoreHotkey = false, sessionNotifications = false;
     unsigned sessionMinutes = 0;
@@ -21,6 +22,7 @@ inline std::string BuildSupportReport(const SupportReportState& state) {
         << "\r\nNext-start preference: " << state.nextStartupPolicy << "\r\nMode: " << state.redMode
         << "\r\nLuma detail: " << state.lumaProfile << "\r\nState: "
         << (state.needsRestore && !state.lastError.empty() ? "Recovery needed" : (state.active ? "ON" : "off"))
+        << "\r\nSettings persistence: " << (state.preferencesUnsaved ? "unsaved changes" : "saved/default")
         << "\r\nRecovery data pending: " << (state.needsRestore ? "yes" : "no")
         << "\r\nToggle shortcut: " << (state.toggleHotkey ? "registered" : "unavailable")
         << "\r\nRestore shortcut: " << (state.restoreHotkey ? "registered" : "unavailable")
