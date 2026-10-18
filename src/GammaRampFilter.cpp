@@ -1,6 +1,7 @@
 #include "GammaRampFilter.h"
 #include "Diagnostics.h"
 #include "BackendComparison.h"
+#include "BackendTiming.h"
 
 #include <cstdio>
 #include <cstring>
@@ -28,7 +29,7 @@ GammaRampFilter::~GammaRampFilter() {
 }
 
 bool GammaRampFilter::initialize() {
-    RecordBackendOperation operation(statistics_.initialization);
+    RecordBackendOperation operation(statistics_.initialization, BackendMonotonicMilliseconds);
     if (initialized_) {
         return operation.success();
     }
@@ -61,7 +62,7 @@ bool GammaRampFilter::initialize() {
 }
 
 bool GammaRampFilter::enable() {
-    RecordBackendOperation operation(statistics_.activation);
+    RecordBackendOperation operation(statistics_.activation, BackendMonotonicMilliseconds);
     if (!initialized_) {
         SetError("enable before initialize", ERROR_INVALID_HANDLE);
         return false;
@@ -104,7 +105,7 @@ bool GammaRampFilter::enable() {
 }
 
 bool GammaRampFilter::disable() {
-    RecordBackendOperation operation(statistics_.restoration);
+    RecordBackendOperation operation(statistics_.restoration, BackendMonotonicMilliseconds);
     if (!initialized_) {
         SetError("disable before initialize", ERROR_INVALID_HANDLE);
         return false;
@@ -130,7 +131,7 @@ bool GammaRampFilter::needsRestore() const { return active_ || restorePending_ |
 const char* GammaRampFilter::lastError() const { return lastError_; }
 
 BackendVerificationReport GammaRampFilter::inspectState() const {
-    RecordBackendOperation operation(statistics_.verification);
+    RecordBackendOperation operation(statistics_.verification, BackendMonotonicMilliseconds);
     if (!initialized_) return {BackendVerification::Unavailable, std::nullopt, ERROR_INVALID_HANDLE};
     if (!active_ && !restorePending_) { operation.success(); return {BackendVerification::Inactive}; }
     WORD actual[3][256] = {};
@@ -171,7 +172,7 @@ bool GammaRampFilter::supportsRedMode(RedMode mode) const {
 }
 
 bool GammaRampFilter::shutdown() {
-    RecordBackendOperation operation(statistics_.shutdown);
+    RecordBackendOperation operation(statistics_.shutdown, BackendMonotonicMilliseconds);
     if (needsRestore() && !disable()) {
         Diagnostics::Log("GammaRampFilter: recovery/ownership cleanup failed; retaining resources for retry.");
         return false;

@@ -105,6 +105,10 @@ inline std::string BuildSupportReport(const SupportReportState& state) {
     report << "\r\nBackend counters since startup/last reset (requests / failures):";
     const auto counts = [&](const char* name, const BackendOperationStatistics& value) {
         report << "\r\n  " << name << ": " << value.requests << " / " << value.failures;
+        const auto& timing = value.timing;
+        if (timing.completed) report << "; timed " << timing.completed << ", last " << timing.lastMilliseconds
+            << " ms, peak " << timing.maximumMilliseconds << " ms, inclusive total " << timing.totalMilliseconds << " ms";
+        else report << "; timing not recorded";
     };
     counts("Initialize", state.backendStatistics.initialization);
     counts("Activate", state.backendStatistics.activation);
@@ -112,6 +116,7 @@ inline std::string BuildSupportReport(const SupportReportState& state) {
     counts("Verify (mismatch/unavailable counted as failures)", state.backendStatistics.verification);
     counts("Shutdown", state.backendStatistics.shutdown);
     report << "\r\nCounters include idempotent requests and nested recovery calls."
+        << "\r\nTiming uses elapsed tick milliseconds, includes failures/no-ops/nested calls, and overlaps across categories."
         << "\r\nRecent tray restoration requests (newest completed scope first; age since request):";
     if (!state.restorationHistory.size()) report << "\r\n  none recorded";
     for (std::size_t index = 0; index < state.restorationHistory.size(); ++index) {

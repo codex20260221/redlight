@@ -24,6 +24,7 @@
 #include "ProfileComparison.h"
 #include "JsonString.h"
 #include "BackendComparison.h"
+#include "BackendTiming.h"
 #include "SessionNotifications.h"
 #include "LumaPreference.h"
 #include "BuildMetadata.h"
@@ -53,6 +54,8 @@ struct Fake {
     WORD ramp[3][256] = {};
     std::deque<Write> writes;
     DWORD lastError = 123;
+    std::uint64_t monotonicNow = 0, magReadMilliseconds = 0, magWriteMilliseconds = 0, gammaReadMilliseconds = 0, gammaWriteMilliseconds = 0;
+    unsigned backendClockReads = 0;
     bool clipAllocate = true, clipLock = true, clipOpen = true, clipEmpty = true, clipSet = true, clipClose = true;
     bool clipConvert = true, clipSecondConvert = true;
     bool clipRead = true, clipWideConvert = true;
@@ -116,6 +119,9 @@ void Reset() {
 }
 void Check(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
+}
+BackendOperationStatistics TimedOperationCounts(std::uint64_t requests, std::uint64_t failures) {
+    return {requests, failures, 0, BackendOperationTiming{requests, 0, 0, 0}};
 }
 bool Same(const MAGCOLOREFFECT& a, const MAGCOLOREFFECT& b) {
     return std::memcmp(&a, &b, sizeof(a)) == 0;
@@ -1146,9 +1152,9 @@ void MagnificationStatisticsAndSafeReset() {
     fake.magSet = false;
     Check(!filter.disable() && !filter.shutdown(), "failed restore and nested shutdown recovery");
     const auto statistics = filter.statistics();
-    Check(statistics.initialization == BackendOperationStatistics{2, 0} && statistics.activation == BackendOperationStatistics{3, 1} &&
-        statistics.restoration == BackendOperationStatistics{3, 3} && statistics.verification == BackendOperationStatistics{4, 3} &&
-        statistics.shutdown == BackendOperationStatistics{1, 1}, "counters include idempotent requests, mismatch/unavailable checks and nested recovery");
+    Check(statistics.initialization == TimedOperationCounts(2, 0) && statistics.activation == TimedOperationCounts(3, 1) &&
+        statistics.restoration == TimedOperationCounts(3, 3) && statistics.verification == TimedOperationCounts(4, 3) &&
+        statistics.shutdown == TimedOperationCounts(1, 1), "counters include idempotent requests, mismatch/unavailable checks and nested recovery");
     const auto error = std::string(filter.lastError());
     const auto reads = fake.magReads, writes = fake.magWrites, uninitializes = fake.uninitializes;
     Check(filter.resetStatistics() && filter.statistics() == BackendStatistics{} && filter.isActive() && filter.needsRestore() &&
@@ -1156,28 +1162,28 @@ void MagnificationStatisticsAndSafeReset() {
         "counter reset preserves active state, recovery snapshot, last error, and all native operations");
     fake.magSet = true; fake.magGet = true;
     Check(filter.disable() && fake.effect.transform[0][0] == 1 && fake.effect.transform[0][1] == 0 && filter.shutdown(), "original restore matrix remains intact after reset");
-    Check(filter.statistics().restoration == BackendOperationStatistics{1, 0} && filter.statistics().shutdown == BackendOperationStatistics{1, 0}, "counting resumes from reset");
+    Check(filter.statistics().restoration == TimedOperationCounts(1, 0) && filter.statistics().shutdown == TimedOperationCounts(1, 0), "counting resumes from reset");
 }
 void GammaStatisticsAndCleanupReset() {
     GammaRampFilter filter;
     Check(filter.initialize(), "initialize");
     fake.mutexWaitResult = WAIT_TIMEOUT;
-    Check(!filter.enable() && filter.statistics().activation == BackendOperationStatistics{1, 1}, "ownership conflict counts as unsuccessful activation");
+    Check(!filter.enable() && filter.statistics().activation == TimedOperationCounts(1, 1), "ownership conflict counts as unsuccessful activation");
     fake.mutexWaitResult = WAIT_OBJECT_0;
     fake.writes = {Write::FailAfterApply, Write::Fail};
-    Check(!filter.enable() && filter.needsRestore() && fake.mutexOwned && filter.statistics().activation == BackendOperationStatistics{2, 2} &&
-        filter.statistics().restoration == BackendOperationStatistics{1, 1}, "failed activation and rollback are counted separately");
+    Check(!filter.enable() && filter.needsRestore() && fake.mutexOwned && filter.statistics().activation == TimedOperationCounts(2, 2) &&
+        filter.statistics().restoration == TimedOperationCounts(1, 1), "failed activation and rollback are counted separately");
     const auto reads = fake.gammaReads, writes = fake.gammaWrites, releases = fake.mutexReleases;
     Check(filter.resetStatistics() && !filter.isActive() && filter.needsRestore() && fake.mutexOwned &&
         fake.gammaReads == reads && fake.gammaWrites == writes && fake.mutexReleases == releases, "reset cannot discard a partial-write snapshot or gamma ownership");
     fake.mutexRelease = false;
-    Check(!filter.disable() && !filter.isActive() && filter.needsRestore() && filter.statistics().restoration == BackendOperationStatistics{1, 1},
+    Check(!filter.disable() && !filter.isActive() && filter.needsRestore() && filter.statistics().restoration == TimedOperationCounts(1, 1),
         "display-restored but cleanup-failed result counts as unsuccessful recovery");
     const auto restoredWrites = fake.gammaWrites;
     fake.mutexRelease = true;
-    Check(filter.disable() && fake.gammaWrites == restoredWrites && filter.statistics().restoration == BackendOperationStatistics{2, 1}, "cleanup-only retry counts without repeating a ramp write");
-    Check(filter.verifyState() == BackendVerification::Inactive && filter.statistics().verification == BackendOperationStatistics{1, 0}, "inactive no-read verification is successful bookkeeping");
-    Check(filter.shutdown() && filter.shutdown() && filter.statistics().shutdown == BackendOperationStatistics{2, 0}, "idempotent shutdown requests remain visible");
+    Check(filter.disable() && fake.gammaWrites == restoredWrites && filter.statistics().restoration == TimedOperationCounts(2, 1), "cleanup-only retry counts without repeating a ramp write");
+    Check(filter.verifyState() == BackendVerification::Inactive && filter.statistics().verification == TimedOperationCounts(1, 0), "inactive no-read verification is successful bookkeeping");
+    Check(filter.shutdown() && filter.shutdown() && filter.statistics().shutdown == TimedOperationCounts(2, 0), "idempotent shutdown requests remain visible");
 }
 void BackendStatisticsSaturationAndInProgress() {
     BackendStatistics statistics;
@@ -2221,7 +2227,7 @@ void MagFailedActivationRollbackRestoresLatestCapture() {
     fake.magWriteResults = {Write::FailAfterApply, Write::Apply};
     Check(!filter.enable() && !filter.isActive() && !filter.needsRestore() && Same(fake.effect, captured) && fake.magWrites == 2 && filter.lastError()[0],
         "a failed-after-write activation restores the latest captured matrix and remains visibly failed/off");
-    Check(filter.statistics().activation == BackendOperationStatistics{1, 1} && filter.statistics().restoration == BackendOperationStatistics{1, 0},
+    Check(filter.statistics().activation == TimedOperationCounts(1, 1) && filter.statistics().restoration == TimedOperationCounts(1, 0),
         "activation failure and successful nested rollback are counted independently");
     fake.effect.transform[0][0] = 0.62f;
     const auto later = fake.effect;
@@ -2616,9 +2622,91 @@ void CountdownDiagnosticsPreserveBackendAndPolicy() {
         "diagnostic reads preserve retry throttling, filtering, native operations, counters, and ownership");
     Check(filter.disable(), "restore after timer diagnostics isolation");
 }
+void BackendTimingCompletedScopesAndZero() {
+    BackendStatistics statistics;
+    fake.monotonicNow = 100;
+    { RecordBackendOperation operation(statistics.activation, BackendMonotonicMilliseconds); fake.monotonicNow = 110; operation.success(); }
+    fake.monotonicNow = 200;
+    { RecordBackendOperation operation(statistics.activation, BackendMonotonicMilliseconds); fake.monotonicNow = 205; }
+    { RecordBackendOperation operation(statistics.activation, BackendMonotonicMilliseconds); operation.success(); }
+    Check(statistics.activation.requests == 3 && statistics.activation.failures == 1 && statistics.activation.inProgress == 0 &&
+        statistics.activation.timing == BackendOperationTiming{3, 0, 10, 15} && fake.backendClockReads == 6,
+        "timed successes/failures/no-ops retain completed count, genuine zero last duration, peak, and total");
+    Check(ResetBackendStatistics(statistics) && statistics == BackendStatistics{}, "idle reset clears timings with counts");
+}
+void BackendTimingNestedExceptionAndResetGuard() {
+    BackendStatistics statistics;
+    fake.monotonicNow = 100;
+    {
+        RecordBackendOperation outer(statistics.activation, BackendMonotonicMilliseconds);
+        fake.monotonicNow = 120;
+        GuardUiCall<int>([&]() -> int {
+            RecordBackendOperation inner(statistics.activation, BackendMonotonicMilliseconds);
+            fake.monotonicNow = 150;
+            throw 7;
+        }, [](const char*) { return 0; });
+        Check(!ResetBackendStatistics(statistics) && statistics.activation.timing == BackendOperationTiming{1, 30, 30, 30},
+            "exception unwinding records the inner failure while an in-progress outer scope still blocks reset");
+        fake.monotonicNow = 180; outer.success();
+    }
+    Check(statistics.activation.timing == BackendOperationTiming{2, 80, 80, 110} && statistics.activation.failures == 1 && statistics.activation.inProgress == 0,
+        "outer elapsed timing includes nested work and both completed scopes remain counted");
+}
+void BackendTimingWrapAndSaturation() {
+    const auto maximum = (std::numeric_limits<std::uint64_t>::max)();
+    BackendStatistics statistics;
+    statistics.activation.requests = statistics.activation.failures = maximum - 1;
+    statistics.activation.timing.completed = maximum - 1;
+    statistics.activation.timing.totalMilliseconds = maximum - 3;
+    fake.monotonicNow = maximum - 4;
+    { RecordBackendOperation operation(statistics.activation, BackendMonotonicMilliseconds); fake.monotonicNow = 3; }
+    { RecordBackendOperation operation(statistics.activation, BackendMonotonicMilliseconds); }
+    Check(statistics.activation.requests == maximum && statistics.activation.failures == maximum &&
+        statistics.activation.timing == BackendOperationTiming{maximum, 0, 8, maximum},
+        "timing handles clock wrap and saturates counts/totals without losing the latest duration or peak");
+}
+void MagnificationTimingIncludesRollbackAndReadback() {
+    MagnificationFilter filter;
+    fake.magReadMilliseconds = 3; fake.magWriteMilliseconds = 7;
+    Check(filter.initialize() && filter.statistics().initialization.timing == BackendOperationTiming{1, 3, 3, 3}, "initialization times supplied fake capture latency");
+    fake.magWriteResults = {Write::FailAfterApply, Write::Apply};
+    Check(!filter.enable() && filter.statistics().activation.timing == BackendOperationTiming{1, 17, 17, 17} &&
+        filter.statistics().restoration.timing == BackendOperationTiming{1, 7, 7, 7}, "failed activation timing includes its separately timed rollback");
+    Check(filter.enable() && filter.statistics().activation.timing == BackendOperationTiming{2, 10, 17, 27} &&
+        filter.inspectState().state == BackendVerification::Matches && filter.statistics().verification.timing == BackendOperationTiming{1, 3, 3, 3},
+        "subsequent activation and explicit read-back accumulate independent category timing");
+    Check(filter.disable(), "restore after fake Magnification timing");
+}
+void GammaTimingIncludesReadbackAndRecovery() {
+    GammaRampFilter filter;
+    fake.gammaReadMilliseconds = 4; fake.gammaWriteMilliseconds = 6;
+    Check(filter.initialize(), "initialize timed fake gamma backend");
+    fake.writes = {Write::FailAfterApply, Write::Apply};
+    Check(!filter.enable() && !filter.needsRestore() && filter.statistics().activation.timing == BackendOperationTiming{1, 20, 20, 20} &&
+        filter.statistics().restoration.timing == BackendOperationTiming{1, 10, 10, 10}, "failed gamma activation includes rollback and its checked read-back");
+    Check(filter.enable() && filter.statistics().activation.timing == BackendOperationTiming{2, 14, 20, 34},
+        "successful gamma activation includes capture, write, and verification read-back");
+    Check(filter.disable() && filter.statistics().restoration.timing == BackendOperationTiming{2, 10, 10, 20}, "gamma restoration timing includes confirmed ramp read-back");
+}
+void BackendTimingReportsAndResetAreReadOnly() {
+    MagnificationFilter filter;
+    fake.magReadMilliseconds = 2; fake.magWriteMilliseconds = 5;
+    Check(filter.initialize() && filter.enable(), "active timed backend for report/reset isolation");
+    SupportReportState state; state.backendStatistics = filter.statistics();
+    const auto clockReads = fake.backendClockReads;
+    const auto reads = fake.magReads, writes = fake.magWrites;
+    const auto report = BuildSupportReport(state);
+    Check(report.find("Activate: 1 / 0; timed 1, last 7 ms, peak 7 ms, inclusive total 7 ms") != std::string::npos &&
+        report.find("timing not recorded") != std::string::npos && report.find("overlaps across categories") != std::string::npos,
+        "reports distinguish measured durations from absent samples and describe inclusive overlap");
+    Check(filter.resetStatistics() && filter.statistics() == BackendStatistics{} && fake.backendClockReads == clockReads && fake.magReads == reads && fake.magWrites == writes &&
+        filter.isActive() && filter.needsRestore(), "report/reset require no clock/native operation and preserve active ownership");
+    Check(filter.disable() && filter.statistics().restoration.timing == BackendOperationTiming{1, 5, 5, 5}, "timing resumes after reset without losing restoration data");
+}
 } // namespace
 
 DWORD GetLastError() { return fake.lastError; }
+std::uint64_t GetTickCount64() { ++fake.backendClockReads; return fake.monotonicNow; }
 void SetLastError(DWORD value) { fake.lastError = value; }
 BOOL WTSRegisterSessionNotification(HWND owner, DWORD flags) {
     ++fake.sessionRegisters; fake.sessionFlags = flags;
@@ -2733,11 +2821,13 @@ LRESULT SendMessageTimeoutA(HWND, unsigned message, WPARAM wparam, LPARAM lparam
 HDC GetDC(HWND) { ++fake.dcRequests; return fake.dc ? &fake : nullptr; }
 int ReleaseDC(HWND, HDC) { ++fake.releases; return fake.release ? 1 : 0; }
 BOOL GetDeviceGammaRamp(HDC, void* ramp) {
+    fake.monotonicNow += fake.gammaReadMilliseconds;
     ++fake.gammaReads;
     if (!fake.gammaGet) return 0;
     std::memcpy(ramp, fake.ramp, sizeof(fake.ramp)); return 1;
 }
 BOOL SetDeviceGammaRamp(HDC, void* ramp) {
+    fake.monotonicNow += fake.gammaWriteMilliseconds;
     ++fake.gammaWrites;
     if (!fake.mutexOwned) ++fake.gammaUnownedWrites;
     auto behavior = Write::Apply;
@@ -2750,11 +2840,13 @@ BOOL SetDeviceGammaRamp(HDC, void* ramp) {
 BOOL MagInitialize() { ++fake.magInitializes; return fake.magInit; }
 BOOL MagUninitialize() { ++fake.uninitializes; return fake.magUninit; }
 BOOL MagGetFullscreenColorEffect(MAGCOLOREFFECT* effect) {
+    fake.monotonicNow += fake.magReadMilliseconds;
     ++fake.magReads;
     if (!fake.magGet) return 0;
     *effect = fake.effect; return 1;
 }
 BOOL MagSetFullscreenColorEffect(MAGCOLOREFFECT* effect) {
+    fake.monotonicNow += fake.magWriteMilliseconds;
     ++fake.magWrites;
     auto result = fake.magSet ? Write::Apply : Write::Fail;
     if (!fake.magWriteResults.empty()) { result = fake.magWriteResults.front(); fake.magWriteResults.pop_front(); }
@@ -2929,6 +3021,9 @@ int main() {
         {"Countdown retry diagnostics exact boundaries", CountdownRetryDiagnosticsBoundaries}, {"Countdown retry diagnostics wrap/reset", CountdownRetryDiagnosticsWrapAndReset},
         {"Countdown warning/restore attempt lifecycle", CountdownAttemptDiagnosticsLifecycle}, {"Native countdown diagnostics/reports", NativeCountdownDiagnosticsAndReports},
         {"Countdown diagnostics preserve backend/policy", CountdownDiagnosticsPreserveBackendAndPolicy},
+        {"Backend timing completed scopes/zero", BackendTimingCompletedScopesAndZero}, {"Backend timing nested exception/reset guard", BackendTimingNestedExceptionAndResetGuard},
+        {"Backend timing wrap/saturation", BackendTimingWrapAndSaturation}, {"Mag timing includes rollback/read-back", MagnificationTimingIncludesRollbackAndReadback},
+        {"Gamma timing includes read-back/recovery", GammaTimingIncludesReadbackAndRecovery}, {"Backend timing report/reset isolation", BackendTimingReportsAndResetAreReadOnly},
         {"Command line", Arguments}
     };
     int failed = 0;

@@ -2,9 +2,14 @@
 #include <cstdint>
 #include <limits>
 
+struct BackendOperationTiming {
+    std::uint64_t completed = 0, lastMilliseconds = 0, maximumMilliseconds = 0, totalMilliseconds = 0;
+    bool operator==(const BackendOperationTiming&) const = default;
+};
 struct BackendOperationStatistics {
     std::uint64_t requests = 0, failures = 0;
     unsigned inProgress = 0;
+    BackendOperationTiming timing;
     bool operator==(const BackendOperationStatistics&) const = default;
 };
 struct BackendStatistics {
@@ -13,6 +18,10 @@ struct BackendStatistics {
 };
 inline void IncrementBackendCounter(std::uint64_t& value) noexcept {
     if (value != (std::numeric_limits<std::uint64_t>::max)()) ++value;
+}
+inline void AddBackendCounter(std::uint64_t& value, std::uint64_t amount) noexcept {
+    const auto maximum = (std::numeric_limits<std::uint64_t>::max)();
+    value = amount > maximum - value ? maximum : value + amount;
 }
 inline bool ResetBackendStatistics(BackendStatistics& statistics) noexcept {
     if (statistics.initialization.inProgress || statistics.activation.inProgress || statistics.restoration.inProgress ||
@@ -23,13 +32,23 @@ inline bool ResetBackendStatistics(BackendStatistics& statistics) noexcept {
 // Count method requests (including no-ops) and unsuccessful outcomes, including unwinding.
 class RecordBackendOperation {
 public:
-    explicit RecordBackendOperation(BackendOperationStatistics& statistics) noexcept : statistics_(statistics) {
+    using Clock = std::uint64_t (*)() noexcept;
+    explicit RecordBackendOperation(BackendOperationStatistics& statistics, Clock clock = nullptr) noexcept
+        : statistics_(statistics), clock_(clock), started_(clock ? clock() : 0) {
         IncrementBackendCounter(statistics_.requests);
         tracked_ = statistics_.inProgress != (std::numeric_limits<unsigned>::max)();
         if (tracked_) ++statistics_.inProgress;
     }
     ~RecordBackendOperation() {
         if (!succeeded_) IncrementBackendCounter(statistics_.failures);
+        if (clock_) {
+            const auto elapsed = clock_() - started_;
+            auto& timing = statistics_.timing;
+            IncrementBackendCounter(timing.completed);
+            timing.lastMilliseconds = elapsed;
+            if (elapsed > timing.maximumMilliseconds) timing.maximumMilliseconds = elapsed;
+            AddBackendCounter(timing.totalMilliseconds, elapsed);
+        }
         if (tracked_) --statistics_.inProgress;
     }
     RecordBackendOperation(const RecordBackendOperation&) = delete;
@@ -37,6 +56,8 @@ public:
     bool success() noexcept { succeeded_ = true; return true; }
 private:
     BackendOperationStatistics& statistics_;
+    Clock clock_;
+    std::uint64_t started_;
     bool succeeded_ = false;
     bool tracked_ = false;
 };

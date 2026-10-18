@@ -15,6 +15,7 @@ constexpr DWORD ERROR_INVALID_DATA = 13;
 constexpr DWORD ERROR_INVALID_PARAMETER = 87;
 constexpr DWORD ERROR_INVALID_STATE = 5023;
 DWORD GetLastError();
+std::uint64_t GetTickCount64();
 HDC GetDC(HWND);
 int ReleaseDC(HWND, HDC);
 BOOL GetDeviceGammaRamp(HDC, void*);
