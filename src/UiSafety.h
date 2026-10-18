@@ -13,6 +13,7 @@ private:
     bool previous_;
 };
 inline bool CommandMayChangeFilter(unsigned command) noexcept {
+    if (command >= ID_EXPIRY_WARNING_BASE && command <= ID_EXPIRY_WARNING_BASE + 3) return false;
     switch (command) {
     case ID_TRAY_ABOUT:
     case ID_TRAY_LOGS:

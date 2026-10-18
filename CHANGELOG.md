@@ -8,11 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Added optional saved expiry warnings (Off, 30 seconds, 1 minute, or 5 minutes) with one notification attempt per countdown and unchanged restoration deadlines; settings profiles export version 3 and accept version 1/2 with warnings off.
 - Added read-only `--status` JSON for scripts, querying only cached state from an existing tray instance with a bounded, versioned response; reports countdowns, actual shortcuts, recovery/verification state, and logging health without initializing or reading display backends.
 - Added path-free build revision/source-state identity to About, startup diagnostics, and support reports, refreshed on each build; source archives and opt-out builds remain supported.
 - Added a confirmed Reset preferences to defaults command that restores the display before saving, resets the complete preference record, and leaves filtering off.
 - Added file-logging health, missing/truncated record counts, and last file errors to About/support reports, plus an Expert retry command that confirms recovery with an actual log write.
-- Added saved shortcut profiles for Ctrl+Alt+R, Ctrl+Alt+F9, Ctrl+Alt+F10, or disabled shortcuts; restore adds Shift. Track actual bindings through registration/rollback failures and reject stale queued shortcut messages. Settings profiles now export version 2 while accepting version 1 with default shortcuts.
+- Added saved shortcut profiles for Ctrl+Alt+R, Ctrl+Alt+F9, Ctrl+Alt+F10, or disabled shortcuts; restore adds Shift. Track actual bindings through registration/rollback failures and reject stale queued shortcut messages. Introduced version 2 settings profiles for shortcut choices while accepting version 1 with default shortcuts.
 - Added a native Custom auto-restore time-limit dialog for 0–240 whole minutes, with validation, cancellation, and protection against truncated pasted input.
 - Added explicit read-only backend-state verification, showing software read-back mismatches/unavailability in the tray and support report without reapplying the filter or discarding recovery data.
 - Added bounded settings-profile import from clipboard with strict validation and a readable confirmation preview; restore succeeds before saving, imports stay off, and failed restoration/storage keeps prior preferences.

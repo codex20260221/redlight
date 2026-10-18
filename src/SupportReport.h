@@ -19,6 +19,7 @@ struct SupportReportState {
     bool active = false, needsRestore = false;
     bool toggleHotkey = false, restoreHotkey = false, sessionNotifications = false;
     unsigned sessionMinutes = 0;
+    std::string_view expiryWarning = "Off";
     std::optional<std::uint64_t> remainingSeconds;
 };
 inline std::string BuildSupportReport(const SupportReportState& state) {
@@ -41,7 +42,7 @@ inline std::string BuildSupportReport(const SupportReportState& state) {
         << "\r\nSession limit: ";
     if (state.sessionMinutes) report << state.sessionMinutes << " minutes";
     else report << "unlimited";
-    report << "\r\nCountdown: ";
+    report << "\r\nExpiry warning: " << state.expiryWarning << "\r\nCountdown: ";
     if (state.remainingSeconds) report << *state.remainingSeconds << " seconds remaining";
     else report << "not armed";
     report << "\r\nFile logging: " << state.fileLogging << "\r\nMissing file records: " << state.droppedLogLines

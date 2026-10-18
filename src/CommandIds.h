@@ -24,8 +24,10 @@ inline constexpr unsigned ID_SESSION_LIMIT_BASE = 1000;
 inline constexpr unsigned ID_BACKEND_PREFERENCE_BASE = 1300;
 inline constexpr unsigned ID_LUMA_PROFILE_BASE = 1400;
 inline constexpr unsigned ID_SHORTCUT_PROFILE_BASE = 1500;
+inline constexpr unsigned ID_EXPIRY_WARNING_BASE = 1600;
 
 static_assert(ID_SESSION_LIMIT_BASE + SessionTimer::maxMinutes < ID_BACKEND_PREFERENCE_BASE);
 static_assert(ID_BACKEND_PREFERENCE_BASE + 2 < ID_LUMA_PROFILE_BASE);
 
 static_assert(ID_LUMA_PROFILE_BASE + 2 < ID_SHORTCUT_PROFILE_BASE);
+static_assert(ID_SHORTCUT_PROFILE_BASE + 3 < ID_EXPIRY_WARNING_BASE);

@@ -63,6 +63,7 @@ bool RestoreFilter(bool showError, bool notifyFailure = true);
 void StopSessionTimer();
 bool StartSessionTimer();
 void SetSessionLimit(unsigned minutes);
+void SetExpiryWarning(ExpiryWarning warning);
 void SetShortcutProfile(ShortcutProfile profile);
 void OnSessionTimer();
 void CloseInstanceMutex(HANDLE handle);
@@ -529,8 +530,26 @@ void OnSessionTimer() {
         const bool restored = RestoreFilter(false, !g_autoRestoreFailureNotified);
         g_autoRestoreFailureNotified = !restored;
     } else {
+        if (!g_busy && !g_preferencesApplying && g_displayFilter->isActive() &&
+            g_sessionTimer.warningDue(now, ExpiryWarningSeconds(g_preferences.expiryWarning))) {
+            g_sessionTimer.noteWarningAttempt();
+            const auto seconds = (g_sessionTimer.remainingMilliseconds(now) + 999) / 1000;
+            char message[192];
+            sprintf_s(message, "Auto-restore is due in %llu:%02llu. RedLight will attempt to restore your saved display colors.",
+                static_cast<unsigned long long>(seconds / 60), static_cast<unsigned long long>(seconds % 60));
+            Diagnostics::Log("Attempting the session expiry warning; the restore deadline is unchanged.");
+            ShowTrayInfo("RedLight auto-restore approaching", message);
+        }
         RefreshTrayIconTip();
     }
+}
+
+void SetExpiryWarning(ExpiryWarning warning) {
+    if (g_busy || g_preferencesApplying || !IsValidExpiryWarning(warning) || g_preferences.expiryWarning == warning) return;
+    g_preferences.expiryWarning = warning;
+    g_preferencesUnsaved = !SavePreferences(g_preferences);
+    Diagnostics::LogFormat("Session expiry warning: %s; countdown unchanged.", ExpiryWarningName(warning));
+    if (g_preferencesUnsaved) ReportError("The expiry warning changed, but could not be saved for the next start.");
 }
 
 void ScheduleTrayRecovery() {
@@ -729,6 +748,7 @@ void CopySupportReport(HWND owner) {
     if (g_hotkeys.restore()) state.restoreBinding = ShortcutBindingName(*g_hotkeys.restore());
     state.sessionNotifications = g_sessionNotifications;
     state.sessionMinutes = g_sessionTimer.minutes();
+    state.expiryWarning = ExpiryWarningName(g_preferences.expiryWarning);
     if (g_sessionTimer.armed()) state.remainingSeconds = (g_sessionTimer.remainingMilliseconds(GetTickCount64()) + 999) / 1000;
     if (!CopyUtf8TextToClipboard(owner, BuildSupportReport(state))) {
         ReportError("The support report could not be copied. Another program may be using the clipboard. Please retry.");
@@ -744,7 +764,7 @@ void ShowTrayInfo(const char* title, const char* message) {
     strncpy_s(notification.szInfoTitle, title, _TRUNCATE);
     strncpy_s(notification.szInfo, message, _TRUNCATE);
     notification.dwInfoFlags = NIIF_INFO;
-    if (!Shell_NotifyIconA(NIM_MODIFY, &notification)) Diagnostics::Log("Tray confirmation notification failed.");
+    if (!Shell_NotifyIconA(NIM_MODIFY, &notification)) Diagnostics::Log("Tray information notification failed.");
 }
 
 void CopySettingsProfile(HWND owner) {
@@ -778,10 +798,11 @@ void ConfirmPreferences(HWND owner, const AppPreferences& candidate, const char*
     if (g_busy || g_preferencesApplying || !ValidPreferences(candidate)) return;
     char preview[768];
     sprintf_s(preview, "Apply these preferences?\n\nMode: %s\nLuma detail: %s\nBackend on next start: %s\n"
-        "Session limit: %u minutes (0 = unlimited)\nShortcut profile: %s\n\n"
+        "Session limit: %u minutes (0 = unlimited)\nExpiry warning: %s\nShortcut profile: %s\n\n"
         "The display will be restored and stay off. Backend selection applies on the next start.\n"
         "Luma preferences are retained for Magnification when the current backend is gamma.",
-        RedModeDisplayName(candidate.mode), LumaProfileName(candidate.luma), BackendPreferenceName(candidate.backend), candidate.sessionMinutes, ShortcutProfileName(candidate.shortcuts));
+        RedModeDisplayName(candidate.mode), LumaProfileName(candidate.luma), BackendPreferenceName(candidate.backend), candidate.sessionMinutes,
+        ExpiryWarningName(candidate.expiryWarning), ShortcutProfileName(candidate.shortcuts));
     const int answer = MessageBoxA(owner, preview, title, MB_YESNO | MB_DEFBUTTON2 | MB_ICONQUESTION);
     if (!answer) Diagnostics::LogFormat("MessageBox(preferences) failed (error %lu).", GetLastError());
     if (answer != IDYES) return;
@@ -835,7 +856,7 @@ void ShowAboutDialog(HWND parent) {
     char aboutText[1536];
     const auto logging = Diagnostics::GetStatus();
     sprintf_s(aboutText, "RedLight " REDLIGHT_VERSION "\nBuild revision: " REDLIGHT_BUILD_REVISION " (" REDLIGHT_SOURCE_STATE ")\n\nBackend: %s\nStartup selection: %s%s\nNext start: %s\nMode: %s\nLuma detail: %s\nStatus: %s\nSettings: %s\n\n"
-        "Toggle shortcut: %s\nRestore shortcut: %s\nShortcut preference: %s\nSession recovery: %s\n\n"
+        "Toggle shortcut: %s\nRestore shortcut: %s\nShortcut preference: %s\nSession recovery: %s\nExpiry warning: %s\n\n"
         "File logging: %s\nMissing file records: %llu\nTruncated records: %llu\nLast file error: %lu\n\n"
         "Logs: %%LOCALAPPDATA%%\\RedLight\nUnsigned release candidate\n"
         "github.com/michaelmawhinney/redlight",
@@ -849,6 +870,7 @@ void ShowAboutDialog(HWND parent) {
         g_hotkeys.restore() ? ShortcutBindingName(*g_hotkeys.restore()) : "Unavailable/disabled",
         ShortcutProfileName(g_preferences.shortcuts),
         g_sessionNotifications ? "Available" : "Unavailable (registration failed)",
+        ExpiryWarningName(g_preferences.expiryWarning),
         Diagnostics::FileStateName(logging.file), static_cast<unsigned long long>(logging.droppedLines),
         static_cast<unsigned long long>(logging.truncatedLines), static_cast<unsigned long>(logging.lastFileError));
     if (!MessageBoxA(parent, aboutText, "About RedLight", MB_OK | MB_ICONINFORMATION))
@@ -872,7 +894,7 @@ void ShowTrayMenu(HWND hwnd) {
         g_displayFilter->supportsRedMode(RedMode::LumaRed), g_displayFilter->lumaProfile(),
         g_backendPreference, g_sessionTimer.minutes(), g_preferences.shortcuts,
         g_hotkeys.toggle() ? ShortcutBindingName(*g_hotkeys.toggle()) : NULL,
-        g_hotkeys.restore() ? ShortcutBindingName(*g_hotkeys.restore()) : NULL};
+        g_hotkeys.restore() ? ShortcutBindingName(*g_hotkeys.restore()) : NULL, g_preferences.expiryWarning};
     HMENU menu = BuildTrayMenu(state);
     if (!menu) { ReportError("Could not build the tray menu."); return; }
     if (!SetForegroundWindow(hwnd)) Diagnostics::Log("SetForegroundWindow failed for tray menu.");
@@ -978,6 +1000,10 @@ LRESULT HandleWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         else if (wParam == ID_HOTKEY_RESTORE) RestoreFilter(true);
         return 0;
     case WM_COMMAND:
+        if (LOWORD(wParam) >= ID_EXPIRY_WARNING_BASE && LOWORD(wParam) <= ID_EXPIRY_WARNING_BASE + 3) {
+            SetExpiryWarning(ExpiryWarningOptions[LOWORD(wParam) - ID_EXPIRY_WARNING_BASE]);
+            return 0;
+        }
         if (LOWORD(wParam) >= ID_SHORTCUT_PROFILE_BASE && LOWORD(wParam) <= ID_SHORTCUT_PROFILE_BASE + 3) {
             SetShortcutProfile(static_cast<ShortcutProfile>(LOWORD(wParam) - ID_SHORTCUT_PROFILE_BASE));
             return 0;

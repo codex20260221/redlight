@@ -529,8 +529,9 @@ void PreferenceProfileRoundTrip() {
     for (const auto luma : {LumaProfile::Classic, LumaProfile::GreenDetail, LumaProfile::EqualDetail})
     for (const auto backend : {BackendPreference::Automatic, BackendPreference::Magnification, BackendPreference::Gamma})
     for (const unsigned minutes : {0u, 1u, 15u, 240u})
-    for (const auto shortcuts : {ShortcutProfile::Default, ShortcutProfile::F9, ShortcutProfile::F10, ShortcutProfile::Disabled}) {
-        const AppPreferences original{mode, luma, backend, minutes, shortcuts};
+    for (const auto shortcuts : {ShortcutProfile::Default, ShortcutProfile::F9, ShortcutProfile::F10, ShortcutProfile::Disabled})
+    for (const auto warning : ExpiryWarningOptions) {
+        const AppPreferences original{mode, luma, backend, minutes, shortcuts, warning};
         const auto text = SerializePreferences(original);
         Check(text.has_value(), "serialize supported preferences");
         const auto parsed = ParsePreferences(*text);
@@ -545,7 +546,7 @@ void PreferenceProfileRoundTrip() {
 }
 void PreferenceProfileStrictValidation() {
     const auto text = *SerializePreferences(AppPreferences{});
-    Check(text.find("version=2") != std::string::npos && text.find("mode=luma") != std::string::npos && text.find("backend=auto") != std::string::npos, "stable human-readable versioned format");
+    Check(text.find("version=3") != std::string::npos && text.find("mode=luma") != std::string::npos && text.find("backend=auto") != std::string::npos, "stable human-readable versioned format");
     Check(!ParsePreferences(text + "mode=strict\n").preferences, "duplicate fields rejected");
     Check(!ParsePreferences(text + "mdoe=strict\n").preferences, "unknown fields rejected instead of ignored");
     Check(!ParsePreferences(text + "[RedLightProfile]\n").preferences, "duplicate sections rejected");
@@ -557,7 +558,7 @@ void PreferenceProfileStrictValidation() {
         Check(!parsed.preferences && parsed.error && parsed.line > 0, "invalid numeric input has a line diagnostic");
     }
     auto newer = text;
-    newer.replace(newer.find("version=2"), 9, "version=999");
+    newer.replace(newer.find("version=3"), 9, "version=999");
     Check(!ParsePreferences(newer).preferences, "future schemas cannot silently reinterpret settings");
     Check(!ParsePreferences("[RedLightProfile]\nversion=1\n").preferences, "missing settings rejected");
     Check(!ParsePreferences(std::string(4097, ' ')).preferences, "bounded input size");
@@ -643,7 +644,7 @@ void PreferencesImportRecoveryGate() {
     MagnificationFilter filter;
     Check(filter.initialize() && filter.enable(), "active filter");
     const AppPreferences original;
-    const AppPreferences candidate{RedMode::StrictRed, LumaProfile::EqualDetail, BackendPreference::Gamma, 60};
+    const AppPreferences candidate{RedMode::StrictRed, LumaProfile::EqualDetail, BackendPreference::Gamma, 60, ShortcutProfile::Default, ExpiryWarning::OneMinute};
     Check(SavePreferences(original), "seed preferences");
     const int writes = fake.registryWrites;
     fake.magSet = false;
@@ -774,7 +775,7 @@ void ShortcutStartupPartialAndSchemaMigration() {
 void DefaultPreferencesRestoreActiveGamma() {
     GammaRampFilter filter;
     Check(filter.initialize() && filter.enable(), "active gamma fallback");
-    const AppPreferences before{RedMode::StrictRed, LumaProfile::EqualDetail, BackendPreference::Gamma, 57, ShortcutProfile::F9};
+    const AppPreferences before{RedMode::StrictRed, LumaProfile::EqualDetail, BackendPreference::Gamma, 57, ShortcutProfile::F9, ExpiryWarning::FiveMinutes};
     Check(SavePreferences(before), "seed expert settings");
     const auto reset = SaveImportedPreferences(AppPreferences{}, [&] { return filter.disable(); });
     Check(reset == PreferenceImportResult::Saved && !filter.isActive() && !filter.needsRestore(), "default reset restores active filter and leaves it off");
@@ -1017,6 +1018,63 @@ void StatusQueryFailures() {
     }
     Check(fake.magWrites == 0 && fake.gammaWrites == 0 && fake.magInitializes == 0, "query failures never change or initialize display state");
 }
+void ExpiryWarningBoundariesAndDeadline() {
+    SessionTimer timer;
+    Check(!timer.warningDue(999999, 60), "unarmed/unlimited session never warns");
+    Check(timer.configure(2, 1000, true), "two-minute session");
+    Check(!timer.warningDue(60999, 60) && timer.warningDue(61000, 60), "warning begins exactly at selected remaining period");
+    Check(!timer.warningDue(61000, 0) && !timer.warningDue(61000, 301), "disabled or invalid warning is ignored");
+    const auto remaining = timer.remainingMilliseconds(61000);
+    timer.noteWarningAttempt();
+    Check(!timer.warningDue(61001, 60) && !timer.warningDue(61001, 300) && timer.remainingMilliseconds(61000) == remaining,
+        "one attempt per session even after threshold changes, without resetting countdown");
+    Check(!timer.restoreDue(120999) && timer.restoreDue(121000) && !timer.warningDue(121000, 60), "warning attempt cannot postpone exact restoration deadline");
+    timer.start(200000);
+    Check(timer.warningDue(260000, 60), "explicitly starting a new session rearms one warning");
+    timer.cancel();
+    Check(!timer.warningDue(260000, 60), "restored/cancelled session never warns");
+}
+void ExpiryWarningShortSessionsAndClockWrap() {
+    SessionTimer timer;
+    Check(timer.configure(1, 500, true) && timer.warningDue(500, 300), "session shorter than warning period is eligible on first tick");
+    Check(!timer.warningDue(60500, 300) && timer.restoreDue(60500), "expiry takes priority even if no warning was attempted");
+    const auto start = (std::numeric_limits<std::uint64_t>::max)() - 100;
+    Check(timer.configure(2, start, true) && !timer.warningDue(start + 59999, 60) && timer.warningDue(start + 60000, 60), "warning threshold tolerates monotonic clock wrap");
+    timer.noteWarningAttempt();
+    Check(timer.configure(1, 0, false) && !timer.warningDue(30000, 30), "configuring while off does not arm a warning");
+    timer.start(0);
+    Check(timer.warningDue(30000, 30), "new countdown after reconfiguration clears prior warning attempt");
+}
+void ExpiryWarningSchemaMigrationAndValidation() {
+    const std::string v1 = "[RedLightProfile]\nversion=1\nmode=luma\nluma=classic\nbackend=auto\nsession_minutes=15\n";
+    auto v2 = v1; v2.replace(v2.find("version=1"), 9, "version=2"); v2 += "hotkeys=f9\n";
+    const auto old1 = ParsePreferences(v1), old2 = ParsePreferences(v2);
+    Check(old1.preferences && old2.preferences && old1.preferences->expiryWarning == ExpiryWarning::Off && old2.preferences->expiryWarning == ExpiryWarning::Off,
+        "older schemas default warnings to off");
+    fake.registry[L"SettingsProfile"] = {REG_BINARY, std::vector<char>(v2.begin(), v2.end())};
+    const auto loaded = LoadPreferences();
+    Check(!loaded.warning && loaded.preferences.shortcuts == ShortcutProfile::F9 && loaded.preferences.expiryWarning == ExpiryWarning::Off && fake.registryWrites == 0,
+        "loading a persisted older record migrates warning defaults without storage writes");
+    Check(!ParsePreferences(v1 + "expiry_warning=off\n").preferences && !ParsePreferences(v2 + "expiry_warning=off\n").preferences,
+        "older version cannot silently carry new warning field");
+    const auto current = *SerializePreferences(AppPreferences{});
+    for (const auto badToken : {"on", "60", "-1", "1M", "", "360s"}) {
+        auto text = current; text.replace(text.find("expiry_warning=off"), 18, std::string("expiry_warning=") + badToken);
+        Check(!ParsePreferences(text).preferences, "invalid warning tokens rejected");
+    }
+    Check(!ParsePreferences(current + "expiry_warning=off\n").preferences, "duplicate warnings rejected");
+    auto missing = current; missing.erase(missing.find("expiry_warning="));
+    Check(!ParsePreferences(missing).preferences, "version 3 requires explicit warning choice");
+    auto invalid = AppPreferences{}; invalid.expiryWarning = static_cast<ExpiryWarning>(99);
+    Check(!SerializePreferences(invalid) && !SavePreferences(invalid) && fake.registryWrites == 0, "invalid preference cannot be serialized or persisted");
+    for (unsigned i = 0; i < ExpiryWarningOptions.size(); ++i) {
+        const auto warning = ExpiryWarningOptions[i];
+        Check(ParseExpiryWarning(ExpiryWarningToken(warning)) == warning, "warning token mapping round trips");
+        Check(!CommandMayChangeFilter(ID_EXPIRY_WARNING_BASE + i), "warning preference failures cannot request display restoration");
+    }
+    SupportReportState state; state.expiryWarning = ExpiryWarningName(ExpiryWarning::OneMinute);
+    Check(BuildSupportReport(state).find("Expiry warning: 1 minute") != std::string::npos, "support report includes selected warning");
+}
 } // namespace
 
 DWORD GetLastError() { return fake.lastError; }
@@ -1204,6 +1262,8 @@ int main() {
         {"Conservative status JSON", StatusJsonConservativeStates}, {"Standard output ownership", StandardOutputOwnership},
         {"Standard output failures", StandardOutputFailures}, {"Existing-instance status query", StatusQueryExistingInstanceOnly},
         {"Status query failures", StatusQueryFailures},
+        {"Expiry warning deadline policy", ExpiryWarningBoundariesAndDeadline}, {"Expiry warning short sessions/clock", ExpiryWarningShortSessionsAndClockWrap},
+        {"Expiry warning schema migration", ExpiryWarningSchemaMigrationAndValidation},
         {"Command line", Arguments}
     };
     int failed = 0;

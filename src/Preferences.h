@@ -3,6 +3,7 @@
 #include "DisplayFilter.h"
 #include "SessionTimer.h"
 #include "ShortcutProfile.h"
+#include "ExpiryWarning.h"
 #include <charconv>
 #include <optional>
 #include <string>
@@ -14,20 +15,23 @@ struct AppPreferences {
     BackendPreference backend = BackendPreference::Automatic;
     unsigned sessionMinutes = 0;
     ShortcutProfile shortcuts = ShortcutProfile::Default;
+    ExpiryWarning expiryWarning = ExpiryWarning::Off;
     bool operator==(const AppPreferences&) const = default;
 };
 inline bool ValidPreferences(const AppPreferences& value) {
     return (value.mode == RedMode::StrictRed || value.mode == RedMode::LumaRed) &&
         IsValidLumaProfile(static_cast<unsigned>(value.luma)) &&
-        IsValidBackendPreference(static_cast<unsigned>(value.backend)) && value.sessionMinutes <= SessionTimer::maxMinutes && IsValidShortcutProfile(static_cast<unsigned>(value.shortcuts));
+        IsValidBackendPreference(static_cast<unsigned>(value.backend)) && value.sessionMinutes <= SessionTimer::maxMinutes &&
+        IsValidShortcutProfile(static_cast<unsigned>(value.shortcuts)) && IsValidExpiryWarning(value.expiryWarning);
 }
 inline std::optional<std::string> SerializePreferences(const AppPreferences& value) {
     if (!ValidPreferences(value)) return std::nullopt;
     const char* luma = value.luma == LumaProfile::Classic ? "classic" : (value.luma == LumaProfile::GreenDetail ? "green" : "equal");
     const char* backend = value.backend == BackendPreference::Automatic ? "auto" :
         (value.backend == BackendPreference::Magnification ? "magnification" : "gamma");
-    return std::string("[RedLightProfile]\r\nversion=2\r\nmode=") + (value.mode == RedMode::LumaRed ? "luma" : "strict") +
-        "\r\nluma=" + luma + "\r\nbackend=" + backend + "\r\nsession_minutes=" + std::to_string(value.sessionMinutes) + "\r\nhotkeys=" + ShortcutProfileToken(value.shortcuts) + "\r\n";
+    return std::string("[RedLightProfile]\r\nversion=3\r\nmode=") + (value.mode == RedMode::LumaRed ? "luma" : "strict") +
+        "\r\nluma=" + luma + "\r\nbackend=" + backend + "\r\nsession_minutes=" + std::to_string(value.sessionMinutes) + "\r\nhotkeys=" + ShortcutProfileToken(value.shortcuts) +
+        "\r\nexpiry_warning=" + ExpiryWarningToken(value.expiryWarning) + "\r\n";
 }
 struct PreferencesParseResult {
     std::optional<AppPreferences> preferences;
@@ -65,8 +69,8 @@ inline PreferencesParseResult ParsePreferences(std::string_view input) {
         unsigned flag = 0;
         if (key == "version") {
             flag = 1;
-            if (field != "1" && field != "2") return {std::nullopt, "Unsupported profile version", lineNumber};
-            version = field == "1" ? 1 : 2;
+            if (field != "1" && field != "2" && field != "3") return {std::nullopt, "Unsupported profile version", lineNumber};
+            version = field == "1" ? 1 : (field == "2" ? 2 : 3);
         } else if (key == "mode") {
             flag = 2;
             if (field == "strict") value.mode = RedMode::StrictRed;
@@ -96,11 +100,17 @@ inline PreferencesParseResult ParsePreferences(std::string_view input) {
             const auto profile = ParseShortcutProfile(field);
             if (!profile) return {std::nullopt, "Invalid shortcut profile", lineNumber};
             value.shortcuts = *profile;
+        } else if (key == "expiry_warning") {
+            flag = 64;
+            const auto warning = ParseExpiryWarning(field);
+            if (!warning) return {std::nullopt, "Invalid expiry warning", lineNumber};
+            value.expiryWarning = *warning;
         } else return {std::nullopt, "Unknown profile field", lineNumber};
         if (seen & flag) return {std::nullopt, "Duplicate profile field", lineNumber};
         seen |= flag;
     }
     if (version == 1 && (seen & 32)) return {std::nullopt, "Shortcut settings require profile version 2", lineNumber};
-    if (!header || seen != (version == 2 ? 63u : 31u)) return {std::nullopt, "Profile section or required fields are missing", lineNumber};
+    if (version < 3 && (seen & 64)) return {std::nullopt, "Expiry warnings require profile version 3", lineNumber};
+    if (!header || seen != (version == 3 ? 127u : (version == 2 ? 63u : 31u))) return {std::nullopt, "Profile section or required fields are missing", lineNumber};
     return {value, nullptr, 0};
 }

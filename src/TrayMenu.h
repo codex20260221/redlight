@@ -3,6 +3,7 @@
 #include "BackendPreference.h"
 #include "DisplayFilter.h"
 #include "ShortcutProfile.h"
+#include "ExpiryWarning.h"
 
 struct TrayMenuState {
     bool needsRestore;
@@ -14,6 +15,7 @@ struct TrayMenuState {
     ShortcutProfile shortcutProfile;
     const char* toggleShortcut;
     const char* restoreShortcut;
+    ExpiryWarning expiryWarning;
 };
 // Ownership of the returned root menu transfers to the caller.
 HMENU BuildTrayMenu(const TrayMenuState& state);

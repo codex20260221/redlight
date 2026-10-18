@@ -37,7 +37,11 @@ UINT Checked(bool value) { return MF_STRING | (value ? MF_CHECKED : MF_UNCHECKED
 }
 
 HMENU BuildTrayMenu(const TrayMenuState& state) {
-    Menu root, session, luma, backend, shortcuts, expert;
+    Menu root, session, warning, luma, backend, shortcuts, expert;
+    for (unsigned i = 0; i < ExpiryWarningOptions.size(); ++i) {
+        const auto option = ExpiryWarningOptions[i];
+        if (!warning.add(ID_EXPIRY_WARNING_BASE + i, ExpiryWarningName(option), Checked(state.expiryWarning == option))) return NULL;
+    }
     for (const unsigned minutes : {0u, 15u, 30u, 60u, 120u, 240u}) {
         char label[48];
         if (minutes == 0) strcpy_s(label, "Unlimited");
@@ -49,7 +53,8 @@ HMENU BuildTrayMenu(const TrayMenuState& state) {
     char customLabel[64];
     if (customLimit) sprintf_s(customLabel, "&Custom (%u minutes)...", state.sessionMinutes);
     else strcpy_s(customLabel, "&Custom...");
-    if (!session.add(0, NULL, MF_SEPARATOR) || !session.add(ID_TRAY_CUSTOM_SESSION, customLabel, Checked(customLimit))) return NULL;
+    if (!session.add(0, NULL, MF_SEPARATOR) || !session.add(ID_TRAY_CUSTOM_SESSION, customLabel, Checked(customLimit)) ||
+        !session.add(0, NULL, MF_SEPARATOR) || !session.child(warning, "Expiry &warning")) return NULL;
     if (!luma.add(ID_LUMA_PROFILE_BASE, "&Classic (BT.601)", Checked(state.luma == LumaProfile::Classic)) ||
         !luma.add(ID_LUMA_PROFILE_BASE + 1, "&Green detail (BT.709)", Checked(state.luma == LumaProfile::GreenDetail)) ||
         !luma.add(ID_LUMA_PROFILE_BASE + 2, "&Equal color detail", Checked(state.luma == LumaProfile::EqualDetail))) return NULL;

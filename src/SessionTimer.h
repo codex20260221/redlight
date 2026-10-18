@@ -20,8 +20,9 @@ public:
         started_ = now;
         armed_ = minutes_ != 0;
         attempted_ = false;
+        warningAttempted_ = false;
     }
-    void cancel() { armed_ = false; attempted_ = false; }
+    void cancel() { armed_ = false; attempted_ = false; warningAttempted_ = false; }
     bool armed() const { return armed_; }
     unsigned minutes() const { return minutes_; }
     std::uint64_t remainingMilliseconds(std::uint64_t now) const {
@@ -35,11 +36,18 @@ public:
             (!attempted_ || now - lastAttempt_ >= retryMilliseconds);
     }
     void noteRestoreAttempt(std::uint64_t now) { lastAttempt_ = now; attempted_ = true; }
+    bool warningDue(std::uint64_t now, unsigned leadSeconds) const {
+        if (!armed_ || warningAttempted_ || leadSeconds == 0 || leadSeconds > 300) return false;
+        const auto remaining = remainingMilliseconds(now);
+        return remaining != 0 && remaining <= static_cast<std::uint64_t>(leadSeconds) * 1000;
+    }
+    void noteWarningAttempt() { warningAttempted_ = true; } // At most one attempt, even if Windows suppresses delivery.
 
 private:
     unsigned minutes_ = 0;
     bool armed_ = false;
     bool attempted_ = false;
+    bool warningAttempted_ = false;
     std::uint64_t started_ = 0;
     std::uint64_t lastAttempt_ = 0;
 };
