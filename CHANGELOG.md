@@ -73,6 +73,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added command-line help/version dialogs and explicit rejection of unknown or conflicting options.
 
 ### Changed
+- Prepare cached status JSON in caller-owned buffers for both existing-instance queries and clipboard copies, avoiding a temporary C++ heap allocation while preserving protocol bytes, invalid-state refusal, and checked native output/clipboard ownership.
 - Group verification, support reports, retry tools, counters, and history under Expert controls → Diagnostics, retaining distinct submenu accelerators and direct primary display/recovery controls.
 - Prepare canonical settings profiles in a checked fixed buffer before one owned-string allocation, reducing allocation pressure during preference saves and exports without changing the format.
 - Selecting an unchanged session limit leaves its deadline intact; timing changes/restarts are blocked after expiry or while recovery/backend confirmation needs attention, preserving restoration retry cadence.

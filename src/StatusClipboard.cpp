@@ -4,7 +4,8 @@
 
 bool CopyTrayStatusJsonToClipboard(HWND owner, const TrayStatus& snapshot) noexcept {
     try {
-        const auto text = TrayStatusJson(snapshot);
+        char output[TrayStatusJsonBufferSize];
+        const auto text = FormatTrayStatusJson(snapshot, output);
         if (!text) {
             Diagnostics::Log("Status JSON clipboard export refused an inconsistent cached snapshot.");
             return false;

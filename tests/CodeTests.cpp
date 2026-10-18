@@ -1700,11 +1700,6 @@ void StatusQueryFailures() {
     Check(QueryRunningStatus() == 1, "output failure cannot be reported as successful query");
     Reset(); fake.trayExists = false; fake.stdoutWrite = false;
     Check(QueryRunningStatus() == 1, "missing instance still requires successful output");
-    Reset(); fake.statusReply = *PackTrayStatus(TrayStatus{});
-    {
-        TestMemory::FailNextAllocation fail;
-        Check(QueryRunningStatus() == 1 && fake.stdoutText.empty(), "response allocation failure is contained before any partial output");
-    }
     Check(fake.magWrites == 0 && fake.gammaWrites == 0 && fake.magInitializes == 0, "query failures never change or initialize display state");
 }
 void CurrentPreferencesPacketRoundTrip() {
@@ -5250,6 +5245,69 @@ void ExpertMenuAppendFailureCleanupAtEveryBoundary() {
             "failure at each item/submenu append preserves ownership until success and releases all handles without double destruction");
     }
 }
+void StatusJsonFixedBufferGoldenAndBounds() {
+    constexpr std::string_view expected = "{\n  \"protocol\":1,\n  \"status\":\"off\",\n  \"active\":false,\n  \"backend_active\":false,\n  \"restore_pending\":false,\n  \"backend_error\":false,\n  \"verification\":\"not-checked\",\n"
+        "  \"backend\":\"magnification\",\n  \"red_mode\":\"luma\",\n  \"luma_profile\":\"classic\",\n  \"luma_profile_scope\":\"backend-selection\",\n"
+        "  \"session_limit_minutes\":0,\n  \"remaining_seconds\":null,\n  \"shortcut_profile\":\"default\",\n  \"shortcut_profile_applied\":false,\n"
+        "  \"toggle_shortcut\":\"none\",\n  \"restore_shortcut\":\"none\",\n  \"settings_unsaved\":false,\n"
+        "  \"session_notifications\":false,\n  \"file_logging\":\"not-initialized\",\n  \"file_records_missing\":false,\n"
+        "  \"records_truncated\":false,\n  \"file_error\":false\n}\n";
+    char output[TrayStatusJsonBufferSize];
+    Check(FormatTrayStatusJson({}, output) == expected && output[expected.size()] == '\0' && TrayStatusJson({}) == expected,
+        "fixed and owning formatters preserve the complete existing protocol JSON byte for byte");
+    for (std::size_t size = 0; size <= expected.size(); ++size) {
+        std::fill(std::begin(output), std::end(output), '#');
+        Check(!FormatTrayStatusJson({}, std::span<char>(output, size)) && output[size] == '#',
+            "every missing-byte/terminator boundary refuses partial success without writing outside the supplied span");
+    }
+    Check(FormatTrayStatusJson({}, std::span<char>(output, expected.size() + 1)) == expected && output[expected.size()] == '\0',
+        "an exact JSON plus NUL span succeeds");
+    TrayStatus invalid; invalid.backendActive = true;
+    Check(!FormatTrayStatusJson(invalid, output) && !TrayStatusJson(invalid), "inconsistent state retains refusal before JSON generation");
+}
+void StatusJsonFixedBufferVariantsWithoutAllocation() {
+    char output[TrayStatusJsonBufferSize];
+    for (bool gamma : {false, true}) for (unsigned verification = 0; verification < 5; ++verification)
+        for (unsigned logging = 0; logging < 4; ++logging) for (unsigned luma = 0; luma < 3; ++luma) for (unsigned bits = 0; bits < 16; ++bits) {
+            TrayStatus snapshot; snapshot.backend = gamma ? StatusBackend::Gamma : StatusBackend::Magnification;
+            snapshot.supportsLuma = !gamma; snapshot.mode = gamma ? RedMode::StrictRed : RedMode::LumaRed; snapshot.luma = static_cast<LumaProfile>(luma);
+            snapshot.backendActive = (bits & 1) != 0; snapshot.restorePending = snapshot.backendActive || (bits & 2) != 0;
+            snapshot.backendError = (bits & 4) != 0; snapshot.busy = (bits & 8) != 0;
+            snapshot.verification = static_cast<BackendVerification>(verification); snapshot.fileLogging = static_cast<Diagnostics::FileState>(logging);
+            snapshot.sessionMinutes = 240; snapshot.timerArmed = true; snapshot.remainingSeconds = 14400;
+            snapshot.shortcutProfile = ShortcutProfile::F10; snapshot.toggle = snapshot.restore = StatusShortcut::F10;
+            snapshot.settingsUnsaved = snapshot.sessionNotifications = snapshot.missingFileRecords = snapshot.truncatedRecords = snapshot.fileError = true;
+            const auto original = snapshot; const auto expected = TrayStatusJson(snapshot);
+            bool formatted = false, unused = false;
+            { TestMemory::FailNextAllocation fail; formatted = FormatTrayStatusJson(snapshot, output) == expected; unused = TestMemory::AllocationFailurePending(); }
+            Check(expected && formatted && unused && snapshot == original && expected->size() < sizeof(output),
+                "all backend/verification/logging/Luma/status combinations and largest countdown values fit without allocation or snapshot mutation");
+        }
+    Check(fake.magReads == 0 && fake.gammaReads == 0 && fake.backendClockReads == 0 && fake.registryReads == 0 && fake.clipOpens == 0,
+        "formatting variants perform no display/clock/preferences/clipboard work");
+}
+void StatusProductionPathsWithoutCppJsonAllocation() {
+    GammaRampFilter filter;
+    Check(filter.initialize(), "prepare pending gamma recovery for status output");
+    fake.writes = {Write::FailAfterApply, Write::Fail};
+    Check(!filter.enable() && !filter.isActive() && filter.needsRestore(), "retain unconfirmed activation original/mutex");
+    TrayStatus snapshot; snapshot.backend = StatusBackend::Gamma; snapshot.supportsLuma = false; snapshot.mode = RedMode::StrictRed;
+    snapshot.restorePending = true; snapshot.backendError = true; snapshot.verification = filter.inspectState().state;
+    const auto expected = TrayStatusJson(snapshot);
+    Check(expected.has_value(), "prepare exact historical status JSON");
+    fake.statusReply = *PackTrayStatus(snapshot); fake.stdoutChunk = 3;
+    fake.stdoutText.reserve(TrayStatusJsonBufferSize); fake.clipMemory.reserve(TrayStatusJsonBufferSize);
+    const auto reads = fake.gammaReads, writes = fake.gammaWrites, releases = fake.mutexReleases;
+    const auto statistics = filter.statistics(); const auto clocks = fake.backendClockReads; const auto error = std::string(filter.lastError());
+    int queried = 1; bool copied = false, unused = false;
+    { TestMemory::FailNextAllocation fail; queried = QueryRunningStatus(); copied = CopyTrayStatusJsonToClipboard(nullptr, snapshot); unused = TestMemory::AllocationFailurePending(); }
+    Check(queried == 0 && copied && unused && fake.stdoutText == expected && std::wstring_view(fake.clipMemory.data()) == std::wstring(expected->begin(), expected->end()) &&
+        filter.needsRestore() && !filter.isActive() && fake.mutexOwned && filter.statistics() == statistics && error == filter.lastError() &&
+        fake.gammaReads == reads && fake.gammaWrites == writes && fake.mutexReleases == releases && fake.backendClockReads == clocks &&
+        fake.registryReads == 0 && fake.registryWrites == 0 && fake.statusSends == 1 && fake.clipSets == 1,
+        "production query and clipboard paths allocate no C++ JSON storage, preserve exact partial-write output, and retain recovery/errors/counters/clock/ownership");
+    Check(filter.disable() && filter.shutdown(), "original gamma calibration remains recoverable after allocation-free status output");
+}
 void StatusClipboardMatchesCachedJson() {
     TrayStatus snapshot;
     snapshot.backendActive = true; snapshot.restorePending = true; snapshot.mode = RedMode::LumaRed; snapshot.luma = LumaProfile::GreenDetail;
@@ -5284,8 +5342,8 @@ void StatusClipboardPreparationAllocationFailure() {
     fake.clipMemory = {L'k', L'e', L'e', L'p', 0};
     {
         TestMemory::FailNextAllocation fail;
-        Check(!CopyTrayStatusJsonToClipboard(nullptr, {}) && fake.clipOpens == 0 && fake.clipAllocations == 0 && fake.clipEmpties == 0,
-            "JSON preparation allocation failure is contained before any clipboard mutation");
+        Check(!CopyTrayStatusJsonToClipboard(nullptr, {}) && fake.clipOpens == 0 && fake.clipAllocations == 1 && fake.clipEmpties == 0,
+            "fake native clipboard allocation exception is contained before any clipboard mutation");
     }
     Check(std::wstring_view(fake.clipMemory.data()) == L"keep" && !CommandMayChangeFilter(ID_TRAY_COPY_STATUS_JSON),
         "allocation failure preserves existing clipboard content and read-only display-failure policy");
@@ -6149,6 +6207,8 @@ int main() {
         {"Expert diagnostic menu state flags", ExpertDiagnosticsMenuStateFlags}, {"Expert menu create failure cleanup matrix", ExpertMenuCreationFailureCleanupAtEveryBoundary},
         {"Expert menu append failure cleanup matrix", ExpertMenuAppendFailureCleanupAtEveryBoundary},
         {"Status clipboard matches cached JSON", StatusClipboardMatchesCachedJson}, {"Status clipboard rejects inconsistent snapshots", StatusClipboardRejectsInconsistentSnapshotBeforeMutation},
+        {"Status fixed-buffer golden/bounds", StatusJsonFixedBufferGoldenAndBounds}, {"Status fixed-buffer variants/allocation", StatusJsonFixedBufferVariantsWithoutAllocation},
+        {"Status production paths without JSON allocation", StatusProductionPathsWithoutCppJsonAllocation},
         {"Status clipboard native failure propagation", StatusClipboardPropagatesNativeFailures}, {"Status clipboard allocation preparation failure", StatusClipboardPreparationAllocationFailure},
         {"Status clipboard retains pending gamma recovery", StatusClipboardRetainsPendingGammaRecovery},
         {"Manual context refresh preserves active backend", ManualContextRefreshPreservesActiveBackend}, {"Manual context refresh failure preserves cache/verification", ManualContextRefreshFailureRetainsVerificationAndAge},

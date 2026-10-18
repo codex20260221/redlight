@@ -22,7 +22,8 @@ int QueryRunningStatus() noexcept {
             return 1;
         }
         const auto state = UnpackTrayStatus(static_cast<std::uint64_t>(reply));
-        const auto json = state ? TrayStatusJson(*state) : std::nullopt;
+        char output[TrayStatusJsonBufferSize];
+        const auto json = state ? FormatTrayStatusJson(*state, output) : std::nullopt;
         if (!json) {
             Diagnostics::Log("Status query received an unsupported or invalid response.");
             WriteStandardOutput("{\"protocol\":1,\"status\":\"invalid-response\",\"active\":false}\n");

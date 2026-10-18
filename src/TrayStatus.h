@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 
@@ -87,8 +88,10 @@ inline const char* TrayStatusToken(const TrayStatus& s) {
     if (s.verification == BackendVerification::Unavailable) return "verification-unavailable";
     return s.backendActive ? "on" : "off";
 }
-inline std::optional<std::string> TrayStatusJson(const TrayStatus& s) {
-    if (!ValidTrayStatus(s)) return std::nullopt;
+inline constexpr std::size_t TrayStatusJsonBufferSize = 2048;
+// Complete JSON plus a trailing NUL; the returned view belongs to the caller's buffer.
+inline std::optional<std::string_view> FormatTrayStatusJson(const TrayStatus& s, std::span<char> output) noexcept {
+    if (output.empty() || !ValidTrayStatus(s)) return std::nullopt;
     const auto boolean = [](bool value) { return value ? "true" : "false"; };
     char remaining[16];
     if (s.timerArmed) std::snprintf(remaining, sizeof(remaining), "%u", s.remainingSeconds);
@@ -100,8 +103,7 @@ inline std::optional<std::string> TrayStatusJson(const TrayStatus& s) {
     const bool active = std::string_view(token) == "on";
     const char* fileState = s.fileLogging == Diagnostics::FileState::Available ? "available" :
         (s.fileLogging == Diagnostics::FileState::Degraded ? "degraded" : (s.fileLogging == Diagnostics::FileState::Unavailable ? "unavailable" : "not-initialized"));
-    char text[2048];
-    const int length = std::snprintf(text, sizeof(text),
+    const int length = std::snprintf(output.data(), output.size(),
         "{\n  \"protocol\":1,\n  \"status\":\"%s\",\n  \"active\":%s,\n  \"backend_active\":%s,\n  \"restore_pending\":%s,\n  \"backend_error\":%s,\n  \"verification\":\"%s\",\n"
         "  \"backend\":\"%s\",\n  \"red_mode\":\"%s\",\n  \"luma_profile\":\"%s\",\n  \"luma_profile_scope\":\"%s\",\n"
         "  \"session_limit_minutes\":%u,\n  \"remaining_seconds\":%s,\n  \"shortcut_profile\":\"%s\",\n  \"shortcut_profile_applied\":%s,\n"
@@ -114,6 +116,11 @@ inline std::optional<std::string> TrayStatusJson(const TrayStatus& s) {
         s.supportsLuma ? "backend-selection" : "magnification-preference",
         s.sessionMinutes, remaining, ShortcutProfileToken(s.shortcutProfile), boolean(StatusShortcutProfileApplied(s)), StatusShortcutName(s.toggle, false), StatusShortcutName(s.restore, true),
         boolean(s.settingsUnsaved), boolean(s.sessionNotifications), fileState, boolean(s.missingFileRecords), boolean(s.truncatedRecords), boolean(s.fileError));
-    if (length < 0 || static_cast<std::size_t>(length) >= sizeof(text)) return std::nullopt;
-    return std::string(text, static_cast<std::size_t>(length));
+    if (length < 0 || static_cast<std::size_t>(length) >= output.size()) return std::nullopt;
+    return std::string_view(output.data(), static_cast<std::size_t>(length));
+}
+inline std::optional<std::string> TrayStatusJson(const TrayStatus& s) {
+    char output[TrayStatusJsonBufferSize];
+    const auto text = FormatTrayStatusJson(s, output);
+    return text ? std::optional<std::string>(std::string(*text)) : std::nullopt;
 }
