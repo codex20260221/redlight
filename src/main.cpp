@@ -951,6 +951,9 @@ void CopyStatusJson(HWND owner) {
 void CopySupportReport(HWND owner) {
     SupportReportState state;
     state.reportTick = GetTickCount64();
+    SYSTEMTIME utc = {};
+    GetSystemTime(&utc);
+    state.capturedUtc = UtcTimestamp{utc.wYear, utc.wMonth, utc.wDay, utc.wHour, utc.wMinute, utc.wSecond, utc.wMilliseconds};
     state.version = REDLIGHT_VERSION;
     state.buildRevision = REDLIGHT_BUILD_REVISION;
     state.sourceState = REDLIGHT_SOURCE_STATE;

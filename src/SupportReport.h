@@ -7,6 +7,7 @@
 #include "ReadbackLocation.h"
 #include "DisplayContext.h"
 #include "Diagnostics.h"
+#include "UtcTimestamp.h"
 #include <cstdint>
 #include <optional>
 #include <sstream>
@@ -21,6 +22,7 @@ struct SupportReportState {
     std::string_view buildRevision = "unversioned", sourceState = "unknown";
     std::string_view backendLifecycle = "Not reported";
     std::string_view startupFallbackReason = "Not reported";
+    std::optional<UtcTimestamp> capturedUtc;
     BackendVerification verification = BackendVerification::NotChecked;
     std::optional<BackendReadbackDetails> readback;
     std::uint32_t verificationError = 0;
@@ -57,7 +59,12 @@ struct SupportReportState {
 inline std::string BuildSupportReport(const SupportReportState& state) {
     std::ostringstream report;
     report.exceptions(std::ios::badbit | std::ios::failbit);
-    report << "RedLight support report\r\nVersion: " << state.version << " (Windows x64)\r\n"
+    report << "RedLight support report\r\nCaptured UTC: ";
+    if (state.capturedUtc) {
+        char timestamp[UtcTimestampBufferSize];
+        report << FormatUtcTimestamp(*state.capturedUtc, timestamp).value_or("unavailable (invalid UTC calendar fields)");
+    } else report << "not recorded";
+    report << "\r\nVersion: " << state.version << " (Windows x64)\r\n"
         << "Build revision: " << state.buildRevision << " (" << state.sourceState << ")\r\n"
         << "Backend: " << state.backend << "\r\nBackend lifecycle: " << state.backendLifecycle << "\r\nStartup policy: " << state.startupPolicy
         << (state.commandLineOverride ? " (command-line override)" : "")

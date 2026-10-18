@@ -992,6 +992,87 @@ void SessionTimerChangesAndClockWrap() {
     Check(timer.configure(1, nearWrap, true), "clock near wrap");
     Check(!timer.restoreDue(nearWrap + 59999) && timer.restoreDue(nearWrap + 60000), "deadline survives unsigned clock wrap");
 }
+void UtcTimestampGoldenAndExpandedYears() {
+    char output[UtcTimestampBufferSize];
+    Check(FormatUtcTimestamp({2026, 10, 18, 17, 8, 9, 456}, output) == "2026-10-18T17:08:09.456Z" &&
+        FormatUtcTimestamp({1601, 1, 1, 0, 0, 0, 0}, output) == "1601-01-01T00:00:00.000Z" &&
+        FormatUtcTimestamp({9999, 12, 31, 23, 59, 59, 999}, output) == "9999-12-31T23:59:59.999Z" &&
+        FormatUtcTimestamp({10000, 1, 1, 0, 0, 0, 0}, output) == "+010000-01-01T00:00:00.000Z" &&
+        FormatUtcTimestamp({30827, 12, 31, 23, 59, 59, 999}, output) == "+030827-12-31T23:59:59.999Z",
+        "UTC labels preserve milliseconds, zero padding, Windows calendar bounds, and signed expanded years without a time-zone conversion");
+}
+void UtcTimestampCalendarBoundaries() {
+    char output[UtcTimestampBufferSize];
+    for (const auto& [year, leap] : std::array<std::pair<unsigned, bool>, 12>{
+        std::pair{1604u, true}, {1700, false}, {1800, false}, {1900, false}, {2000, true}, {2024, true},
+        {2026, false}, {2100, false}, {2400, true}, {10000, true}, {20000, true}, {30000, true}}) {
+        Check(FormatUtcTimestamp({year, 2, 28, 0, 0, 0, 0}, output).has_value() &&
+            FormatUtcTimestamp({year, 2, 29, 0, 0, 0, 0}, output).has_value() == leap &&
+            !FormatUtcTimestamp({year, 2, 30, 0, 0, 0, 0}, output), "known leap-year and century boundaries reject impossible February dates");
+    }
+    constexpr unsigned lastDays[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    for (unsigned month = 1; month <= 12; ++month)
+        Check(FormatUtcTimestamp({2026, month, lastDays[month - 1], 23, 59, 59, 999}, output).has_value() &&
+            !FormatUtcTimestamp({2026, month, lastDays[month - 1] + 1, 0, 0, 0, 0}, output), "every month accepts its final day and refuses the next day");
+}
+void UtcTimestampInvalidFields() {
+    for (unsigned field = 0; field < 7; ++field) for (bool maximum : {false, true}) {
+        UtcTimestamp time{2026, 10, 18, 17, 8, 9, 456};
+        const auto invalid = (std::numeric_limits<unsigned>::max)();
+        switch (field) {
+        case 0: time.year = maximum ? invalid : 1600; break;
+        case 1: time.month = maximum ? invalid : 0; break;
+        case 2: time.day = maximum ? invalid : 0; break;
+        case 3: time.hour = maximum ? invalid : 24; break;
+        case 4: time.minute = maximum ? invalid : 60; break;
+        case 5: time.second = maximum ? invalid : 60; break;
+        default: time.millisecond = maximum ? invalid : 1000; break;
+        }
+        char output[UtcTimestampBufferSize]; std::fill(std::begin(output), std::end(output), '#');
+        Check(!FormatUtcTimestamp(time, output) && output[0] == '#', "invalid UTC calendar/clock fields are rejected before output formatting");
+    }
+    char output[UtcTimestampBufferSize];
+    Check(!FormatUtcTimestamp({30828, 1, 1, 0, 0, 0, 0}, output) && !FormatUtcTimestamp({2026, 13, 1, 0, 0, 0, 0}, output),
+        "one-past native year and month bounds are refused");
+}
+void UtcTimestampBoundsAndAllocation() {
+    char output[UtcTimestampBufferSize];
+    for (const auto& time : {UtcTimestamp{2026, 10, 18, 17, 8, 9, 456}, UtcTimestamp{30827, 12, 31, 23, 59, 59, 999}}) {
+        const auto original = time; const std::string expected(*FormatUtcTimestamp(time, output));
+        for (std::size_t size = 0; size <= expected.size(); ++size) {
+            std::fill(std::begin(output), std::end(output), '#');
+            Check(!FormatUtcTimestamp(time, std::span<char>(output, size)) && output[size] == '#', "all missing-byte/NUL boundaries refuse partial success without out-of-span writes");
+        }
+        bool formatted = false, unused = false;
+        { TestMemory::FailNextAllocation fail; formatted = FormatUtcTimestamp(time, std::span<char>(output, expected.size() + 1)) == expected; unused = TestMemory::AllocationFailurePending(); }
+        Check(formatted && unused && time == original && output[expected.size()] == '\0', "exact complete UTC formatting is allocation-free and leaves supplied calendar data unchanged");
+    }
+    Check(fake.backendClockReads == 0 && fake.magReads == 0 && fake.gammaReads == 0 && fake.registryReads == 0, "UTC formatting samples no native clock, display, or settings state");
+}
+void UtcTimestampSupportSnapshotRetainsRecovery() {
+    MagnificationFilter filter; SessionTimer timer;
+    Check(filter.initialize() && filter.enable() && timer.configure(1, 1000, true), "prepare an armed Magnification session");
+    fake.magWriteResults = {Write::FailAfterApply};
+    Check(!filter.disable() && filter.needsRestore() && !filter.isActive(), "ambiguous restoration retains the owned original");
+    UtcTimestamp captured{2026, 10, 18, 17, 8, 9, 456};
+    SupportReportState state; state.capturedUtc = captured; state.reportTick = 65000; state.needsRestore = true;
+    state.expiryOverdueMilliseconds = timer.overdueMilliseconds(state.reportTick);
+    const auto statistics = filter.statistics(); const auto clocks = fake.backendClockReads;
+    const auto reads = fake.magReads, writes = fake.magWrites; const auto error = std::string(filter.lastError());
+    const auto report = BuildSupportReport(state);
+    captured.year = 2099;
+    Check(report.starts_with("RedLight support report\r\nCaptured UTC: 2026-10-18T17:08:09.456Z\r\n") && BuildSupportReport(state) == report,
+        "copied calendar metadata is stable after later wall-clock input changes");
+    state.capturedUtc = captured;
+    Check(BuildSupportReport(state).find("Captured UTC: 2099-10-18T17:08:09.456Z") != std::string::npos &&
+        timer.overdueMilliseconds(state.reportTick) == 4000 && timer.remainingMilliseconds(state.reportTick) == 0 && !timer.canRestart(state.reportTick, true) &&
+        filter.statistics() == statistics && error == filter.lastError() && fake.magReads == reads && fake.magWrites == writes && fake.backendClockReads == clocks &&
+        filter.needsRestore() && !filter.isActive(), "wall-clock labels never drive monotonic expiry, bypass recovery, or change backend state/errors/counters");
+    state.capturedUtc->month = 13;
+    Check(BuildSupportReport(state).find("Captured UTC: unavailable (invalid UTC calendar fields)") != std::string::npos &&
+        BuildSupportReport({}).find("Captured UTC: not recorded") != std::string::npos, "invalid and absent capture metadata are distinguishable without a fabricated timestamp");
+    Check(filter.disable() && filter.shutdown(), "original Magnification matrix stays recoverable after timestamp reporting");
+}
 void StartupFallbackReasonPolicyAndAllocation() {
     for (auto policy : {BackendPreference::Automatic, BackendPreference::Magnification, BackendPreference::Gamma, static_cast<BackendPreference>(99)})
         for (bool gamma : {false, true}) {
@@ -6242,6 +6323,9 @@ int main() {
         {"Backend default selection", BackendSelectionPolicies}, {"Backend strict/fallback selection", BackendSelectionStrictAndFallback},
         {"Startup fallback reason policy/allocation", StartupFallbackReasonPolicyAndAllocation}, {"Startup fallback retained initialization failure", StartupFallbackRetainsInitializationFailure},
         {"Startup fallback report preserves Gamma recovery", StartupFallbackReportPreservesGammaRecovery},
+        {"UTC timestamp golden/expanded years", UtcTimestampGoldenAndExpandedYears}, {"UTC timestamp calendar boundaries", UtcTimestampCalendarBoundaries},
+        {"UTC timestamp invalid fields", UtcTimestampInvalidFields}, {"UTC timestamp bounds/allocation", UtcTimestampBoundsAndAllocation},
+        {"UTC support snapshot retains recovery", UtcTimestampSupportSnapshotRetainsRecovery},
         {"Backend cleanup failure", BackendSelectionCleanupFailure}, {"Backend command line", BackendCommandLine},
         {"Luma preset output", LumaPresetOutput}, {"Luma preset failure/restoration", LumaPresetFailureAndRestore},
         {"Luma preset strict/gamma behavior", LumaPresetInStrictModeAndGamma},
