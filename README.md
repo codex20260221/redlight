@@ -107,6 +107,18 @@ Use the Automatic override if an unavailable saved backend prevents startup. Gam
 
 **Expert controls → Export settings profile to clipboard** copies a small versioned text profile containing preferred red mode, luma detail, next-start backend preference, shortcuts, session limit, and expiry warning. Paste it into a text file to keep or share the configuration. It preserves preferred Luma Red settings even while gamma fallback is running, and includes no enabled state, countdown, recovery snapshot, account identity, or file path. A command-line backend override does not replace the saved next-start preference in the export.
 
+`--export-profile` writes saved preferences as profile text to standard output. It works before tray/backend initialization, converts valid legacy/version 1/2 settings to the current format without storage writes, and exports defaults if no saved settings exist. Unreadable or invalid storage returns failure before output. It exports persisted preferences; use tray export to include unsaved in-session choices. Exit codes are `0` for a complete export, `1` for storage/serialization/output failure, and `2` for invalid arguments. Errors are logged without a help dialog. Discard any partial output after failure.
+
+Save a UTF-8 backup in PowerShell after checking the export exit code:
+
+```powershell
+$profile = & .\RedLight.exe --export-profile | Out-String
+if ($LASTEXITCODE -ne 0) { throw 'RedLight profile export failed.' }
+$profile | Set-Content -LiteralPath .\night.profile -Encoding utf8
+```
+
+The explicit encoding works across Windows PowerShell and PowerShell; their default file encodings differ. See [PowerShell character encoding](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_character_encoding).
+
 **Expert controls → Import settings profile from clipboard** reads a copied profile, validates it, and previews all choices before applying. Cancel or invalid input changes nothing. On confirmation, RedLight first restores any active filter, saves one complete configuration, applies available mode/luma preferences, and leaves the filter off. Backend selection applies on the next start. A restoration failure aborts import with recovery data intact; a storage failure keeps prior preferences selected and leaves the already-restored display off. Clipboard reads are bounded to 4096 bytes of UTF-8 text and never clear or replace clipboard contents.
 
 **Expert controls → Reset preferences to defaults** previews the default Luma Red/Classic, Automatic backend, Unlimited session, warnings Off, and Ctrl+Alt+R shortcut choices. Confirmation uses the same restore-before-save path as import and leaves the display off. It does not delete logs or recovery information, change clipboard contents, or restart the app. Backend selection takes effect on the next start.

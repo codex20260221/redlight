@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Added read-only `--export-profile` for scriptable backups of saved/default preferences, with canonical current-format output, legacy conversion without storage writes, noninteractive failures, and rejection of corrupt storage before output.
 - Added offline `--validate-profile=<file>` JSON validation with bounded read-only disk-file access, strict parser reasons/line numbers, checked cleanup, and preserved thread error modes; machine-readable commands report invalid arguments as JSON without help dialogs.
 - Added selected-backend request/failure counters to support reports for initialization, activation, restoration/ownership cleanup, verification, and shutdown, with an Expert reset that preserves display/recovery state and refuses in-progress operations.
 - Added optional saved expiry warnings (Off, 30 seconds, 1 minute, or 5 minutes) with one notification attempt per countdown and unchanged restoration deadlines; settings profiles export version 3 and accept version 1/2 with warnings off.

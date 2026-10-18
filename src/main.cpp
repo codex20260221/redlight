@@ -20,6 +20,7 @@
 #include "TrayStatus.h"
 #include "StatusQuery.h"
 #include "ProfileValidation.h"
+#include "ProfileExport.h"
 #include "StandardOutput.h"
 #include <cstdio>
 
@@ -112,9 +113,10 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
         Diagnostics::Shutdown();
         return 1;
     }
-    if (action == StartupAction::Invalid && options.jsonErrors) {
+    if (action == StartupAction::Invalid && options.errorOutput != StartupErrorOutput::Dialog) {
         Diagnostics::Log("Invalid machine-readable command-line request.");
-        const bool written = WriteStandardOutput("{\"protocol\":1,\"status\":\"invalid-arguments\"}\n");
+        const bool written = options.errorOutput != StartupErrorOutput::Json ||
+            WriteStandardOutput("{\"protocol\":1,\"status\":\"invalid-arguments\"}\n");
         Diagnostics::Shutdown();
         return written ? 2 : 1;
     }
@@ -128,6 +130,11 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
         Diagnostics::Shutdown();
         return result;
     }
+    if (action == StartupAction::ExportProfile) {
+        const int result = ExportSavedSettingsProfile();
+        Diagnostics::Shutdown();
+        return result;
+    }
     if (action == StartupAction::Help || action == StartupAction::Version || action == StartupAction::Invalid) {
         MessageBoxA(NULL, action == StartupAction::Version ? "RedLight " REDLIGHT_VERSION :
             "RedLight " REDLIGHT_VERSION "\n\nUsage: RedLight.exe [option]\n\n"
@@ -135,6 +142,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
             "--help: show this help\n--version: show version\n"
             "--status: report cached tray state as JSON without starting it\n"
             "--validate-profile=<file>: validate a settings file offline (JSON)\n"
+            "--export-profile: write saved/default preferences as profile text\n"
             "--backend=auto|magnification|gamma: one-start backend override\n\n"
             "Without options, start in the tray with the filter off.\n"
             "Default shortcuts: Ctrl+Alt+R toggles; Ctrl+Alt+Shift+R restores.\n"

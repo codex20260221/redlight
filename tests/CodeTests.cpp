@@ -18,6 +18,7 @@
 #include "StandardOutput.h"
 #include "StartupOptions.h"
 #include "ProfileValidation.h"
+#include "ProfileExport.h"
 #include "JsonString.h"
 #include <map>
 #include <algorithm>
@@ -87,6 +88,7 @@ struct Fake {
     unsigned stdoutWhileProfileOpen = 0;
     DWORD stdoutErrorMode = 0;
     bool diagnosticsClobbersError = false;
+    int stdoutFailOnCall = 0;
 } fake;
 
 void Reset() {
@@ -923,7 +925,7 @@ void Arguments() {
     const std::wstring_view conflict[] = {L"--restore", L"--help"};
     Check(ParseArguments(help) == S::Help && ParseArguments(version) == S::Version, "informational commands");
     const std::wstring_view status[] = {L"--status"}, statusConflict[] = {L"--status", L"--backend=gamma"};
-    Check(ParseArguments(status) == S::Status && ParseArguments(statusConflict) == S::Invalid && ParseStartupOptions(statusConflict).jsonErrors, "read-only status accepts no startup override and invalid combinations keep JSON error policy");
+    Check(ParseArguments(status) == S::Status && ParseArguments(statusConflict) == S::Invalid && ParseStartupOptions(statusConflict).errorOutput == StartupErrorOutput::Json, "read-only status accepts no startup override and invalid combinations keep JSON error policy");
     Check(ParseArguments(typo) == S::Invalid && ParseArguments(conflict) == S::Invalid, "reject ambiguity before backend initialization");
 }
 void StatusProtocolRoundTrip() {
@@ -1209,7 +1211,7 @@ void ProfileValidationOwnedPathArguments() {
         "validation owns a full Unicode-capable path with spaces");
     for (const auto bad : {L"--validate-profile=", L"--validate-profile"}) {
         const std::wstring_view input[] = {bad};
-        Check(ParseStartupOptions(input).action == StartupAction::Invalid && ParseStartupOptions(input).jsonErrors, "empty/missing path rejected without GUI error policy");
+        Check(ParseStartupOptions(input).action == StartupAction::Invalid && ParseStartupOptions(input).errorOutput == StartupErrorOutput::Json, "empty/missing path rejected without GUI error policy");
     }
     const std::wstring_view combined[] = {option, L"--status"};
     Check(ParseStartupOptions(combined).action == StartupAction::Invalid, "offline validation cannot combine with other actions");
@@ -1333,6 +1335,67 @@ void ClipboardEmbeddedNulRejection() {
     Check(fake.clipConversions == 0 && fake.clipAllocations == 0 && fake.clipOpens == 0 && fake.clipEmpties == 0 && fake.clipSets == 0 && fake.clipMemory == prior,
         "rejection occurs before conversion, allocation or clipboard mutation");
 }
+void SavedProfileExportDefaultsAndMigration() {
+    Check(ExportSavedSettingsProfile() == 0 && ParsePreferences(fake.stdoutText).preferences == AppPreferences{} && fake.registryWrites == 0,
+        "absent settings export explicit defaults without writing storage");
+    Reset();
+    PutLegacy(L"RedMode", 0); PutLegacy(L"LumaProfile", 2); PutLegacy(L"SessionLimitMinutes", 17);
+    Check(ExportSavedSettingsProfile() == 0 && ParsePreferences(fake.stdoutText).preferences == AppPreferences{RedMode::StrictRed, LumaProfile::EqualDetail, BackendPreference::Automatic, 17} &&
+        !fake.registry.contains(L"SettingsProfile") && fake.registryWrites == 0, "legacy settings export canonically without migration writes");
+    Reset();
+    const std::string v2 = "[RedLightProfile]\nversion=2\nmode=luma\nluma=green\nbackend=auto\nsession_minutes=31\nhotkeys=f10\n";
+    fake.registry[L"SettingsProfile"] = {REG_BINARY, std::vector<char>(v2.begin(), v2.end())};
+    Check(ExportSavedSettingsProfile() == 0 && fake.stdoutText.find("version=3") != std::string::npos && ParsePreferences(fake.stdoutText).preferences ==
+        AppPreferences{RedMode::LumaRed, LumaProfile::GreenDetail, BackendPreference::Automatic, 31, ShortcutProfile::F10, ExpiryWarning::Off} && fake.registryWrites == 0,
+        "older saved profiles export current complete schema without changing stored record");
+    Check(fake.profileOpens == 0 && fake.clipOpens == 0 && fake.hotkeyRegisters == 0 && fake.magInitializes == 0 && fake.dcRequests == 0 && fake.statusSends == 0,
+        "saved export does not read a profile file, use clipboard/shortcuts, start a backend or query a tray");
+}
+void SavedProfileExportPreservesRecoveryOnFailures() {
+    GammaRampFilter filter;
+    Check(filter.initialize() && filter.enable(), "active gamma backend");
+    const AppPreferences saved{RedMode::LumaRed, LumaProfile::GreenDetail, BackendPreference::Automatic, 57, ShortcutProfile::F10, ExpiryWarning::OneMinute};
+    Check(SavePreferences(saved), "seed preferred luma settings");
+    const auto reads = fake.gammaReads, writes = fake.gammaWrites, releases = fake.mutexReleases;
+    const auto statistics = filter.statistics();
+    const int registryWrites = fake.registryWrites;
+    Check(ExportSavedSettingsProfile() == 0 && ParsePreferences(fake.stdoutText).preferences == saved && fake.registryWrites == registryWrites,
+        "export preserves saved luma choices while running gamma remains strict red");
+    fake.stdoutText.clear(); fake.registryRead = false;
+    Check(ExportSavedSettingsProfile() == 1 && fake.stdoutText.empty(), "unreadable storage cannot masquerade as a successful default backup");
+    fake.registryRead = true;
+    const std::string corrupt = "not a settings profile";
+    fake.registry[L"SettingsProfile"] = {REG_BINARY, std::vector<char>(corrupt.begin(), corrupt.end())};
+    Check(ExportSavedSettingsProfile() == 1 && fake.stdoutText.empty(), "corrupt storage produces no profile output");
+    Check(SavePreferences(saved), "restore valid stored data for fault injection");
+    const auto beforeFaultWrites = fake.registryWrites;
+    {
+        TestMemory::FailNextAllocation fail;
+        Check(ExportSavedSettingsProfile() == 1 && fake.stdoutText.empty() && fake.registryWrites == beforeFaultWrites,
+            "serialization allocation failure is contained before output or storage mutation");
+    }
+    fake.stdoutChunk = 3; fake.stdoutFailOnCall = fake.stdoutWrites + 2;
+    Check(ExportSavedSettingsProfile() == 1 && fake.stdoutText.size() == 3 && !ParsePreferences(fake.stdoutText).preferences,
+        "partial output failure returns failure and cannot be parsed as a complete profile");
+    Check(filter.isActive() && filter.needsRestore() && fake.mutexOwned && fake.gammaReads == reads && fake.gammaWrites == writes && fake.mutexReleases == releases &&
+        filter.statistics() == statistics, "all export outcomes preserve active filtering, calibration snapshot and ownership without backend calls");
+    Check(filter.disable(), "ordinary recovery remains available after export failures");
+}
+void SavedProfileExportCommandPolicy() {
+    const std::wstring_view args[] = {L"--export-profile"};
+    const auto options = ParseStartupOptions(args);
+    Check(options.action == StartupAction::ExportProfile && options.errorOutput == StartupErrorOutput::LogOnly && options.profilePath.empty() && !options.backendOverride,
+        "export is a standalone profile-text action");
+    const std::wstring_view invalid[] = {L"--export-profile=file"}, conflicting[] = {L"--export-profile", L"--backend=gamma"};
+    Check(ParseStartupOptions(invalid).action == StartupAction::Invalid && ParseStartupOptions(invalid).errorOutput == StartupErrorOutput::LogOnly &&
+        ParseStartupOptions(conflicting).errorOutput == StartupErrorOutput::LogOnly, "invalid export syntax is noninteractive without adding JSON to profile stdout");
+    const std::wstring_view mixed[] = {L"--export-profile", L"--status"}, help[] = {L"--help"};
+    Check(ParseStartupOptions(mixed).action == StartupAction::Invalid && ParseStartupOptions(mixed).errorOutput == StartupErrorOutput::Json &&
+        ParseStartupOptions(help).errorOutput == StartupErrorOutput::Dialog, "JSON errors take precedence for mixed machine requests while ordinary help stays interactive");
+    fake.argumentsCount = 2; fake.arguments[1] = const_cast<LPWSTR>(L"--export-profile");
+    Check(GetStartupOptions().action == StartupAction::ExportProfile && fake.argumentFrees == 1 && !fake.argumentsOutstanding,
+        "native export argument loading retains no argv allocation");
+}
 } // namespace
 
 DWORD GetLastError() { return fake.lastError; }
@@ -1417,7 +1480,7 @@ BOOL WriteFile(HANDLE, const void* data, DWORD size, DWORD* written, void*) {
     ++fake.stdoutWrites;
     if (fake.profileHandleOpen) ++fake.stdoutWhileProfileOpen;
     fake.stdoutErrorMode = fake.errorMode;
-    if (!fake.stdoutWrite) { *written = 0; return FALSE; }
+    if (!fake.stdoutWrite || fake.stdoutFailOnCall == fake.stdoutWrites) { *written = 0; return FALSE; }
     if (fake.stdoutOverWrite) { *written = size + 1; return 1; }
     *written = fake.stdoutZeroWrite ? 0 : (std::min)(size, fake.stdoutChunk);
     fake.stdoutText.append(static_cast<const char*>(data), *written);
@@ -1576,6 +1639,8 @@ int main() {
         {"Profile validation file bounds/encoding", ProfileFileValidationBoundsAndEncoding}, {"Profile validation I/O failures", ProfileFileValidationIoFailures},
         {"Profile validation output failures", ProfileFileValidationOutputFailures}, {"Bounded JSON string encoding", BoundedJsonStringEncoding},
         {"UTF-8 scalar boundaries", Utf8ScalarBoundaries}, {"Strict profile encoding", ProfileUtf8Validation}, {"Clipboard embedded NUL rejection", ClipboardEmbeddedNulRejection},
+        {"Saved profile export defaults/migration", SavedProfileExportDefaultsAndMigration}, {"Saved profile export failure isolation", SavedProfileExportPreservesRecoveryOnFailures},
+        {"Saved profile export command policy", SavedProfileExportCommandPolicy},
         {"Command line", Arguments}
     };
     int failed = 0;
