@@ -58,6 +58,8 @@ struct Fake {
     DWORD lastError = 123;
     std::uint64_t monotonicNow = 0, magReadMilliseconds = 0, magWriteMilliseconds = 0, gammaReadMilliseconds = 0, gammaWriteMilliseconds = 0;
     unsigned backendClockReads = 0;
+    int metricMonitors = 1, metricWidth = 1920, metricHeight = 1080, metricRemote = 0;
+    unsigned metricReads = 0, unknownMetrics = 0;
     bool clipAllocate = true, clipLock = true, clipOpen = true, clipEmpty = true, clipSet = true, clipClose = true;
     bool clipConvert = true, clipSecondConvert = true;
     bool clipRead = true, clipWideConvert = true;
@@ -2839,10 +2841,97 @@ void ProfileSaveExplicitlyReplacesCorruptStorage() {
     Check(!loaded.warning && loaded.source == PreferenceSource::VersionedRecord && loaded.preferences == candidate,
         "the repaired record is a complete valid current profile and takes precedence over stale legacy values");
 }
+void DisplayContextCapturesLogicalMetrics() {
+    Check(CaptureDisplayContext() == DisplayContextSnapshot{1, 1920, 1080, false} && fake.metricReads == 4 && fake.unknownMetrics == 0,
+        "context captures only the four requested Windows metrics");
+    fake.metricMonitors = 3; fake.metricWidth = 5760; fake.metricHeight = 2160; fake.metricRemote = 7;
+    Check(CaptureDisplayContext() == DisplayContextSnapshot{3, 5760, 2160, true} && fake.metricReads == 8,
+        "all positive dimensions and any nonzero remote flag are preserved without physical-output claims");
+    Check(fake.magInitializes == 0 && fake.dcRequests == 0 && fake.magReads == 0 && fake.gammaReads == 0 && fake.magWrites == 0 && fake.gammaWrites == 0 &&
+        fake.registryReads == 0 && fake.registryWrites == 0 && fake.clipOpens == 0, "metadata capture does no backend/color, device-context, preference, or clipboard work");
+}
+void DisplayContextRejectsUnusableDimensions() {
+    for (unsigned field = 0; field < 3; ++field) for (int invalid : {0, -1}) {
+        Reset();
+        if (field == 0) fake.metricMonitors = invalid;
+        else if (field == 1) fake.metricWidth = invalid;
+        else fake.metricHeight = invalid;
+        Check(!CaptureDisplayContext() && fake.metricReads == 4, "zero/negative count or dimensions cannot become a partially valid display context");
+    }
+}
+void DisplayContextCacheRetainsOriginalAgeOnFailure() {
+    DisplayContextCache cache;
+    const DisplayContextSnapshot original{2, 3840, 1080, false};
+    cache.record(original, DisplayContextReason::Startup, 1000);
+    cache.record(std::nullopt, DisplayContextReason::DisplayChange, 9000);
+    Check(cache.snapshot() == original && cache.ageSeconds(10000) == 9 && cache.lastFailed() && cache.lastReason() == DisplayContextReason::DisplayChange &&
+        cache.captureReason() == DisplayContextReason::Startup, "failed refresh retains successful values and age while exposing its separate reason/failure");
+    cache.record(DisplayContextSnapshot{1, 0, 1080, false}, DisplayContextReason::PowerTransition, 11000);
+    Check(cache.snapshot() == original && cache.ageSeconds(12000) == 11 && cache.lastFailed(), "defensive cache validation cannot refresh stale data with invalid dimensions");
+    const DisplayContextSnapshot updated{1, 2560, 1440, true};
+    cache.record(updated, DisplayContextReason::ExplicitVerification, 13000);
+    Check(cache.snapshot() == updated && cache.ageSeconds(13000) == 0 && !cache.lastFailed() && cache.captureReason() == DisplayContextReason::ExplicitVerification,
+        "a later valid capture atomically replaces values, age, reason, and failure state");
+}
+void DisplayContextClockWrapAndNoCppAllocation() {
+    DisplayContextCache cache;
+    const auto maximum = (std::numeric_limits<std::uint64_t>::max)();
+    cache.record(DisplayContextSnapshot{1, 1920, 1080, false}, DisplayContextReason::Startup, maximum - 1000);
+    Check(cache.ageSeconds(5999) == 7, "context age tolerates unsigned monotonic wrap");
+    bool allocationUnused = false;
+    {
+        TestMemory::FailNextAllocation fail;
+        cache.record(CaptureDisplayContext(), DisplayContextReason::SessionTransition, 0);
+        allocationUnused = TestMemory::AllocationFailurePending();
+    }
+    Check(allocationUnused && cache.ageSeconds(0) == 0 && cache.ageSeconds(999) == 0 && cache.ageSeconds(1000) == 1,
+        "capture/cache recording require no C++ allocation and distinguish a genuine time-zero capture");
+}
+void DisplayContextReportUsesCachedSnapshotOnly() {
+    GammaRampFilter filter;
+    Check(filter.initialize() && filter.enable(), "active backend for cached context-report isolation");
+    SupportReportState state;
+    state.displayContext.record(CaptureDisplayContext(), DisplayContextReason::Startup, 1000);
+    state.displayContext.record(std::nullopt, DisplayContextReason::DisplayChange, 4000);
+    state.reportTick = 6000;
+    const auto metrics = fake.metricReads, clocks = fake.backendClockReads;
+    const auto reads = fake.gammaReads, writes = fake.gammaWrites;
+    const auto statistics = filter.statistics();
+    const auto report = BuildSupportReport(state);
+    Check(report.find("last refresh Display change, unavailable") != std::string::npos && report.find("Visible monitors: 1") != std::string::npos &&
+        report.find("Virtual desktop metrics: 1920 x 1080 pixels") != std::string::npos && report.find("Remote-session metric: not set") != std::string::npos &&
+        report.find("Context age: 5 seconds") != std::string::npos && report.find("Context captured after: Startup") != std::string::npos,
+        "cached report separates stale data and capture age from a failed later refresh");
+    Check(fake.metricReads == metrics && fake.backendClockReads == clocks && fake.gammaReads == reads && fake.gammaWrites == writes &&
+        filter.statistics() == statistics && filter.isActive() && filter.needsRestore(), "context reporting performs no metrics/clock/backend call or ownership change");
+    Check(filter.disable(), "restore original calibration after context diagnostics");
+}
+void DisplayContextUnavailableReportHasNoPhantomValues() {
+    SupportReportState state;
+    auto report = BuildSupportReport(state);
+    Check(report.find("Cached Windows display context: not captured") != std::string::npos && report.find("Visible monitors:") == std::string::npos,
+        "unattempted context does not invent a monitor count or geometry");
+    state.displayContext.record(std::nullopt, DisplayContextReason::PowerTransition, 0);
+    report = BuildSupportReport(state);
+    Check(report.find("last refresh Power transition, unavailable") != std::string::npos && report.find("Virtual desktop metrics:") == std::string::npos &&
+        report.find("does not qualify HDR, per-monitor backend coverage, or physical output") != std::string::npos,
+        "initial refresh failure stays explicitly unavailable and makes no display-qualification claim");
+    Check(fake.metricReads == 0 && fake.magWrites == 0 && fake.gammaWrites == 0, "formatting empty/failure context performs no native reads or writes");
+}
 } // namespace
 
 DWORD GetLastError() { return fake.lastError; }
 std::uint64_t GetTickCount64() { ++fake.backendClockReads; return fake.monotonicNow; }
+int GetSystemMetrics(int metric) {
+    ++fake.metricReads;
+    switch (metric) {
+    case SM_CMONITORS: return fake.metricMonitors;
+    case SM_CXVIRTUALSCREEN: return fake.metricWidth;
+    case SM_CYVIRTUALSCREEN: return fake.metricHeight;
+    case SM_REMOTESESSION: return fake.metricRemote;
+    default: ++fake.unknownMetrics; return 0;
+    }
+}
 void SetLastError(DWORD value) { fake.lastError = value; }
 BOOL WTSRegisterSessionNotification(HWND owner, DWORD flags) {
     ++fake.sessionRegisters; fake.sessionFlags = flags;
@@ -3193,6 +3282,9 @@ int main() {
         {"Profile save existing-guard close failure", ProfileSaveExistingGuardCloseFailure}, {"Profile save output failure after write", ProfileSaveOutputFailureDoesNotUndoSavedRecord},
         {"Profile save old format/owned path", ProfileSaveOlderFormatAndOwnedPathArguments},
         {"Explicit profile save repairs corrupt storage", ProfileSaveExplicitlyReplacesCorruptStorage},
+        {"Display context logical metric capture", DisplayContextCapturesLogicalMetrics}, {"Display context invalid dimensions", DisplayContextRejectsUnusableDimensions},
+        {"Display context retains stale values/age", DisplayContextCacheRetainsOriginalAgeOnFailure}, {"Display context wrap/allocation isolation", DisplayContextClockWrapAndNoCppAllocation},
+        {"Display context read-only cached report", DisplayContextReportUsesCachedSnapshotOnly}, {"Display context unavailable reports", DisplayContextUnavailableReportHasNoPhantomValues},
         {"Command line", Arguments}
     };
     int failed = 0;

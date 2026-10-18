@@ -18,6 +18,7 @@
 #include "PreferencesImport.h"
 #include "PreferencePreview.h"
 #include "InstanceName.h"
+#include "DisplayContext.h"
 #include "CommandIds.h"
 #include "TrayMenu.h"
 #include "SessionLimitDialog.h"
@@ -67,6 +68,7 @@ bool g_preferencesApplying = false;
 bool g_uiErrorVisible = false;
 BackendVerificationCache g_verification;
 RestorationHistory g_restorationHistory;
+DisplayContextCache g_displayContext;
 
 }
 
@@ -94,6 +96,7 @@ void RetrySelectedShortcuts();
 
 void SetLumaProfile(LumaProfile profile);
 void LogSystemInfo();
+void RefreshDisplayContext(DisplayContextReason reason);
 bool ResetDisplay();
 bool RequestRunningInstanceRestore(bool* handled);
 void ToggleRedlight();
@@ -240,7 +243,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
     }
     Diagnostics::LogFormat("Selected backend: %s; red mode: %s", g_displayFilter->name(), RedModeDisplayName(g_displayFilter->redMode()));
 
-    Diagnostics::LogFormat("Monitor count: %d", GetSystemMetrics(SM_CMONITORS));
+    RefreshDisplayContext(DisplayContextReason::Startup);
     const bool preferencesApplied = ApplyInactivePreferences(g_preferences);
     if (!InitializeTrayIcon(hInstance)) {
         ReportError("The tray controls could not be created. RedLight will exit with the filter off.");
@@ -276,6 +279,15 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
 void CloseInstanceMutex(HANDLE handle) {
     if (!ReleaseMutex(handle)) Diagnostics::LogFormat("ReleaseMutex failed (error %lu).", GetLastError());
     if (!CloseHandle(handle)) Diagnostics::LogFormat("CloseHandle failed (error %lu).", GetLastError());
+}
+
+void RefreshDisplayContext(DisplayContextReason reason) {
+    const auto snapshot = CaptureDisplayContext();
+    g_displayContext.record(snapshot, reason, GetTickCount64());
+    if (snapshot) Diagnostics::LogFormat("Display context (%s): %u monitors, virtual %u x %u pixels, remote-session flag=%s.",
+        DisplayContextReasonName(reason), snapshot->monitors, snapshot->virtualWidth, snapshot->virtualHeight,
+        snapshot->remoteSessionIndicated ? "set" : "not set");
+    else Diagnostics::LogFormat("Display context refresh (%s) unavailable; prior successful data retained.", DisplayContextReasonName(reason));
 }
 
 void PostTrayCommand(HWND hwnd, UINT command) {
@@ -863,6 +875,7 @@ void CopySupportReport(HWND owner) {
     state.verificationAgeSeconds = g_verification.ageSeconds(GetTickCount64());
     state.verificationDurationMilliseconds = g_verification.durationMilliseconds();
     state.restorationHistory = g_restorationHistory;
+    state.displayContext = g_displayContext;
     state.reportTick = GetTickCount64();
     state.redMode = RedModeDisplayName(g_displayFilter->redMode());
     state.lumaProfile = g_displayFilter->supportsRedMode(RedMode::LumaRed) ?
@@ -986,6 +999,7 @@ void VerifyBackendState(HWND owner) {
             static_cast<unsigned long long>(g_verification.durationMilliseconds().value_or(0)));
     }
     if (g_pendingRestore) RestoreFilter(RestoreReason::DeferredRequest, false);
+    RefreshDisplayContext(DisplayContextReason::ExplicitVerification);
     RefreshTrayIconTip();
     const auto& report = g_verification.result();
     const char* message = BackendVerificationName(report.state);
@@ -1121,6 +1135,7 @@ LRESULT HandleWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         g_trayAdded = false;
         Diagnostics::Log("Explorer restarted; restoring display and tray control.");
         RestoreFilter(RestoreReason::ExplorerRestart, false);
+        RefreshDisplayContext(DisplayContextReason::ExplorerRestart);
         if (!AddTrayIcon()) ScheduleTrayRecovery();
         return 0;
     }
@@ -1258,11 +1273,13 @@ LRESULT HandleWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
     case WM_DISPLAYCHANGE:
         Diagnostics::Log("Display configuration changed; restoring filter. Re-enable manually.");
         RestoreFilter(RestoreReason::DisplayChange, false);
+        RefreshDisplayContext(DisplayContextReason::DisplayChange);
         return 0;
     case WM_POWERBROADCAST:
         if (wParam == PBT_APMSUSPEND || wParam == PBT_APMRESUMEAUTOMATIC || wParam == PBT_APMRESUMESUSPEND) {
             Diagnostics::Log("Power transition; restoring filter. Re-enable manually.");
             RestoreFilter(RestoreReason::PowerTransition, false);
+            RefreshDisplayContext(DisplayContextReason::PowerTransition);
         }
         return TRUE;
     case WM_WTSSESSION_CHANGE:
@@ -1270,6 +1287,7 @@ LRESULT HandleWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             wParam == WTS_CONSOLE_DISCONNECT || wParam == WTS_REMOTE_DISCONNECT) {
             Diagnostics::Log("Session transition; restoring filter. Re-enable manually.");
             RestoreFilter(RestoreReason::SessionTransition, false);
+            RefreshDisplayContext(DisplayContextReason::SessionTransition);
         }
         return 0;
     case WM_QUERYENDSESSION:

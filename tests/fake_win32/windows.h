@@ -16,6 +16,8 @@ constexpr DWORD ERROR_INVALID_PARAMETER = 87;
 constexpr DWORD ERROR_INVALID_STATE = 5023;
 DWORD GetLastError();
 std::uint64_t GetTickCount64();
+constexpr int SM_CMONITORS = 80, SM_CXVIRTUALSCREEN = 78, SM_CYVIRTUALSCREEN = 79, SM_REMOTESESSION = 0x1000;
+int GetSystemMetrics(int);
 HDC GetDC(HWND);
 int ReleaseDC(HWND, HDC);
 BOOL GetDeviceGammaRamp(HDC, void*);

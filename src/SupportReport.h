@@ -3,6 +3,7 @@
 #include "ShortcutDiagnostics.h"
 #include "RestorationHistory.h"
 #include "SessionTimer.h"
+#include "DisplayContext.h"
 #include <cstdint>
 #include <optional>
 #include <sstream>
@@ -42,6 +43,7 @@ struct SupportReportState {
     std::optional<std::uint64_t> expiryRetryMilliseconds;
     RestorationHistory restorationHistory;
     std::uint64_t reportTick = 0;
+    DisplayContextCache displayContext;
 };
 inline std::string BuildSupportReport(const SupportReportState& state) {
     std::ostringstream report;
@@ -117,6 +119,18 @@ inline std::string BuildSupportReport(const SupportReportState& state) {
     counts("Shutdown", state.backendStatistics.shutdown);
     report << "\r\nCounters include idempotent requests and nested recovery calls."
         << "\r\nTiming uses elapsed tick milliseconds, includes failures/no-ops/nested calls, and overlaps across categories."
+        << "\r\nCached Windows display context: ";
+    if (!state.displayContext.attempted()) report << "not captured";
+    else report << "last refresh " << DisplayContextReasonName(state.displayContext.lastReason()) << ", "
+        << (state.displayContext.lastFailed() ? "unavailable (prior successful data retained if present)" : "succeeded");
+    if (state.displayContext.snapshot()) {
+        const auto& context = *state.displayContext.snapshot();
+        report << "\r\nVisible monitors: " << context.monitors << "\r\nVirtual desktop metrics: " << context.virtualWidth << " x " << context.virtualHeight << " pixels"
+            << "\r\nRemote-session metric: " << (context.remoteSessionIndicated ? "set" : "not set")
+            << "\r\nContext captured after: " << DisplayContextReasonName(state.displayContext.captureReason())
+            << "\r\nContext age: " << state.displayContext.ageSeconds(state.reportTick).value_or(0) << " seconds";
+    }
+    report << "\r\nContext is logical cached Windows data; it does not qualify HDR, per-monitor backend coverage, or physical output."
         << "\r\nRecent tray restoration requests (newest completed scope first; age since request):";
     if (!state.restorationHistory.size()) report << "\r\n  none recorded";
     for (std::size_t index = 0; index < state.restorationHistory.size(); ++index) {
