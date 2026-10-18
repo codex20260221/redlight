@@ -136,7 +136,7 @@ Do not run software you do not trust. RedLight is provided as-is and without war
 * With a running instance, reset mode asks that instance to restore its saved state. A busy or unresponsive instance is not bypassed.
 * Without a running instance, reset mode applies an identity Magnification matrix. This clears Magnification color effects, including those from other tools; it cannot recover a lost gamma-ramp snapshot after a crash.
 * Exit codes: `0` for success (including an already-running instance), `1` for startup/recovery failure, and `2` for invalid arguments. `--help` and `--version` display informational dialogs. Options are case-sensitive and exactly one option is accepted.
-* Logs support Unicode Windows profile paths. Rotation at startup keeps up to three archives when the current log exceeds 1 MiB.
+* Logs support Unicode Windows profile paths. Rotation runs at startup and before a write would push the current log past a 1 MiB target, retaining up to three archives. Long records are truncated with a marker. About/support reports show file-logging health, missing/truncated record counts, and the last file error. If rotation or storage fails, affected disk writes are skipped and debugger output continues; **Expert controls → Retry file logging** can retry after the underlying problem is fixed. Earlier missing-record counts remain visible after recovery. Rotation and size checks are best effort when other processes or filesystem restrictions interfere.
 * To remove RedLight, exit it, delete its folder, and optionally delete `%LOCALAPPDATA%\RedLight` and the `HKCU\Software\RedLight` registry key. No service or startup entry is installed.
 
 ## Building from Source
@@ -176,7 +176,7 @@ cpack --config build/CPackConfig.cmake -C Release -B build/packages
 ./tools/Verify-Package.ps1
 ```
 
-The code-test target compiles the production backends against fake Win32 headers and functions. Its import check permits only KERNEL32.dll. It exercises the color matrices and backend failure/recovery paths without access to display APIs. Build the manual probe only when explicitly wanted with `-DREDLIGHT_BUILD_PROBE=ON`; it is excluded by default and is never a CTest test.
+The code-test targets compile production backends and supporting helpers against fake Win32 functions. The import check permits only KERNEL32.dll for both executables. Tests cover transforms/recovery, preferences, timers, clipboard, shortcuts, and logging; display, registry, clipboard, and diagnostics-file operations use fakes. The diagnostics suite also checks concurrent records and runtime rotation in memory. Build the manual probe only when explicitly wanted with `-DREDLIGHT_BUILD_PROBE=ON`; it is excluded by default and is never a CTest test.
 
 The ZIP includes the executable, SHA-256 checksum, license, README, changelog, and documentation. Verify a downloaded executable with `Get-FileHash .\RedLight.exe -Algorithm SHA256` against its published checksum. SHA-256 identifies the file; it does not establish publisher trust.
 

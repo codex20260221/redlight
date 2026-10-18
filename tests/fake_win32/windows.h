@@ -3,6 +3,8 @@
 #error Fake Win32 headers must never be used by RedLight
 #endif
 #include <cstddef>
+#include <cstdint>
+#include <mutex>
 using BOOL = int;
 using DWORD = unsigned long;
 using WORD = unsigned short;
@@ -59,3 +61,38 @@ int WideCharToMultiByte(unsigned, DWORD, const wchar_t*, int, char*, int, const 
 constexpr unsigned MOD_NOREPEAT = 0x4000;
 BOOL RegisterHotKey(HWND, int, unsigned, unsigned);
 BOOL UnregisterHotKey(HWND, int);
+
+using ULONGLONG = unsigned long long;
+struct LARGE_INTEGER { long long QuadPart; };
+struct SYSTEMTIME { WORD wYear, wMonth, wDayOfWeek, wDay, wHour, wMinute, wSecond, wMilliseconds; };
+struct SRWLOCK { std::mutex mutex; };
+#define SRWLOCK_INIT {}
+#define INVALID_HANDLE_VALUE reinterpret_cast<HANDLE>(static_cast<std::intptr_t>(-1))
+constexpr DWORD ERROR_PATH_NOT_FOUND = 3;
+constexpr DWORD ERROR_NOT_ENOUGH_MEMORY = 8;
+constexpr DWORD ERROR_WRITE_FAULT = 29;
+constexpr DWORD ERROR_DISK_FULL = 112;
+constexpr DWORD ERROR_ALREADY_EXISTS = 183;
+constexpr DWORD ERROR_ENVVAR_NOT_FOUND = 203;
+constexpr DWORD ERROR_FILENAME_EXCED_RANGE = 206;
+constexpr DWORD ERROR_DIRECTORY = 267;
+constexpr DWORD FILE_APPEND_DATA = 4;
+constexpr DWORD FILE_READ_ATTRIBUTES = 128;
+constexpr DWORD FILE_SHARE_READ = 1, FILE_SHARE_WRITE = 2, FILE_SHARE_DELETE = 4;
+constexpr DWORD OPEN_ALWAYS = 4;
+constexpr DWORD FILE_ATTRIBUTE_NORMAL = 128, FILE_ATTRIBUTE_DIRECTORY = 16;
+constexpr DWORD INVALID_FILE_ATTRIBUTES = 0xfffffffful;
+constexpr DWORD MOVEFILE_REPLACE_EXISTING = 1;
+void AcquireSRWLockExclusive(SRWLOCK*);
+void ReleaseSRWLockExclusive(SRWLOCK*);
+DWORD GetEnvironmentVariableW(const wchar_t*, wchar_t*, DWORD);
+BOOL CreateDirectoryW(const wchar_t*, void*);
+DWORD GetFileAttributesW(const wchar_t*);
+HANDLE CreateFileW(const wchar_t*, DWORD, DWORD, void*, DWORD, DWORD, HANDLE);
+BOOL MoveFileExW(const wchar_t*, const wchar_t*, DWORD);
+BOOL CloseHandle(HANDLE);
+BOOL GetFileSizeEx(HANDLE, LARGE_INTEGER*);
+BOOL WriteFile(HANDLE, const void*, DWORD, DWORD*, void*);
+BOOL FlushFileBuffers(HANDLE);
+void GetLocalTime(SYSTEMTIME*);
+void OutputDebugStringA(const char*);

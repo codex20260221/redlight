@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Added file-logging health, missing/truncated record counts, and last file errors to About/support reports, plus an Expert retry command that confirms recovery with an actual log write.
 - Added saved shortcut profiles for Ctrl+Alt+R, Ctrl+Alt+F9, Ctrl+Alt+F10, or disabled shortcuts; restore adds Shift. Track actual bindings through registration/rollback failures and reject stale queued shortcut messages. Settings profiles now export version 2 while accepting version 1 with default shortcuts.
 - Added a native Custom auto-restore time-limit dialog for 0–240 whole minutes, with validation, cancellation, and protection against truncated pasted input.
 - Added explicit read-only backend-state verification, showing software read-back mismatches/unavailability in the tray and support report without reapplying the filter or discarding recovery data.
@@ -24,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added command-line help/version dialogs and explicit rejection of unknown or conflicting options.
 
 ### Changed
+- Rotate logs during long sessions at the 1 MiB target with up to three archives; use fixed record buffers/cached paths and serialize writes, rotation, status reads, and shutdown. Logging failures fall back to debugger output without allowing failed rotation to grow the file indefinitely.
 - Grouped backend policy, verification, reports, and profile transfer under Expert controls while keeping toggle/restore/modes first; added distinct menu accelerators, visible shortcut-conflict labels, and explicit submenu ownership cleanup.
 - Persist preferences in one validated, versioned record to avoid partial multi-key saves; migrate prior values read-only until the next save, report invalid storage, and show unsaved changes in About/support reports.
 - Capture the most recent display state before every activation; refuse activation when capture fails.
@@ -35,6 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Support Unicode diagnostics paths and report log-write failures to the debugger.
 
 ### Fixed
+- Retain failed-close log handles for retry, preserve write/flush/rotation error details, count partial/missing records, and reject ordinary files masquerading as the diagnostics directory.
 - Prevent automatic fallback when a failed Magnification initialization still cannot release its backend resources.
 - Detect silently rejected gamma writes through significant-byte read-back and attempt rollback without claiming a failed enable is active.
 - Preserve gamma restoration data even when a partial write and rollback both fail; avoid overwriting calibration on inactive shutdown.

@@ -355,6 +355,9 @@ void SupportReportStates() {
     report = BuildSupportReport(state);
     Check(report.find("State: Recovery needed") != std::string::npos && report.find("restore failed") != std::string::npos, "recovery status takes priority over prior active state");
     Check(report.find("no display output is measured") != std::string::npos, "report describes evidence scope");
+    state.fileLogging = "Degraded"; state.droppedLogLines = 7; state.truncatedLogLines = 2; state.lastFileError = 5;
+    report = BuildSupportReport(state);
+    Check(report.find("Missing file records: 7") != std::string::npos && report.find("Last file error: 5") != std::string::npos, "logging failures are visible even when no disk log is available");
 }
 void ClipboardAllocationAndOpenFailures() {
     fake.clipAllocate = false;
@@ -741,8 +744,8 @@ BOOL UnregisterHotKey(HWND, int id) {
     return fake.registeredHotkeys.erase(id) != 0;
 }
 namespace Diagnostics {
-void Log(const char*) {}
-void LogFormat(const char*, ...) {}
+void Log(const char*) noexcept {}
+void LogFormat(const char*, ...) noexcept {}
 }
 int main() {
     const std::pair<const char*, void(*)()> tests[] = {

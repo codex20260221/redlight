@@ -12,6 +12,9 @@ struct SupportReportState {
     bool commandLineOverride = false;
     bool preferencesUnsaved = false;
     std::string_view shortcutProfile = "Default", toggleBinding = "none", restoreBinding = "none";
+    std::string_view fileLogging = "Not reported";
+    std::uint64_t droppedLogLines = 0, truncatedLogLines = 0;
+    std::uint32_t lastFileError = 0;
     bool active = false, needsRestore = false;
     bool toggleHotkey = false, restoreHotkey = false, sessionNotifications = false;
     unsigned sessionMinutes = 0;
@@ -38,7 +41,9 @@ inline std::string BuildSupportReport(const SupportReportState& state) {
     report << "\r\nCountdown: ";
     if (state.remainingSeconds) report << *state.remainingSeconds << " seconds remaining";
     else report << "not armed";
-    report << "\r\nLast backend error: " << (state.lastError.empty() ? "none" : state.lastError)
+    report << "\r\nFile logging: " << state.fileLogging << "\r\nMissing file records: " << state.droppedLogLines
+        << "\r\nTruncated records: " << state.truncatedLogLines << "\r\nLast file error: " << state.lastFileError
+        << "\r\nLast backend error: " << (state.lastError.empty() ? "none" : state.lastError)
         << "\r\nStatus reflects backend call results; no display output is measured.\r\n";
     return report.str();
 }

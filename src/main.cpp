@@ -684,6 +684,11 @@ void CopySupportReport(HWND owner) {
     state.nextStartupPolicy = BackendPreferenceName(g_backendPreference);
     state.commandLineOverride = g_backendOverride;
     state.preferencesUnsaved = g_preferencesUnsaved;
+    const auto logging = Diagnostics::GetStatus();
+    state.fileLogging = Diagnostics::FileStateName(logging.file);
+    state.droppedLogLines = logging.droppedLines;
+    state.truncatedLogLines = logging.truncatedLines;
+    state.lastFileError = logging.lastFileError;
     state.verification = g_verification;
     state.redMode = RedModeDisplayName(g_displayFilter->redMode());
     state.lumaProfile = g_displayFilter->supportsRedMode(RedMode::LumaRed) ?
@@ -795,9 +800,11 @@ void VerifyBackendState(HWND owner) {
 }
 
 void ShowAboutDialog(HWND parent) {
-    char aboutText[1024];
+    char aboutText[1536];
+    const auto logging = Diagnostics::GetStatus();
     sprintf_s(aboutText, "RedLight " REDLIGHT_VERSION "\n\nBackend: %s\nStartup selection: %s%s\nNext start: %s\nMode: %s\nLuma detail: %s\nStatus: %s\nSettings: %s\n\n"
         "Toggle shortcut: %s\nRestore shortcut: %s\nShortcut preference: %s\nSession recovery: %s\n\n"
+        "File logging: %s\nMissing file records: %llu\nTruncated records: %llu\nLast file error: %lu\n\n"
         "Logs: %%LOCALAPPDATA%%\\RedLight\nUnsigned release candidate\n"
         "github.com/michaelmawhinney/redlight",
         g_displayFilter->name(), BackendPreferenceName(g_startupBackendPreference),
@@ -809,7 +816,9 @@ void ShowAboutDialog(HWND parent) {
         g_hotkeys.toggle() ? ShortcutBindingName(*g_hotkeys.toggle()) : "Unavailable/disabled",
         g_hotkeys.restore() ? ShortcutBindingName(*g_hotkeys.restore()) : "Unavailable/disabled",
         ShortcutProfileName(g_preferences.shortcuts),
-        g_sessionNotifications ? "Available" : "Unavailable (registration failed)");
+        g_sessionNotifications ? "Available" : "Unavailable (registration failed)",
+        Diagnostics::FileStateName(logging.file), static_cast<unsigned long long>(logging.droppedLines),
+        static_cast<unsigned long long>(logging.truncatedLines), static_cast<unsigned long>(logging.lastFileError));
     MessageBoxA(parent, aboutText, "About RedLight", MB_OK | MB_ICONINFORMATION);
 }
 
@@ -905,6 +914,11 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         case ID_TRAY_MODE_LUMA_RED: SetRedModeFromTray(RedMode::LumaRed); break;
         case ID_TRAY_ABOUT: ShowAboutDialog(hwnd); break;
         case ID_TRAY_COPY_REPORT: CopySupportReport(hwnd); break;
+        case ID_TRAY_RETRY_LOGGING:
+            if (Diagnostics::RetryFileLogging()) {
+                ConfirmClipboardCopy("RedLight file logging available", "File logging recovered. Earlier missing-record counts remain in the support report.");
+            } else ReportError("File logging is still unavailable or degraded. About and support reports show the last file error. Debugger output remains available.");
+            break;
         case ID_TRAY_VERIFY_BACKEND: VerifyBackendState(hwnd); break;
         case ID_TRAY_COPY_PROFILE: CopySettingsProfile(hwnd); break;
         case ID_TRAY_IMPORT_PROFILE: ImportSettingsProfile(hwnd); break;

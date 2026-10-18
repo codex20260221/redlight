@@ -63,6 +63,7 @@ HMENU BuildTrayMenu(const TrayMenuState& state) {
     if (!expert.child(shortcuts, "&Shortcut profile") || !expert.child(backend, "&Backend preference (next start)") ||
         !expert.add(ID_TRAY_VERIFY_BACKEND, "&Verify backend state") ||
         !expert.add(ID_TRAY_COPY_REPORT, "&Copy support report") ||
+        !expert.add(ID_TRAY_RETRY_LOGGING, "&Retry file logging") ||
         !expert.add(0, NULL, MF_SEPARATOR) ||
         !expert.add(ID_TRAY_COPY_PROFILE, "&Export settings profile to clipboard") ||
         !expert.add(ID_TRAY_IMPORT_PROFILE, "&Import settings profile from clipboard")) return NULL;
