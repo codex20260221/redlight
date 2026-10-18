@@ -133,8 +133,6 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
     Diagnostics::Initialize();
     Diagnostics::Log("RedLight " REDLIGHT_VERSION " starting.");
     Diagnostics::LogFormat("Build revision: %s (%s).", REDLIGHT_BUILD_REVISION, REDLIGHT_SOURCE_STATE);
-    LogSystemInfo();
-
     const StartupOptions options = GetStartupOptions();
     const StartupAction action = options.action;
     if (action == StartupAction::Failed) {
@@ -213,6 +211,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
         return !shown ? 1 : (action == StartupAction::Invalid ? 2 : 0);
     }
     if (action == StartupAction::Restore) {
+        LogSystemInfo();
         const bool resetSucceeded = ResetDisplay();
         Diagnostics::LogFormat("RedLight reset mode completed with %s.", resetSucceeded ? "success" : "failure");
         if (!resetSucceeded) ReportError("Display recovery failed. The running instance may be busy, or no saved gamma ramp is available. See %LOCALAPPDATA%\\RedLight\\redlight.log.");
@@ -239,6 +238,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
         return 0;
     }
 
+    LogSystemInfo();
     const LoadedPreferences loadedPreferences = LoadPreferences();
     g_startupPreferenceSource = loadedPreferences.source;
     g_startupPreferenceWarning = loadedPreferences.warning;
