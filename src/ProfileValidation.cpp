@@ -1,4 +1,5 @@
 #include "ProfileValidation.h"
+#include "ProfileComparison.h"
 #include "Preferences.h"
 #include "JsonString.h"
 #include "StandardOutput.h"
@@ -8,6 +9,7 @@
 #include <cstdio>
 
 namespace {
+enum class ProfileFileAction { Validate, Normalize, Compare };
 struct File {
     explicit File(HANDLE value) noexcept : handle(value) {}
     ~File() { close(); }
@@ -92,7 +94,8 @@ int WriteResult(std::string_view text, int exitCode) noexcept {
     Diagnostics::Log("Offline profile command could not write standard output; discard any partial output.");
     return 1;
 }
-int ProfileFileCommand(const wchar_t* path, bool normalize) {
+int ProfileFileCommand(const wchar_t* path, ProfileFileAction action) {
+    const bool normalize = action == ProfileFileAction::Normalize;
     const auto read = ReadProfile(path);
     char output[1024];
     int length = 0;
@@ -106,6 +109,7 @@ int ProfileFileCommand(const wchar_t* path, bool normalize) {
     } else {
         const auto parsed = ParsePreferences(std::string_view(read.bytes.data(), read.length));
         if (parsed.preferences) {
+            if (action == ProfileFileAction::Compare) return CompareSavedSettingsProfile(*parsed.preferences);
             if (normalize) {
                 const auto text = SerializePreferences(*parsed.preferences);
                 if (!text) { Diagnostics::Log("Offline profile normalization could not serialize the validated settings."); return 1; }
@@ -135,7 +139,7 @@ int ProfileFileCommand(const wchar_t* path, bool normalize) {
 }
 
 int ValidateSettingsProfileFile(const wchar_t* path) noexcept {
-    try { return ProfileFileCommand(path, false); }
+    try { return ProfileFileCommand(path, ProfileFileAction::Validate); }
     catch (...) {
         Diagnostics::Log("Offline profile validation failed while constructing its result.");
         return 1;
@@ -143,9 +147,17 @@ int ValidateSettingsProfileFile(const wchar_t* path) noexcept {
 }
 
 int NormalizeSettingsProfileFile(const wchar_t* path) noexcept {
-    try { return ProfileFileCommand(path, true); }
+    try { return ProfileFileCommand(path, ProfileFileAction::Normalize); }
     catch (...) {
         Diagnostics::Log("Offline profile normalization failed before complete output; discard any partial output.");
+        return 1;
+    }
+}
+
+int CompareSettingsProfileFile(const wchar_t* path) noexcept {
+    try { return ProfileFileCommand(path, ProfileFileAction::Compare); }
+    catch (...) {
+        Diagnostics::Log("Offline profile-file comparison failed before complete output.");
         return 1;
     }
 }

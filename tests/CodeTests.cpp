@@ -20,6 +20,7 @@
 #include "StartupOptions.h"
 #include "ProfileValidation.h"
 #include "ProfileExport.h"
+#include "ProfileComparison.h"
 #include "JsonString.h"
 #include "BackendComparison.h"
 #include "SessionNotifications.h"
@@ -2291,6 +2292,117 @@ void MagFailedActivationRecoveryWithoutCppAllocation() {
     Check(!result && allocationUnused && Same(fake.effect, captured) && !filter.isActive() && !filter.needsRestore(),
         "failed activation and immediate rollback require no C++ heap allocation");
 }
+AppPreferences ComparisonCandidate(unsigned mask) {
+    AppPreferences value;
+    if (mask & 1) value.mode = RedMode::StrictRed;
+    if (mask & 2) value.luma = LumaProfile::EqualDetail;
+    if (mask & 4) value.backend = BackendPreference::Gamma;
+    if (mask & 8) value.sessionMinutes = 240;
+    if (mask & 16) value.shortcuts = ShortcutProfile::Disabled;
+    if (mask & 32) value.expiryWarning = ExpiryWarning::FiveMinutes;
+    return value;
+}
+void ProfileComparisonAllFieldsAndMasks() {
+    for (unsigned mask = 0; mask < 64; ++mask) {
+        const auto candidate = ComparisonCandidate(mask);
+        Check(ProfileDifferenceMask(candidate, {}) == mask && ProfileDifferenceMask({}, candidate) == mask && ProfileDifferenceMask(candidate, candidate) == 0u,
+            "all field combinations compare symmetrically without differences for identical preferences");
+        Reset();
+        Check(CompareSavedSettingsProfile(candidate) == (mask ? 5 : 0), "comparison exit code distinguishes semantic differences from errors");
+        for (unsigned index = 0; index < ProfileDifferenceFieldNames.size(); ++index) {
+            const auto field = std::string("\"") + ProfileDifferenceFieldNames[index] + "\"";
+            Check((fake.stdoutText.find(field) != std::string::npos) == ((mask & (1u << index)) != 0),
+                "JSON lists exactly the changed setting names without values");
+        }
+        Check(fake.stdoutText.starts_with("{\"protocol\":1,") && fake.stdoutText.ends_with("]}\n") && fake.registryWrites == 0,
+            "each field combination produces complete JSON without storage writes");
+    }
+}
+void ProfileComparisonFileReadOnly() {
+    MagnificationFilter filter;
+    Check(filter.initialize() && filter.enable(), "active backend for comparison isolation");
+    const auto saved = ComparisonCandidate(63);
+    Check(SavePreferences(saved), "seed complete saved preferences");
+    const auto writes = fake.magWrites, reads = fake.magReads, registryWrites = fake.registryWrites;
+    const auto statistics = filter.statistics();
+    fake.profileData = *SerializePreferences(saved); fake.profileChunk = 2; fake.stdoutChunk = 3;
+    Check(CompareSettingsProfileFile(L"C:\\profiles\\赤 光.txt") == 0 && fake.stdoutText ==
+        "{\"protocol\":1,\"status\":\"profiles-match\",\"match\":true,\"differences\":[]}\n",
+        "matching file and saved preferences produce exact successful JSON through partial reads/writes");
+    Check(fake.profileAccess == GENERIC_READ && !fake.profileHandleOpen && fake.stdoutWhileProfileOpen == 0 && fake.stdoutErrorMode == 2 && fake.errorMode == 2 &&
+        fake.registryReads > 0 && fake.registryWrites == registryWrites && fake.magWrites == writes && fake.magReads == reads && filter.statistics() == statistics &&
+        filter.isActive() && filter.needsRestore() && fake.statusSends == 0 && fake.clipOpens == 0 && fake.hotkeyRegisters == 0 && fake.sessionRegisters == 0,
+        "comparison cleans input before output and only reads saved preferences, retaining backend/counters/ownership");
+    Check(filter.disable(), "comparison leaves the original restoration snapshot usable");
+}
+void ProfileComparisonOlderAndLegacyDefaults() {
+    fake.profileData = "# older format\n[RedLightProfile]\nversion=1\nmode=luma\nluma=classic\nbackend=auto\nsession_minutes=0\n";
+    Check(CompareSettingsProfileFile(L"old.profile") == 0 && fake.registryWrites == 0 && fake.stdoutText.find("\"match\":true") != std::string::npos,
+        "old profile defaults compare semantically to absent saved settings without migration writes");
+    Reset(); PutLegacy(L"RedMode", 0); PutLegacy(L"LumaProfile", 2); PutLegacy(L"SessionLimitMinutes", 17);
+    fake.profileData = *SerializePreferences({RedMode::StrictRed, LumaProfile::EqualDetail, BackendPreference::Automatic, 17});
+    Check(CompareSettingsProfileFile(L"legacy.profile") == 0 && fake.registryWrites == 0 && !fake.registry.contains(L"SettingsProfile"),
+        "valid legacy saved values compare read-only without creating a new record");
+}
+void ProfileComparisonInputFailureGates() {
+    fake.profileData = "[RedLightProfile]\nversion=999\n";
+    Check(CompareSettingsProfileFile(L"invalid.profile") == 4 && fake.registryReads == 0 && fake.stdoutText.find("invalid-profile") != std::string::npos,
+        "invalid candidate JSON retains parser reasons and never reads persisted preferences");
+    Reset(); fake.profileOpen = false;
+    Check(CompareSettingsProfileFile(L"missing.profile") == 1 && fake.registryReads == 0 && fake.stdoutText.find("file-error") != std::string::npos,
+        "input-file failures remain JSON errors before preference access");
+    Reset(); fake.profileData = *SerializePreferences({}); fake.profileClose = false;
+    Check(CompareSettingsProfileFile(L"close.profile") == 1 && fake.registryReads == 0 && fake.profileCloses == 2 && fake.stdoutText.find("\"stage\":\"close\"") != std::string::npos,
+        "unconfirmed input cleanup blocks preference comparison and retries close");
+}
+void ProfileComparisonStoredFailureRefusal() {
+    PutLegacy(L"RedMode", 1); fake.registry[L"SettingsProfile"] = {REG_BINARY, {'b','a','d'}};
+    fake.profileData = *SerializePreferences({});
+    Check(CompareSettingsProfileFile(L"valid.profile") == 1 && fake.stdoutText == "{\"protocol\":1,\"status\":\"settings-error\",\"match\":null}\n" && fake.registryWrites == 0,
+        "corrupt versioned storage cannot masquerade as matching defaults or fall back to stale legacy settings");
+    Reset(); fake.registryRead = false;
+    Check(CompareSavedSettingsProfile({}) == 1 && fake.stdoutText.find("settings-error") != std::string::npos && fake.registryWrites == 0,
+        "unreadable storage is a comparison error, not semantic difference");
+    Reset(); auto invalid = AppPreferences{}; invalid.sessionMinutes = 241;
+    Check(!ProfileDifferenceMask(invalid, {}) && !ProfileDifferenceMask({}, invalid) && CompareSavedSettingsProfile(invalid) == 4 && fake.registryReads == 0,
+        "defensive invalid preferences never reach the registry or a fabricated comparison");
+}
+void ProfileComparisonOutputAndAllocationFailures() {
+    fake.stdoutChunk = 5; fake.stdoutFailOnCall = 2;
+    Check(CompareSavedSettingsProfile(ComparisonCandidate(63)) == 1 && fake.stdoutText.size() == 5 && fake.registryWrites == 0,
+        "partial JSON output reports failure instead of a misleading difference result");
+    Reset(); fake.stdoutWrite = false;
+    Check(CompareSavedSettingsProfile({}) == 1 && fake.stdoutText.empty(), "matching settings cannot hide output failure");
+    Reset(); fake.stdoutValid = false; fake.consoleAttach = false;
+    Check(CompareSavedSettingsProfile(ComparisonCandidate(1)) == 1 && fake.stdoutText.empty(), "no parent output remains a noninteractive failure");
+    Reset();
+    {
+        TestMemory::FailNextAllocation fail; // The fake registry lookup owns its key string.
+        Check(CompareSavedSettingsProfile({}) == 1 && fake.stdoutText.empty() && fake.registryWrites == 0,
+            "internal allocation failure during a fake storage read is contained before comparison output");
+    }
+}
+void ProfileComparisonOwnedPathArguments() {
+    std::wstring option = L"--compare-profile=C:\\profiles\\赤 光.txt";
+    const std::wstring_view args[] = {option};
+    const auto options = ParseStartupOptions(args);
+    option.assign(L"replaced option storage");
+    Check(options.action == StartupAction::CompareProfile && options.errorOutput == StartupErrorOutput::Json &&
+        options.profilePath == L"C:\\profiles\\赤 光.txt" && !options.backendOverride, "comparison owns a Unicode path and uses JSON argument errors");
+    for (const auto bad : {L"--compare-profile", L"--compare-profile=", L"--compare-profile-extra"}) {
+        const std::wstring_view input[] = {bad};
+        Check(ParseStartupOptions(input).action == StartupAction::Invalid && ParseStartupOptions(input).errorOutput == StartupErrorOutput::Json,
+            "missing or malformed comparison paths stay noninteractive");
+    }
+    const std::wstring_view mixed[] = {L"--compare-profile=file", L"--normalize-profile=other"};
+    Check(ParseStartupOptions(mixed).action == StartupAction::Invalid && ParseStartupOptions(mixed).errorOutput == StartupErrorOutput::Json,
+        "comparison rejects combined commands and keeps JSON error precedence");
+    option = L"--compare-profile=long enough for owned path allocation.profile"; fake.argumentsCount = 2; fake.arguments[1] = option.data();
+    {
+        TestMemory::FailNextAllocation fail(1);
+        Check(GetStartupOptions().action == StartupAction::Failed && !fake.argumentsOutstanding, "failed owned comparison path releases native argv");
+    }
+}
 } // namespace
 
 DWORD GetLastError() { return fake.lastError; }
@@ -2591,6 +2703,10 @@ int main() {
         {"Mag failed activation rollback/latest capture", MagFailedActivationRollbackRestoresLatestCapture}, {"Mag failed activation preserves snapshot", MagFailedActivationKeepsSnapshotUntilRecovery},
         {"Mag unconfirmed rollback/shutdown ownership", MagUnconfirmedRollbackAndShutdownRetainOwnership}, {"Mag ordinary activation failure rollback/error", MagFailedActivationWithoutMutationStillChecksRollback},
         {"Mag partial activation verification/status", MagFailedActivationVerificationDoesNotClaimActive}, {"Mag activation recovery without C++ allocation", MagFailedActivationRecoveryWithoutCppAllocation},
+        {"Profile comparison all field combinations", ProfileComparisonAllFieldsAndMasks}, {"Profile file comparison read-only isolation", ProfileComparisonFileReadOnly},
+        {"Profile comparison older/legacy defaults", ProfileComparisonOlderAndLegacyDefaults}, {"Profile comparison input failure gates", ProfileComparisonInputFailureGates},
+        {"Profile comparison stored-data refusal", ProfileComparisonStoredFailureRefusal}, {"Profile comparison output/allocation failures", ProfileComparisonOutputAndAllocationFailures},
+        {"Profile comparison owned path arguments", ProfileComparisonOwnedPathArguments},
         {"Command line", Arguments}
     };
     int failed = 0;

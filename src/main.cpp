@@ -153,6 +153,11 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
         Diagnostics::Shutdown();
         return result;
     }
+    if (action == StartupAction::CompareProfile) {
+        const int result = CompareSettingsProfileFile(options.profilePath.c_str());
+        Diagnostics::Shutdown();
+        return result;
+    }
     if (action == StartupAction::ExportProfile) {
         const int result = ExportSavedSettingsProfile();
         Diagnostics::Shutdown();
@@ -167,6 +172,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
             "--status: report cached tray state as JSON without starting it\n"
             "--validate-profile=<file>: validate a settings file offline (JSON)\n"
             "--normalize-profile=<file>: write a canonical current-format profile\n"
+            "--compare-profile=<file>: compare with saved preferences (JSON)\n"
             "--export-profile: write saved/default preferences as profile text\n"
             "--backend=auto|magnification|gamma: one-start backend override\n\n"
             "Without options, start in the tray with the filter off.\n"
