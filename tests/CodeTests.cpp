@@ -11,6 +11,7 @@
 #include "PreferencesImport.h"
 #include "HotkeyManager.h"
 #include "CommandIds.h"
+#include "MemoryFault.h"
 #include <map>
 #include "Clipboard.h"
 #include <limits>
@@ -647,6 +648,35 @@ void DefaultPreferencesRestoreActiveGamma() {
     Check(LoadPreferences().preferences == AppPreferences{}, "default reset replaces complete configuration including shortcut/timer choices");
     Check(fake.gammaWrites == 2, "reset never enables a filter after restoration");
 }
+void PreferenceSaveAllocationFailure() {
+    MagnificationFilter filter;
+    Check(filter.initialize() && filter.enable(), "active filter");
+    const AppPreferences before;
+    Check(SavePreferences(before), "seed saved preferences");
+    auto candidate = before; candidate.sessionMinutes = 60;
+    const int writes = fake.registryWrites;
+    bool saved = true, faultConsumed = false;
+    {
+        TestMemory::FailNextAllocation fail;
+        saved = SavePreferences(candidate);
+        faultConsumed = !TestMemory::AllocationFailurePending();
+    }
+    Check(!saved && faultConsumed && fake.registryWrites == writes, "allocation failure returns false before any storage write");
+    Check(LoadPreferences().preferences == before && filter.isActive() && filter.needsRestore(), "previous configuration and active filter ownership retained");
+}
+void PreferenceImportAllocationFailure() {
+    MagnificationFilter filter;
+    Check(filter.initialize() && filter.enable() && SavePreferences(AppPreferences{}), "active filter and saved preferences");
+    auto candidate = AppPreferences{}; candidate.sessionMinutes = 57;
+    const int writes = fake.registryWrites;
+    auto result = PreferenceImportResult::Saved;
+    {
+        TestMemory::FailNextAllocation fail;
+        result = SaveImportedPreferences(candidate, [&] { return filter.disable(); });
+    }
+    Check(result == PreferenceImportResult::SaveFailed && !filter.isActive() && !filter.needsRestore(), "failed allocation after restoration remains an ordinary import failure with display off");
+    Check(fake.registryWrites == writes && LoadPreferences().preferences == AppPreferences{}, "import allocation failure preserves old stored preferences");
+}
 void Arguments() {
     using S = StartupAction;
     Check(ParseArguments({}) == S::Tray, "no arguments");
@@ -787,6 +817,7 @@ int main() {
         {"Shortcut registration and stale messages", ShortcutRegistrationAndStaleMessages}, {"Shortcut rollback", ShortcutRegistrationRollback},
         {"Shortcut partial rollback/retry", ShortcutPartialRollbackAndRetry}, {"Shortcut startup and schema migration", ShortcutStartupPartialAndSchemaMigration},
         {"Default preference restoration", DefaultPreferencesRestoreActiveGamma},
+        {"Preference save allocation failure", PreferenceSaveAllocationFailure}, {"Preference import allocation failure", PreferenceImportAllocationFailure},
         {"Command line", Arguments}
     };
     int failed = 0;

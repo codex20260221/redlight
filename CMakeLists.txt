@@ -47,7 +47,7 @@ endif()
 include(CTest)
 if(BUILD_TESTING)
     add_executable(RedLightCodeTests
-        tests/CodeTests.cpp src/MagnificationFilter.cpp src/GammaRampFilter.cpp src/Clipboard.cpp src/PreferencesStore.cpp src/HotkeyManager.cpp)
+        tests/CodeTests.cpp tests/MemoryFault.cpp src/MagnificationFilter.cpp src/GammaRampFilter.cpp src/Clipboard.cpp src/PreferencesStore.cpp src/HotkeyManager.cpp)
     # Fake headers provide every display API: this target cannot call real display APIs.
     target_include_directories(RedLightCodeTests BEFORE PRIVATE tests/fake_win32 src)
     target_compile_definitions(RedLightCodeTests PRIVATE REDLIGHT_FAKE_WIN32=1)

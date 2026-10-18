@@ -61,12 +61,17 @@ LoadedPreferences LoadPreferences() {
     if (result.warning) Diagnostics::Log("Some legacy preferences were invalid; defaults retained for those fields.");
     return result;
 }
-bool SavePreferences(const AppPreferences& preferences) {
-    const auto text = SerializePreferences(preferences);
-    if (!text) { Diagnostics::Log("Refusing to save invalid preferences."); return false; }
-    // One value prevents partial updates across separate per-setting registry writes.
-    const LSTATUS result = RegSetKeyValueW(HKEY_CURRENT_USER, kKey, L"SettingsProfile", REG_BINARY,
-        text->data(), static_cast<DWORD>(text->size()));
-    if (result != ERROR_SUCCESS) Diagnostics::LogFormat("Saving settings profile failed (error %ld).", result);
-    return result == ERROR_SUCCESS;
+bool SavePreferences(const AppPreferences& preferences) noexcept {
+    try {
+        const auto text = SerializePreferences(preferences);
+        if (!text) { Diagnostics::Log("Refusing to save invalid preferences."); return false; }
+        // One value prevents partial updates across separate per-setting registry writes.
+        const LSTATUS result = RegSetKeyValueW(HKEY_CURRENT_USER, kKey, L"SettingsProfile", REG_BINARY,
+            text->data(), static_cast<DWORD>(text->size()));
+        if (result != ERROR_SUCCESS) Diagnostics::LogFormat("Saving settings profile failed (error %ld).", result);
+        return result == ERROR_SUCCESS;
+    } catch (...) {
+        Diagnostics::Log("Saving preferences encountered an internal allocation/serialization error.");
+        return false;
+    }
 }

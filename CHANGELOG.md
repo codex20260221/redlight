@@ -39,6 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Support Unicode diagnostics paths and report log-write failures to the debugger.
 
 ### Fixed
+- Contain preference serialization/allocation failures as normal failed-save results, preserving prior stored settings and import restore-before-save behavior; allocation fault injection is restricted to code-test binaries.
 - Guard nested preference changes during confirmed import/reset transactions while keeping display restoration available.
 - Retain failed-close log handles for retry, preserve write/flush/rotation error details, count partial/missing records, and reject ordinary files masquerading as the diagnostics directory.
 - Prevent automatic fallback when a failed Magnification initialization still cannot release its backend resources.

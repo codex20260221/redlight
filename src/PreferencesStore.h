@@ -7,4 +7,4 @@ struct LoadedPreferences {
     bool legacy = false;
 };
 LoadedPreferences LoadPreferences();
-bool SavePreferences(const AppPreferences& preferences);
+bool SavePreferences(const AppPreferences& preferences) noexcept;
