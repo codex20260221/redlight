@@ -81,6 +81,10 @@ struct Fake {
     WORD ramp[3][256] = {};
     std::deque<Write> writes;
     DWORD lastError = 123;
+    DWORD processId = 4242, processSessionId = 7, queriedProcessId = 0, processSessionErrorBefore = 999;
+    bool processSessionQuery = true;
+    std::optional<DWORD> processSessionError, processSessionSuccessError;
+    unsigned processIdReads = 0, processSessionQueries = 0;
     std::uint64_t monotonicNow = 0, magReadMilliseconds = 0, magWriteMilliseconds = 0, gammaReadMilliseconds = 0, gammaWriteMilliseconds = 0;
     unsigned backendClockReads = 0;
     bool* shutdownBusyFlag = nullptr;
@@ -991,6 +995,61 @@ void SessionTimerChangesAndClockWrap() {
     const auto nearWrap = (std::numeric_limits<std::uint64_t>::max)() - 30000;
     Check(timer.configure(1, nearWrap, true), "clock near wrap");
     Check(!timer.restoreDue(nearWrap + 59999) && timer.restoreDue(nearWrap + 60000), "deadline survives unsigned clock wrap");
+}
+void ProcessContextSelfCaptureAndAllocation() {
+    const auto maximum = (std::numeric_limits<DWORD>::max)();
+    for (DWORD process : std::array<DWORD, 3>{1, 4242, maximum}) for (DWORD session : std::array<DWORD, 3>{0, 7, maximum}) {
+        Reset(); fake.processId = process; fake.processSessionId = session; fake.lastError = 0xbad; fake.processSessionSuccessError = 999;
+        fake.captureDiagnosticText = fake.diagnosticsClobbersError = true;
+        ProcessContextSnapshot snapshot; bool unused = false;
+        { TestMemory::FailNextAllocation fail; snapshot = CaptureProcessContext(); unused = TestMemory::AllocationFailurePending(); }
+        Check(snapshot == ProcessContextSnapshot{process, session, 0} && unused && fake.processIdReads == 1 && fake.processSessionQueries == 1 &&
+            fake.queriedProcessId == process && fake.processSessionErrorBefore == ERROR_SUCCESS,
+            "one allocation-free self-only lookup preserves zero/max session IDs and ignores stale errors on success before logging");
+        Check(fake.magInitializes == 0 && fake.dcRequests == 0 && fake.magReads == 0 && fake.gammaReads == 0 && fake.backendClockReads == 0 &&
+            fake.mutexCreates == 0 && fake.sessionRegisters == 0 && fake.registryReads == 0, "process context opens no process/ownership handle, registers nothing, and performs no display/settings/clock operation");
+    }
+}
+void ProcessContextFailureErrorProvenance() {
+    for (bool supplied : {false, true}) {
+        Reset(); fake.processSessionQuery = false; fake.processSessionId = 999;
+        fake.processSessionError = supplied ? std::optional<DWORD>(4321) : std::nullopt;
+        fake.lastError = 0xbad; fake.captureDiagnosticText = fake.diagnosticsClobbersError = true;
+        const auto snapshot = CaptureProcessContext();
+        Check(snapshot.processId == fake.processId && !snapshot.sessionId && snapshot.sessionError == (supplied ? 4321u : 0u) &&
+            fake.processSessionErrorBefore == ERROR_SUCCESS && fake.queriedProcessId == fake.processId && fake.processIdReads == 1 && fake.processSessionQueries == 1 &&
+            std::string_view(fake.diagnosticText.data()).find(supplied ? "error 4321" : "no native error code") != std::string_view::npos,
+            "failed session lookup keeps the valid self PID, ignores partial output, and captures supplied/absent errors before diagnostics clobber native error state");
+    }
+}
+void ProcessContextCachedSupportLabels() {
+    SupportReportState state;
+    Check(BuildSupportReport(state).find("Startup process ID: not recorded\r\nStartup Windows session ID: not recorded") != std::string::npos,
+        "absent process metadata has explicit unrecorded labels");
+    state.processContext = ProcessContextSnapshot{4242, 0, 0};
+    Check(BuildSupportReport(state).find("Startup process ID: 4242\r\nStartup Windows session ID: 0") != std::string::npos, "session zero is a recorded ID rather than unavailable");
+    state.processContext = ProcessContextSnapshot{4242, std::nullopt, 4321};
+    Check(BuildSupportReport(state).find("Startup Windows session ID: unavailable (native error 4321)") != std::string::npos, "failed lookup retains its supplied error");
+    state.processContext->sessionError = 0;
+    Check(BuildSupportReport(state).find("Startup Windows session ID: unavailable (no native error code)") != std::string::npos &&
+        fake.processIdReads == 0 && fake.processSessionQueries == 0 && fake.backendClockReads == 0, "absent extended error is distinct from unrecorded context without fresh queries or clock samples");
+}
+void ProcessContextCachedReportRetainsRecovery() {
+    GammaRampFilter filter;
+    Check(filter.initialize(), "prepare original Gamma calibration for process-context reporting");
+    fake.writes = {Write::FailAfterApply, Write::Fail};
+    Check(!filter.enable() && filter.needsRestore() && !filter.isActive(), "retain unconfirmed activation recovery");
+    const auto statistics = filter.statistics(); const auto clocks = fake.backendClockReads;
+    const auto reads = fake.gammaReads, writes = fake.gammaWrites, releases = fake.mutexReleases; const auto error = std::string(filter.lastError());
+    SupportReportState state; state.processContext = CaptureProcessContext(); state.needsRestore = true;
+    const auto captured = *state.processContext; const auto report = BuildSupportReport(state);
+    fake.processId = 999; fake.processSessionId = 999; fake.processSessionQuery = false;
+    Check(BuildSupportReport(state) == report && *state.processContext == captured && report.find("Startup process ID: 4242\r\nStartup Windows session ID: 7") != std::string::npos &&
+        fake.processIdReads == 1 && fake.processSessionQueries == 1 && filter.statistics() == statistics && error == filter.lastError() &&
+        fake.gammaReads == reads && fake.gammaWrites == writes && fake.mutexReleases == releases && fake.backendClockReads == clocks &&
+        filter.needsRestore() && !filter.isActive() && fake.mutexOwned,
+        "startup context is copied once; later reports preserve historical IDs, pending originals, errors, counters, clock, and ownership without querying any process again");
+    Check(filter.disable() && filter.shutdown(), "original calibration remains recoverable after process-context capture/reporting");
 }
 void UtcTimestampGoldenAndExpandedYears() {
     char output[UtcTimestampBufferSize];
@@ -3029,7 +3088,8 @@ void BuildInfoJsonAndIsolation() {
             "\"limits\":{\"profile_bytes\":4096,\"session_minutes\":240}}\n"), "build info carries complete identity, supported protocols/schemas, and authoritative limits");
     Check(fake.magInitializes == 0 && fake.dcRequests == 0 && fake.magReads == 0 && fake.gammaReads == 0 &&
         fake.magWrites == 0 && fake.gammaWrites == 0 && fake.mutexCreates == 0 && fake.statusSends == 0 && fake.profileOpens == 0 &&
-        fake.registryReads == 0 && fake.registryWrites == 0 && fake.clipOpens == 0 && fake.hotkeyRegisters == 0 && fake.sessionRegisters == 0,
+        fake.registryReads == 0 && fake.registryWrites == 0 && fake.clipOpens == 0 && fake.hotkeyRegisters == 0 && fake.sessionRegisters == 0 &&
+        fake.processIdReads == 0 && fake.processSessionQueries == 0,
         "metadata output needs no instance, preferences, clipboard, registration, profile file, or display operation");
 }
 void BuildInfoEscapingAndBounds() {
@@ -6149,6 +6209,13 @@ BOOL KillTimer(HWND owner, UINT_PTR id) {
     fake.countdownInstalled = false; fake.countdownOwner = nullptr; fake.countdownId = 0;
     return 1;
 }
+DWORD GetCurrentProcessId() { ++fake.processIdReads; return fake.processId; }
+BOOL ProcessIdToSessionId(DWORD process, DWORD* session) {
+    ++fake.processSessionQueries; fake.queriedProcessId = process; fake.processSessionErrorBefore = fake.lastError;
+    *session = fake.processSessionId; // Even a failed native call can leave partial output.
+    if (const auto error = fake.processSessionQuery ? fake.processSessionSuccessError : fake.processSessionError) fake.lastError = *error;
+    return fake.processSessionQuery;
+}
 HDC GetDC(HWND) {
     ++fake.dcRequests;
     if (const auto error = fake.dc ? fake.gdiSuccessError : fake.dcError) fake.lastError = *error;
@@ -6326,6 +6393,8 @@ int main() {
         {"UTC timestamp golden/expanded years", UtcTimestampGoldenAndExpandedYears}, {"UTC timestamp calendar boundaries", UtcTimestampCalendarBoundaries},
         {"UTC timestamp invalid fields", UtcTimestampInvalidFields}, {"UTC timestamp bounds/allocation", UtcTimestampBoundsAndAllocation},
         {"UTC support snapshot retains recovery", UtcTimestampSupportSnapshotRetainsRecovery},
+        {"Process context self-only capture/allocation", ProcessContextSelfCaptureAndAllocation}, {"Process context failure error provenance", ProcessContextFailureErrorProvenance},
+        {"Process context cached report labels", ProcessContextCachedSupportLabels}, {"Process context reports preserve recovery", ProcessContextCachedReportRetainsRecovery},
         {"Backend cleanup failure", BackendSelectionCleanupFailure}, {"Backend command line", BackendCommandLine},
         {"Luma preset output", LumaPresetOutput}, {"Luma preset failure/restoration", LumaPresetFailureAndRestore},
         {"Luma preset strict/gamma behavior", LumaPresetInStrictModeAndGamma},

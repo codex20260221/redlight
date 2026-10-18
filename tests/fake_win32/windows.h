@@ -144,3 +144,5 @@ DWORD GetFileType(HANDLE);
 BOOL ReadFile(HANDLE, void*, DWORD, DWORD*, void*);
 DWORD GetThreadErrorMode();
 BOOL SetThreadErrorMode(DWORD, DWORD*);
+DWORD GetCurrentProcessId();
+BOOL ProcessIdToSessionId(DWORD, DWORD*);

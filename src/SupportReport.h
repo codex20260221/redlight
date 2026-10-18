@@ -8,6 +8,7 @@
 #include "DisplayContext.h"
 #include "Diagnostics.h"
 #include "UtcTimestamp.h"
+#include "ProcessContext.h"
 #include <cstdint>
 #include <optional>
 #include <sstream>
@@ -23,6 +24,7 @@ struct SupportReportState {
     std::string_view backendLifecycle = "Not reported";
     std::string_view startupFallbackReason = "Not reported";
     std::optional<UtcTimestamp> capturedUtc;
+    std::optional<ProcessContextSnapshot> processContext;
     BackendVerification verification = BackendVerification::NotChecked;
     std::optional<BackendReadbackDetails> readback;
     std::uint32_t verificationError = 0;
@@ -64,6 +66,13 @@ inline std::string BuildSupportReport(const SupportReportState& state) {
         char timestamp[UtcTimestampBufferSize];
         report << FormatUtcTimestamp(*state.capturedUtc, timestamp).value_or("unavailable (invalid UTC calendar fields)");
     } else report << "not recorded";
+    report << "\r\nStartup process ID: ";
+    if (state.processContext) {
+        report << state.processContext->processId << "\r\nStartup Windows session ID: ";
+        if (state.processContext->sessionId) report << *state.processContext->sessionId;
+        else if (state.processContext->sessionError) report << "unavailable (native error " << state.processContext->sessionError << ")";
+        else report << "unavailable (no native error code)";
+    } else report << "not recorded\r\nStartup Windows session ID: not recorded";
     report << "\r\nVersion: " << state.version << " (Windows x64)\r\n"
         << "Build revision: " << state.buildRevision << " (" << state.sourceState << ")\r\n"
         << "Backend: " << state.backend << "\r\nBackend lifecycle: " << state.backendLifecycle << "\r\nStartup policy: " << state.startupPolicy

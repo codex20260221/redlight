@@ -22,6 +22,7 @@
 #include "PreferencePreview.h"
 #include "InstanceName.h"
 #include "DisplayContext.h"
+#include "ProcessContext.h"
 #include "SavedSettings.h"
 #include "CommandHelp.h"
 #include "LoopShutdown.h"
@@ -82,6 +83,7 @@ bool g_uiErrorVisible = false;
 BackendVerificationCache g_verification;
 RestorationHistory g_restorationHistory;
 DisplayContextCache g_displayContext;
+std::optional<ProcessContextSnapshot> g_processContext;
 
 }
 
@@ -251,6 +253,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
     }
 
     LogSystemInfo();
+    g_processContext = CaptureProcessContext();
     const LoadedPreferences loadedPreferences = LoadPreferences();
     g_startupPreferenceSource = loadedPreferences.source;
     g_startupPreferenceWarning = loadedPreferences.warning;
@@ -954,6 +957,7 @@ void CopySupportReport(HWND owner) {
     SYSTEMTIME utc = {};
     GetSystemTime(&utc);
     state.capturedUtc = UtcTimestamp{utc.wYear, utc.wMonth, utc.wDay, utc.wHour, utc.wMinute, utc.wSecond, utc.wMilliseconds};
+    state.processContext = g_processContext;
     state.version = REDLIGHT_VERSION;
     state.buildRevision = REDLIGHT_BUILD_REVISION;
     state.sourceState = REDLIGHT_SOURCE_STATE;

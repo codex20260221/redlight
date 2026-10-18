@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Cache the tray process ID and checked Windows session ID at startup for logs/support reports, distinguishing zero IDs, absent metadata, and failed lookups with supplied/absent native errors; preserve backend ownership/recovery without process enumeration, new owned handles, or report-time queries.
 - Stamp copied support reports with validated UTC calendar time and milliseconds, preserving stable copied metadata, explicit absent/invalid labels, and monotonic scheduling/recovery independence; format normal and expanded Windows years without allocation or extra backend inspection.
 - Show milliseconds past an armed countdown's deadline in cached support reports, distinguishing exact-expiry zero from unarmed/unexpired state and preserving recovery retry cadence; use one supplied capture tick for countdown, verification, display-context, and restoration-history ages.
 - Include the retained Magnification startup failure in support reports when Automatic selection falls back to Gamma, distinguishing explicit Gamma selection and unavailable failure metadata while preserving startup policy, next-start preferences, and current recovery diagnostics without another backend operation.
