@@ -183,11 +183,15 @@ bool MagnificationFilter::setRedMode(RedMode mode) {
     if (mode == redMode_) {
         return true;
     }
+    if (restorePending_ && !active_) {
+        LogError("change red mode while restoration is pending", ERROR_INVALID_STATE);
+        return false;
+    }
 
     if (active_) {
         char action[128];
         sprintf_s(action, sizeof(action), "MagSetFullscreenColorEffect(%s)", RedModeDisplayName(mode));
-        if (!SetColorEffect(ColorEffectForMode(mode, lumaProfile_), action)) {
+        if (!SetLiveColorEffect(ColorEffectForMode(mode, lumaProfile_), action)) {
             return false;
         }
     }
@@ -207,8 +211,12 @@ bool MagnificationFilter::setLumaProfile(LumaProfile profile) {
         return false;
     }
     if (profile == lumaProfile_) return true;
+    if (restorePending_ && !active_) {
+        LogError("change luma profile while restoration is pending", ERROR_INVALID_STATE);
+        return false;
+    }
     if (active_ && redMode_ == RedMode::LumaRed &&
-        !SetColorEffect(ColorEffectForMode(redMode_, profile), "change luma profile")) return false;
+        !SetLiveColorEffect(ColorEffectForMode(redMode_, profile), "change luma profile")) return false;
     lumaProfile_ = profile;
     Diagnostics::LogFormat("MagnificationFilter luma profile: %s.", LumaProfileName(profile));
     return true;
@@ -264,4 +272,19 @@ bool MagnificationFilter::SetColorEffect(const MAGCOLOREFFECT& effect, const cha
 
     lastError_[0] = '\0';
     return true;
+}
+
+bool MagnificationFilter::SetLiveColorEffect(const MAGCOLOREFFECT& effect, const char* action) {
+    if (SetColorEffect(effect, action)) return true;
+    char applyError[sizeof(lastError_)];
+    std::memcpy(applyError, lastError_, sizeof(applyError));
+    active_ = false;
+    restorePending_ = true;
+    if (SetColorEffect(ColorEffectForMode(redMode_, lumaProfile_), "rollback confirmed red transform")) {
+        active_ = true;
+        restorePending_ = false;
+        std::memcpy(lastError_, applyError, sizeof(lastError_));
+        Diagnostics::Log("MagnificationFilter: failed live change rolled back to the prior confirmed red transform; preference and original snapshot retained.");
+    } else Diagnostics::Log("MagnificationFilter: live change and rollback failed; inactive recovery retains the original display snapshot.");
+    return false;
 }

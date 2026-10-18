@@ -32,6 +32,7 @@ public:
 private:
     void LogError(const char* action, DWORD error);
     bool SetColorEffect(const MAGCOLOREFFECT& effect, const char* action);
+    bool SetLiveColorEffect(const MAGCOLOREFFECT& effect, const char* action);
 
     bool initialized_;
     bool active_;

@@ -176,8 +176,9 @@ void MagWriteFailure() {
     Check(!f.enable() && f.disable(), "pending activation recovery must complete before recapture or enable retry");
     Check(f.enable(), "enable retry");
     const auto oldMode = f.redMode();
-    fake.magSet = false;
+    fake.magWriteResults = {Write::Fail, Write::Apply};
     Check(!f.setRedMode(RedMode::StrictRed) && f.redMode() == oldMode, "failed mode write retains mode");
+    fake.magSet = false;
     Check(!f.disable() && f.isActive() && f.needsRestore(), "restore failure retains active state");
     Check(!f.shutdown() && fake.uninitializes == 0, "shutdown preserves API and recovery data");
     fake.magSet = true;
@@ -492,7 +493,7 @@ void LumaPresetFailureAndRestore() {
     fake.effect.transform[0][0] = 0.43f;
     const auto original = fake.effect;
     Check(f.enable(), "enable");
-    fake.magSet = false;
+    fake.magWriteResults = {Write::Fail, Write::Apply};
     Check(!f.setLumaProfile(LumaProfile::EqualDetail) && f.lumaProfile() == LumaProfile::Classic && f.isActive(), "failed preset write keeps confirmed preset and active state");
     fake.magSet = true;
     Check(f.setLumaProfile(LumaProfile::EqualDetail) && f.disable() && Same(fake.effect, original), "preset changes do not overwrite restoration snapshot");
@@ -1647,7 +1648,7 @@ void MagnificationLumaPreferenceCommitRules() {
     MagnificationFilter filter;
     Check(filter.initialize() && filter.enable(), "active Magnification backend");
     AppPreferences preferences;
-    fake.magSet = false;
+    fake.magWriteResults = {Write::Fail, Write::Apply};
     Check(UpdateLumaPreference(filter, preferences, LumaProfile::GreenDetail) == LumaPreferenceResult::BackendFailed && preferences.luma == LumaProfile::Classic &&
         filter.lumaProfile() == LumaProfile::Classic && filter.isActive() && filter.needsRestore(), "failed live application never commits the preferred preset");
     fake.magSet = true;
@@ -2467,6 +2468,86 @@ void PreferencePreviewPreservesCurrentBackendAndStorage() {
         "preparing a preview changes no live display, ownership, stored preferences, shortcut, or clipboard state");
     Check(filter.disable(), "preview leaves original restoration data intact");
 }
+void MagLiveModeFailureRestoresConfirmedTransform() {
+    MagnificationFilter filter;
+    Check(filter.initialize() && filter.setLumaProfile(LumaProfile::GreenDetail), "prepare confirmed live mode");
+    fake.effect.transform[0][0] = 0.48f;
+    const auto original = fake.effect;
+    Check(filter.enable(), "enable prior confirmed transform");
+    const auto confirmed = fake.effect;
+    fake.magWriteResults = {Write::FailAfterApply, Write::Apply};
+    Check(!filter.setRedMode(RedMode::StrictRed) && filter.redMode() == RedMode::LumaRed && filter.lumaProfile() == LumaProfile::GreenDetail &&
+        filter.isActive() && filter.needsRestore() && Same(fake.effect, confirmed) && filter.lastError()[0],
+        "failed-after-write mode change restores the prior confirmed red transform and retains its error/configuration");
+    Check(filter.disable() && Same(fake.effect, original), "live rollback never substitutes the filter transform for the original restoration snapshot");
+}
+void MagLiveLumaFailureRetainsPreferenceAndTransform() {
+    MagnificationFilter filter;
+    AppPreferences preferences; preferences.luma = LumaProfile::GreenDetail;
+    Check(filter.initialize() && filter.setLumaProfile(preferences.luma) && filter.enable(), "prepare confirmed Luma preference");
+    const auto confirmed = fake.effect;
+    fake.magWriteResults = {Write::FailAfterApply, Write::Apply}; fake.diagnosticsClobbersError = true;
+    Check(UpdateLumaPreference(filter, preferences, LumaProfile::EqualDetail) == LumaPreferenceResult::BackendFailed &&
+        filter.lumaProfile() == LumaProfile::GreenDetail && preferences.luma == LumaProfile::GreenDetail && filter.isActive() && Same(fake.effect, confirmed) &&
+        std::string_view(filter.lastError()).find("change luma profile failed (GetLastError=5)") != std::string_view::npos,
+        "failed Luma write and confirmed rollback preserve both effective/preferred selections and the initial API error");
+    Check(filter.disable(), "restore after successful live Luma rollback");
+}
+void MagLiveModeRollbackFailureKeepsInactiveRecovery() {
+    MagnificationFilter filter;
+    Check(filter.initialize(), "initialize live-mode rollback failure");
+    fake.effect.transform[2][2] = 0.59f;
+    const auto original = fake.effect;
+    Check(filter.enable(), "enable before failed live rollback");
+    fake.magWriteResults = {Write::FailAfterApply, Write::Fail};
+    Check(!filter.setRedMode(RedMode::StrictRed) && !filter.isActive() && filter.needsRestore() && filter.redMode() == RedMode::LumaRed,
+        "unconfirmed live rollback drops active confirmation while retaining the original snapshot and mode preference");
+    const auto reads = fake.magReads, writes = fake.magWrites;
+    Check(!filter.enable() && !filter.setRedMode(RedMode::StrictRed) && !filter.setLumaProfile(LumaProfile::EqualDetail) &&
+        fake.magReads == reads && fake.magWrites == writes && filter.needsRestore(), "inactive pending recovery blocks recapture and new mode/preset changes");
+    Check(filter.disable() && Same(fake.effect, original) && !filter.needsRestore(), "manual restoration recovers the original display after failed live rollback");
+}
+void MagLiveLumaRollbackFailureBlocksPreferenceCommit() {
+    MagnificationFilter filter;
+    AppPreferences preferences;
+    Check(filter.initialize() && filter.enable(), "prepare live Luma rollback failure");
+    fake.magWriteResults = {Write::FailAfterApply, Write::Fail};
+    Check(UpdateLumaPreference(filter, preferences, LumaProfile::EqualDetail) == LumaPreferenceResult::BackendFailed && !filter.isActive() && filter.needsRestore() &&
+        filter.lumaProfile() == LumaProfile::Classic && preferences.luma == LumaProfile::Classic, "failed Luma rollback cannot commit an unconfirmed preference");
+    const auto writes = fake.magWrites;
+    Check(UpdateLumaPreference(filter, preferences, LumaProfile::GreenDetail) == LumaPreferenceResult::Rejected && fake.magWrites == writes,
+        "the preference coordinator rejects new changes while inactive restoration remains pending");
+    fake.magWriteResults = {Write::Fail};
+    Check(!filter.shutdown() && filter.needsRestore() && fake.uninitializes == 0, "failed shutdown retains live-rollback recovery resources");
+    Check(filter.shutdown() && !filter.needsRestore(), "a later shutdown can complete original restoration and cleanup");
+}
+void MagLiveUnconfirmedRollbackCannotClaimActive() {
+    MagnificationFilter filter;
+    Check(filter.initialize() && filter.enable(), "prepare unconfirmed live rollback");
+    const auto confirmed = fake.effect;
+    fake.magWriteResults = {Write::FailAfterApply, Write::FailAfterApply};
+    Check(!filter.setRedMode(RedMode::StrictRed) && Same(fake.effect, confirmed) && !filter.isActive() && filter.needsRestore(),
+        "writing the prior red matrix without successful rollback return cannot restore active confirmation");
+    Check(filter.inspectState().state == BackendVerification::Matches && !filter.isActive() && filter.needsRestore() &&
+        std::string_view(FilterStatusDescription(filter.isActive(), filter.needsRestore(), true, BackendVerification::Matches)) == "Recovery needed",
+        "matching read-back cannot erase a failed rollback's pending recovery obligation");
+    Check(filter.disable(), "recover after unconfirmed red-transform rollback");
+}
+void MagLiveRollbackWithoutCppAllocation() {
+    MagnificationFilter filter;
+    Check(filter.initialize() && filter.enable(), "prepare allocation-pressure live rollback");
+    const auto confirmed = fake.effect;
+    fake.magWriteResults = {Write::FailAfterApply, Write::Apply};
+    bool result = true, allocationUnused = false;
+    {
+        TestMemory::FailNextAllocation fail;
+        result = filter.setLumaProfile(LumaProfile::EqualDetail);
+        allocationUnused = TestMemory::AllocationFailurePending();
+    }
+    Check(!result && allocationUnused && Same(fake.effect, confirmed) && filter.isActive() && filter.lumaProfile() == LumaProfile::Classic,
+        "live rollback and diagnostic preservation require no C++ heap allocation");
+    Check(filter.disable(), "restore after allocation-pressure live rollback");
+}
 } // namespace
 
 DWORD GetLastError() { return fake.lastError; }
@@ -2774,6 +2855,9 @@ int main() {
         {"Preference preview exact changed fields", PreferencePreviewChangedFields}, {"Preference preview identical/full choices", PreferencePreviewIdenticalAndFullValues},
         {"Preference preview bounds/validation", PreferencePreviewBoundsAndInvalidInput}, {"Preference preview without C++ allocation", PreferencePreviewNoCppAllocation},
         {"Preference preview backend/storage isolation", PreferencePreviewPreservesCurrentBackendAndStorage},
+        {"Mag live-mode failure confirmed rollback", MagLiveModeFailureRestoresConfirmedTransform}, {"Mag live-Luma failure confirmed rollback", MagLiveLumaFailureRetainsPreferenceAndTransform},
+        {"Mag live-mode failed rollback recovery", MagLiveModeRollbackFailureKeepsInactiveRecovery}, {"Mag live-Luma failed rollback preference gate", MagLiveLumaRollbackFailureBlocksPreferenceCommit},
+        {"Mag unconfirmed live rollback/read-back", MagLiveUnconfirmedRollbackCannotClaimActive}, {"Mag live rollback without C++ allocation", MagLiveRollbackWithoutCppAllocation},
         {"Command line", Arguments}
     };
     int failed = 0;
