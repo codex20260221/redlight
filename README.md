@@ -87,6 +87,8 @@ Preferences are saved as one validated SettingsProfile record under `HKCU\Softwa
 
 On an Explorer restart, display change, sleep/wake, or session change, RedLight attempts to restore the saved state and leaves the filter off. If restoration fails, an error is logged and recovery data is kept. Use **Restore display** to retry. No automatic re-enabling occurs.
 
+**Expert controls → Retry session recovery** retries registration for lock, unlock, and disconnect notifications. About and support reports show registration availability and the last error. Windows can reject registration while session services are still starting; see [Microsoft's session-notification API notes](https://learn.microsoft.com/en-us/windows/win32/api/wtsapi32/nf-wtsapi32-wtsregistersessionnotification). A healthy retry avoids duplicate registration. Retrying does not activate filtering or alter preferences; restore requests received during the call are honored afterward.
+
 ### Shortcut profiles
 
 **Expert controls → Shortcut profile** offers Ctrl+Alt+R (default), Ctrl+Alt+F9, Ctrl+Alt+F10, or Disabled. Toggle uses the chosen combination; Restore adds Shift. Tray captions, About, and support reports show the actual registered combinations. Disabling shortcuts leaves tray controls and the restore command available.

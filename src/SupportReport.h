@@ -23,6 +23,7 @@ struct SupportReportState {
     std::uint32_t lastFileError = 0;
     bool active = false, needsRestore = false;
     bool toggleHotkey = false, restoreHotkey = false, sessionNotifications = false;
+    std::uint32_t sessionNotificationError = 0;
     unsigned sessionMinutes = 0;
     std::string_view expiryWarning = "Off";
     BackendStatistics backendStatistics{};
@@ -56,6 +57,7 @@ inline std::string BuildSupportReport(const SupportReportState& state) {
         << "\r\nToggle shortcut: " << (state.toggleHotkey ? "registered" : "unavailable") << " (" << state.toggleBinding << ")"
         << "\r\nRestore shortcut: " << (state.restoreHotkey ? "registered" : "unavailable") << " (" << state.restoreBinding << ")"
         << "\r\nSession notifications: " << (state.sessionNotifications ? "registered" : "unavailable")
+        << "\r\nLast session-notification error: " << state.sessionNotificationError
         << "\r\nSession limit: ";
     if (state.sessionMinutes) report << state.sessionMinutes << " minutes";
     else report << "unlimited";

@@ -21,6 +21,7 @@
 #include "ProfileExport.h"
 #include "JsonString.h"
 #include "BackendComparison.h"
+#include "SessionNotifications.h"
 #include <map>
 #include <algorithm>
 #include "Clipboard.h"
@@ -90,6 +91,12 @@ struct Fake {
     DWORD stdoutErrorMode = 0;
     bool diagnosticsClobbersError = false;
     int stdoutFailOnCall = 0;
+    bool sessionRegister = true, sessionUnregister = true, sessionRegisterThrows = false;
+    DWORD sessionError = 1702, sessionFlags = 999;
+    int sessionRegisters = 0, sessionUnregisters = 0;
+    HWND sessionRegisteredOwner = nullptr, sessionUnregisterOwner = nullptr;
+    SessionNotifications* sessionCallbackTarget = nullptr;
+    bool nestedSessionEnsure = true, nestedSessionRelease = true;
 } fake;
 
 void Reset() {
@@ -1490,10 +1497,88 @@ void DetailedVerificationReportFormatting() {
     Check(cached.state == BackendVerification::NotChecked && !cached.readback && cached.errorCode == 0, "filter-operation cache reset discards all numerical/error details");
     Check(fake.magReads == 0 && fake.gammaReads == 0 && fake.magWrites == 0 && fake.gammaWrites == 0, "formatting cached detail performs no backend operation");
 }
+void SessionNotificationOwnership() {
+    SessionNotifications notifications;
+    const auto first = reinterpret_cast<HWND>(std::uintptr_t{0x1234});
+    const auto other = reinterpret_cast<HWND>(std::uintptr_t{0x5678});
+    Check(!notifications.ensure(nullptr) && !notifications.isRegistered() && notifications.lastError() == ERROR_INVALID_PARAMETER && fake.sessionRegisters == 0,
+        "missing owner rejected before native registration");
+    Check(notifications.ensure(first) && notifications.isRegistered() && notifications.lastError() == 0 && fake.sessionRegisteredOwner == first && fake.sessionFlags == 0,
+        "successful current-session registration owns exact window");
+    Check(notifications.ensure(first) && fake.sessionRegisters == 1, "healthy retry does not duplicate native registration");
+    Check(!notifications.ensure(other) && notifications.isRegistered() && fake.sessionRegisteredOwner == first && fake.sessionRegisters == 1,
+        "different window cannot silently replace a live registration");
+    Check(notifications.release() && !notifications.isRegistered() && fake.sessionUnregisterOwner == first && notifications.lastError() == 0,
+        "release targets original owner and clears state only after success");
+    Check(notifications.release() && fake.sessionUnregisters == 1, "inactive release is idempotent");
+    Check(notifications.ensure(other) && notifications.release() && fake.sessionRegisters == 2 && fake.sessionUnregisters == 2, "owner can change after successful release");
+}
+void SessionNotificationFailureRecovery() {
+    MagnificationFilter filter;
+    Check(filter.initialize() && filter.enable(), "active filtering");
+    const auto writes = fake.magWrites, reads = fake.magReads;
+    SessionNotifications notifications;
+    const auto owner = reinterpret_cast<HWND>(std::uintptr_t{0x1234});
+    fake.sessionRegister = false; fake.diagnosticsClobbersError = true;
+    Check(!notifications.ensure(owner) && !notifications.isRegistered() && notifications.lastError() == 1702 && !fake.sessionRegisteredOwner,
+        "service-not-ready failure remains unavailable and preserves API error despite logging");
+    fake.sessionRegister = true;
+    Check(notifications.ensure(owner) && notifications.isRegistered() && notifications.lastError() == 0, "later retry recovers registration without app restart");
+    fake.sessionUnregister = false; fake.sessionError = ERROR_ACCESS_DENIED;
+    Check(!notifications.release() && notifications.isRegistered() && notifications.lastError() == ERROR_ACCESS_DENIED && fake.sessionRegisteredOwner == owner,
+        "failed unregister preserves owner/state and actual API error");
+    fake.sessionUnregister = true;
+    Check(notifications.release() && !notifications.isRegistered() && notifications.lastError() == 0 && !fake.sessionRegisteredOwner, "unregister failure can retry safely");
+    Check(filter.isActive() && filter.needsRestore() && fake.magWrites == writes && fake.magReads == reads && fake.gammaWrites == 0 && fake.registryWrites == 0 && fake.hotkeyRegisters == 0,
+        "registration/cleanup outcomes never read/write display state or preferences/shortcuts");
+}
+void SessionNotificationReentrancyAndUnwind() {
+    SessionNotifications notifications;
+    const auto owner = reinterpret_cast<HWND>(std::uintptr_t{0x1234});
+    fake.sessionCallbackTarget = &notifications;
+    Check(notifications.ensure(owner) && !fake.nestedSessionEnsure && !fake.nestedSessionRelease && fake.sessionRegisters == 1 && fake.sessionUnregisters == 0 && notifications.lastError() == 0,
+        "nested registration/release requests cannot corrupt in-progress ownership");
+    Check(notifications.release(), "release outer registration");
+    fake.sessionRegisterThrows = true;
+    bool caught = false;
+    try { notifications.ensure(owner); } catch (const std::exception&) { caught = true; }
+    Check(caught && !notifications.isRegistered() && !fake.sessionRegisteredOwner, "injected pre-registration exception does not claim success");
+    fake.sessionRegisterThrows = false;
+    Check(notifications.ensure(owner) && notifications.release(), "scoped guard unwinds so later registration and release remain possible");
+}
+void SessionNotificationReport() {
+    SupportReportState state; state.sessionNotificationError = 1702;
+    auto report = BuildSupportReport(state);
+    Check(report.find("Session notifications: unavailable") != std::string::npos && report.find("Last session-notification error: 1702") != std::string::npos,
+        "cached registration failure is visible without a log file");
+    state.sessionNotifications = true; state.sessionNotificationError = 0;
+    report = BuildSupportReport(state);
+    Check(report.find("Session notifications: registered") != std::string::npos && report.find("Last session-notification error: 0") != std::string::npos && !CommandMayChangeFilter(ID_TRAY_RETRY_SESSION),
+        "registration recovery and display-read-only failure policy are explicit");
+    Check(fake.sessionRegisters == 0 && fake.magReads == 0 && fake.gammaReads == 0, "reporting cached status does not register or inspect backends");
+}
 } // namespace
 
 DWORD GetLastError() { return fake.lastError; }
 void SetLastError(DWORD value) { fake.lastError = value; }
+BOOL WTSRegisterSessionNotification(HWND owner, DWORD flags) {
+    ++fake.sessionRegisters; fake.sessionFlags = flags;
+    if (fake.sessionCallbackTarget) {
+        auto* target = fake.sessionCallbackTarget; fake.sessionCallbackTarget = nullptr;
+        fake.nestedSessionEnsure = target->ensure(owner);
+        fake.nestedSessionRelease = target->release();
+    }
+    if (fake.sessionRegisterThrows) throw std::runtime_error("injected pre-registration failure");
+    if (!fake.sessionRegister) { fake.lastError = fake.sessionError; return FALSE; }
+    fake.sessionRegisteredOwner = owner;
+    return 1;
+}
+BOOL WTSUnRegisterSessionNotification(HWND owner) {
+    ++fake.sessionUnregisters; fake.sessionUnregisterOwner = owner;
+    if (!fake.sessionUnregister || owner != fake.sessionRegisteredOwner) { fake.lastError = fake.sessionError; return FALSE; }
+    fake.sessionRegisteredOwner = nullptr;
+    return 1;
+}
 LPWSTR GetCommandLineW() { return fake.arguments[0]; }
 LPWSTR* CommandLineToArgvW(const wchar_t*, int* count) {
     ++fake.argumentReads; *count = fake.argumentsCount;
@@ -1737,6 +1822,8 @@ int main() {
         {"Saved profile export command policy", SavedProfileExportCommandPolicy},
         {"Detailed matrix read-back", DetailedMatrixVerification}, {"Detailed gamma read-back", DetailedGammaVerification},
         {"Comparison tolerance/finite range", ComparisonToleranceAndFiniteRange}, {"Detailed verification support report", DetailedVerificationReportFormatting},
+        {"Session notification ownership", SessionNotificationOwnership}, {"Session notification failure/retry", SessionNotificationFailureRecovery},
+        {"Session notification reentrancy/unwind", SessionNotificationReentrancyAndUnwind}, {"Session notification support report", SessionNotificationReport},
         {"Command line", Arguments}
     };
     int failed = 0;
@@ -1745,6 +1832,7 @@ int main() {
         try {
             run();
             Check(fake.gammaUnownedWrites == 0 && fake.mutexClosesWhileOwned == 0, "all gamma writes hold ownership; owned mutex handles are never closed");
+            Check(!fake.sessionRegisteredOwner, "session registration is released while its fake owner remains valid");
             std::printf("PASS %s\n", name);
         }
         catch (const std::exception& e) { ++failed; std::printf("FAIL %s: %s\n", name, e.what()); }

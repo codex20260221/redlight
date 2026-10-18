@@ -21,6 +21,7 @@
 #include "StatusQuery.h"
 #include "ProfileValidation.h"
 #include "ProfileExport.h"
+#include "SessionNotifications.h"
 #include "StandardOutput.h"
 #include <cstdio>
 
@@ -41,7 +42,7 @@ NOTIFYICONDATAA nid = {};
 UINT g_taskbarCreated = 0;
 bool g_trayAdded = false;
 bool g_trayVersion4 = false;
-bool g_sessionNotifications = false;
+SessionNotifications g_sessionNotifications;
 HotkeyManager g_hotkeys;
 bool g_busy = false;
 bool g_pendingRestore = false;
@@ -79,6 +80,7 @@ void ScheduleTrayRecovery();
 void ShowTrayMenu(HWND hwnd);
 void SaveRedMode(RedMode mode);
 void SaveCurrentPreferences();
+void RetrySessionRecovery();
 
 void SetLumaProfile(LumaProfile profile);
 void LogSystemInfo();
@@ -585,6 +587,18 @@ void SaveCurrentPreferences() {
     ShowTrayInfo("RedLight preferences saved", "Current preferences were saved for the next start. Filtering and recovery data were preserved.");
 }
 
+void RetrySessionRecovery() {
+    if (g_busy || g_preferencesApplying) return;
+    bool registered = false;
+    { ScopedFlag busy(g_busy); registered = g_sessionNotifications.ensure(nid.hWnd); }
+    const bool restored = !g_pendingRestore || RestoreFilter(false);
+    if (!registered) {
+        ReportError("Session recovery notifications are still unavailable. Restore display remains available. See About and the diagnostics log, then retry session recovery.");
+    } else if (restored) {
+        ShowTrayInfo("RedLight session recovery available", "Session change notifications are registered. RedLight will attempt restoration on lock, unlock, and disconnect events.");
+    }
+}
+
 void ScheduleTrayRecovery() {
     if (!SetTimer(nid.hWnd, ID_TRAY_RETRY_TIMER, 2000, NULL)) {
         Diagnostics::LogFormat("SetTimer for tray recovery failed (error %lu).", GetLastError());
@@ -638,11 +652,12 @@ bool InitializeTrayIcon(HINSTANCE hInstance) {
     RefreshTrayIconTip();
     if (!AddTrayIcon()) return false;
     const bool shortcutsReady = g_hotkeys.initialize(nid.hWnd, g_preferences.shortcuts);
-    g_sessionNotifications = WTSRegisterSessionNotification(nid.hWnd, NOTIFY_FOR_THIS_SESSION) != FALSE;
+    { ScopedFlag busy(g_busy); g_sessionNotifications.ensure(nid.hWnd); }
+    if (g_pendingRestore) RestoreFilter(false);
     if (g_displayFilter == &g_gammaRampFilter) {
         ReportError("Using the legacy Strict Red fallback. Driver and multi-monitor support varies. See About and the README for details.", false);
     }
-    if (!shortcutsReady || !g_sessionNotifications) {
+    if (!shortcutsReady || !g_sessionNotifications.isRegistered()) {
         ReportError("Some keyboard shortcuts or session notifications are unavailable. See About for shortcut status. Tray controls remain available.", false);
     }
     return true;
@@ -783,7 +798,8 @@ void CopySupportReport(HWND owner) {
     state.shortcutProfile = ShortcutProfileName(g_preferences.shortcuts);
     if (g_hotkeys.toggle()) state.toggleBinding = ShortcutBindingName(*g_hotkeys.toggle());
     if (g_hotkeys.restore()) state.restoreBinding = ShortcutBindingName(*g_hotkeys.restore());
-    state.sessionNotifications = g_sessionNotifications;
+    state.sessionNotifications = g_sessionNotifications.isRegistered();
+    state.sessionNotificationError = static_cast<std::uint32_t>(g_sessionNotifications.lastError());
     state.sessionMinutes = g_sessionTimer.minutes();
     state.expiryWarning = ExpiryWarningName(g_preferences.expiryWarning);
     state.backendStatistics = g_displayFilter->statistics();
@@ -903,6 +919,9 @@ void VerifyBackendState(HWND owner) {
 
 void ShowAboutDialog(HWND parent) {
     char aboutText[1536];
+    char sessionRecovery[96];
+    if (g_sessionNotifications.isRegistered()) strcpy_s(sessionRecovery, "Available");
+    else sprintf_s(sessionRecovery, "Unavailable (error %lu); retry in Expert controls", g_sessionNotifications.lastError());
     const auto logging = Diagnostics::GetStatus();
     sprintf_s(aboutText, "RedLight " REDLIGHT_VERSION "\nBuild revision: " REDLIGHT_BUILD_REVISION " (" REDLIGHT_SOURCE_STATE ")\n\nBackend: %s\nStartup selection: %s%s\nNext start: %s\nMode: %s\nLuma detail: %s\nStatus: %s\nSettings: %s\nStartup preferences: %s%s\n\n"
         "Toggle shortcut: %s\nRestore shortcut: %s\nShortcut preference: %s\nSession recovery: %s\nExpiry warning: %s\n\n"
@@ -919,7 +938,7 @@ void ShowAboutDialog(HWND parent) {
         g_hotkeys.toggle() ? ShortcutBindingName(*g_hotkeys.toggle()) : "Unavailable/disabled",
         g_hotkeys.restore() ? ShortcutBindingName(*g_hotkeys.restore()) : "Unavailable/disabled",
         ShortcutProfileName(g_preferences.shortcuts),
-        g_sessionNotifications ? "Available" : "Unavailable (registration failed)",
+        sessionRecovery,
         ExpiryWarningName(g_preferences.expiryWarning),
         Diagnostics::FileStateName(logging.file), static_cast<unsigned long long>(logging.droppedLines),
         static_cast<unsigned long long>(logging.truncatedLines), static_cast<unsigned long>(logging.lastFileError));
@@ -1006,7 +1025,7 @@ LRESULT HandleWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         state.toggle = StatusShortcutKey(g_hotkeys.toggle());
         state.restore = StatusShortcutKey(g_hotkeys.restore());
         state.settingsUnsaved = g_preferencesUnsaved;
-        state.sessionNotifications = g_sessionNotifications;
+        state.sessionNotifications = g_sessionNotifications.isRegistered();
         state.busy = g_busy || g_preferencesApplying;
         const auto logging = Diagnostics::GetStatus();
         state.fileLogging = logging.file;
@@ -1084,6 +1103,7 @@ LRESULT HandleWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         case ID_TRAY_ABOUT: ShowAboutDialog(hwnd); break;
         case ID_TRAY_COPY_REPORT: CopySupportReport(hwnd); break;
         case ID_TRAY_SAVE_PREFERENCES: SaveCurrentPreferences(); break;
+        case ID_TRAY_RETRY_SESSION: RetrySessionRecovery(); break;
         case ID_TRAY_RESET_BACKEND_COUNTS:
             if (!g_busy && !g_preferencesApplying) {
                 if (g_displayFilter->resetStatistics()) {
@@ -1147,7 +1167,7 @@ LRESULT HandleWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
     case WM_DESTROY:
         StopSessionTimer();
         if (!g_hotkeys.release()) Diagnostics::Log("Some shortcut registrations could not be released before window destruction.");
-        if (g_sessionNotifications && !WTSUnRegisterSessionNotification(hwnd)) Diagnostics::Log("Unregister session notifications failed.");
+        if (!g_sessionNotifications.release()) Diagnostics::Log("Session-notification cleanup failed during window destruction; last registration remains tracked.");
         if (g_trayAdded && !Shell_NotifyIconA(NIM_DELETE, &nid)) Diagnostics::Log("Tray icon removal failed.");
         g_trayAdded = false;
         PostQuitMessage(0);
