@@ -45,7 +45,7 @@
 #include <vector>
 
 namespace {
-enum class Write { Apply, Fail, Ignore, FailAfterApply, LowByteLeak };
+enum class Write { Apply, Fail, Ignore, FailAfterApply, LowByteLeak, BlackLift, WhiteLoss };
 struct RegistryValue { DWORD type; std::vector<char> bytes; };
 struct Fake {
     bool magInit = true, magGet = true, magSet = true, magUninit = true;
@@ -3005,6 +3005,75 @@ void SavedSettingsStandaloneArgumentsAndInvalidTokens() {
         std::string_view(PreferenceLumaToken(static_cast<LumaProfile>(99))) == "invalid" &&
         std::string_view(PreferenceBackendToken(static_cast<BackendPreference>(99))) == "invalid", "shared tokens never silently map invalid enums to a real profile choice");
 }
+void GammaStrictEndpointsAndRestorationTolerance() {
+    WORD expected[3][256] = {}, actual[3][256] = {};
+    for (unsigned index = 0; index < 256; ++index) expected[0][index] = actual[0][index] = static_cast<WORD>(index * 257);
+    actual[0][0] = 1; actual[0][255] = 65534; actual[0][42] ^= 1;
+    const auto strict = BackendComparison::Gamma(actual, expected, true);
+    const auto restoration = BackendComparison::Gamma(actual, expected, false);
+    Check(strict.mismatches == 2 && strict.redBlackEndpointMismatch && strict.redWhiteEndpointMismatch && !strict.unexpectedGreenBlue &&
+        std::abs(strict.maximumDifference - 1.0 / 65535) < 1e-12, "strict filter policy catches even low-byte black lift/white loss while counting each endpoint once");
+    Check(restoration.mismatches == 0 && !restoration.redBlackEndpointMismatch && !restoration.redWhiteEndpointMismatch,
+        "restoring an original calibration retains prior significant-byte tolerance without strict red endpoint constraints");
+    actual[0][0] = 0; actual[0][255] = 65535;
+    const auto middle = BackendComparison::Gamma(actual, expected, true);
+    Check(middle.mismatches == 0 && !middle.redBlackEndpointMismatch && !middle.redWhiteEndpointMismatch && middle.maximumDifference > 0,
+        "red middle values retain quantified low-byte tolerance with exact black/white endpoints");
+}
+void GammaEndpointActivationRefusalRollsBack() {
+    for (const auto behavior : {Write::BlackLift, Write::WhiteLoss}) {
+        Reset();
+        GammaRampFilter filter;
+        Check(filter.initialize(), "initialize strict endpoint refusal");
+        WORD original[3][256]; std::memcpy(original, fake.ramp, sizeof(original));
+        fake.writes = {behavior, Write::Apply};
+        Check(!filter.enable() && !filter.isActive() && !filter.needsRestore() && !fake.mutexOwned && !fake.mutexOpen &&
+            fake.gammaWrites == 2 && std::memcmp(original, fake.ramp, sizeof(original)) == 0 && filter.lastError()[0],
+            "successful API return with a changed red endpoint cannot claim activation and rolls back original calibration");
+        Check(filter.statistics().activation.failures == 1 && filter.statistics().restoration.failures == 0,
+            "endpoint rejection records failed activation separately from confirmed recovery");
+    }
+}
+void GammaEndpointFailedRollbackRetainsOriginalOwnership() {
+    GammaRampFilter filter;
+    Check(filter.initialize(), "initialize endpoint recovery ownership");
+    fake.ramp[0][0] = 7; fake.ramp[1][255] = 65000;
+    WORD original[3][256]; std::memcpy(original, fake.ramp, sizeof(original));
+    fake.writes = {Write::WhiteLoss, Write::Fail};
+    Check(!filter.enable() && !filter.isActive() && filter.needsRestore() && fake.mutexOwned && fake.mutexOpen,
+        "endpoint rejection with failed rollback retains exclusive ownership and original snapshot while inactive");
+    const auto reads = fake.gammaReads, writes = fake.gammaWrites;
+    Check(!filter.enable() && fake.gammaReads == reads && fake.gammaWrites == writes, "pending endpoint recovery cannot recapture the unconfirmed target");
+    Check(filter.disable() && !filter.needsRestore() && !fake.mutexOwned && std::memcmp(original, fake.ramp, sizeof(original)) == 0,
+        "recovery restores original calibration, including its own nonzero endpoint, without imposing the red-filter policy on it");
+}
+void GammaEndpointVerificationIsReadOnlyAndReported() {
+    GammaRampFilter filter;
+    Check(filter.initialize() && filter.enable(), "activate exact-endpoint gamma filter");
+    fake.ramp[0][0] = 1; fake.ramp[0][255] = 65534;
+    const auto writes = fake.gammaWrites, releases = fake.mutexReleases;
+    const auto verification = filter.inspectState();
+    Check(verification.state == BackendVerification::Changed && verification.readback && verification.readback->mismatches == 2 &&
+        verification.readback->redBlackEndpointMismatch && verification.readback->redWhiteEndpointMismatch && !verification.readback->unexpectedGreenBlue &&
+        fake.gammaWrites == writes && fake.mutexReleases == releases && filter.isActive() && filter.needsRestore() && fake.mutexOwned,
+        "explicit verification detects endpoint changes without reapplying output or discarding restoration ownership");
+    SupportReportState state; state.active = true; state.needsRestore = true; state.verification = verification.state; state.readback = verification.readback;
+    const auto report = BuildSupportReport(state);
+    Check(report.find("State: Backend changed") != std::string::npos && report.find("Red black endpoint mismatch: yes") != std::string::npos &&
+        report.find("Red white endpoint mismatch: yes") != std::string::npos && report.find("Unexpected green/blue entries: no") != std::string::npos,
+        "support diagnostics distinguish red endpoint failures from green/blue leakage");
+    Check(filter.disable(), "restore original ramp after endpoint verification");
+}
+void GammaEndpointDiagnosticsDoNotApplyToMatrices() {
+    MAGCOLOREFFECT expected = fake.effect, actual = expected;
+    actual.transform[0][0] = 0.5f;
+    const auto matrix = BackendComparison::Matrix(actual.transform, expected.transform);
+    Check(matrix.mismatches == 1 && !matrix.gammaRamp && !matrix.redBlackEndpointMismatch && !matrix.redWhiteEndpointMismatch,
+        "matrix comparison remains independent of gamma endpoint policy");
+    SupportReportState state; state.readback = matrix;
+    Check(BuildSupportReport(state).find("Red black endpoint mismatch:") == std::string::npos,
+        "matrix reports do not display irrelevant gamma endpoint fields");
+}
 } // namespace
 
 DWORD GetLastError() { return fake.lastError; }
@@ -3170,10 +3239,12 @@ BOOL SetDeviceGammaRamp(HDC, void* ramp) {
     if (!fake.mutexOwned) ++fake.gammaUnownedWrites;
     auto behavior = Write::Apply;
     if (!fake.writes.empty()) { behavior = fake.writes.front(); fake.writes.pop_front(); }
-    if (behavior == Write::Apply || behavior == Write::FailAfterApply || behavior == Write::LowByteLeak)
+    if (behavior == Write::Apply || behavior == Write::FailAfterApply || behavior == Write::LowByteLeak || behavior == Write::BlackLift || behavior == Write::WhiteLoss)
         std::memcpy(fake.ramp, ramp, sizeof(fake.ramp));
     if (behavior == Write::LowByteLeak) fake.ramp[1][100] = 1;
-    return behavior == Write::Apply || behavior == Write::Ignore || behavior == Write::LowByteLeak;
+    if (behavior == Write::BlackLift) fake.ramp[0][0] = 1;
+    if (behavior == Write::WhiteLoss) fake.ramp[0][255] = 65534;
+    return behavior == Write::Apply || behavior == Write::Ignore || behavior == Write::LowByteLeak || behavior == Write::BlackLift || behavior == Write::WhiteLoss;
 }
 BOOL MagInitialize() { ++fake.magInitializes; return fake.magInit; }
 BOOL MagUninitialize() { ++fake.uninitializes; return fake.magUninit; }
@@ -3375,6 +3446,9 @@ int main() {
         {"Saved settings default JSON/isolation", SavedSettingsDefaultsAndReadOnlyIsolation}, {"Saved settings canonical token variants", SavedSettingsCanonicalVariants},
         {"Saved settings legacy/older schema", SavedSettingsLegacyAndOlderSchema}, {"Saved settings unusable-storage/backend isolation", SavedSettingsRefusesUnusableStorageWithActiveBackend},
         {"Saved settings output/internal failures", SavedSettingsOutputAndInternalFailures}, {"Saved settings arguments/invalid tokens", SavedSettingsStandaloneArgumentsAndInvalidTokens},
+        {"Gamma strict endpoints/restoration tolerance", GammaStrictEndpointsAndRestorationTolerance}, {"Gamma endpoint activation refusal/rollback", GammaEndpointActivationRefusalRollsBack},
+        {"Gamma endpoint failed rollback ownership", GammaEndpointFailedRollbackRetainsOriginalOwnership}, {"Gamma endpoint read-only verification/report", GammaEndpointVerificationIsReadOnlyAndReported},
+        {"Gamma endpoint/matrix diagnostic separation", GammaEndpointDiagnosticsDoNotApplyToMatrices},
         {"Command line", Arguments}
     };
     int failed = 0;

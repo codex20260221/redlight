@@ -32,9 +32,8 @@ private:
     bool AcquireOwnership();
     bool ReleaseOwnership();
     void SetError(const char* action, DWORD error);
-    bool SetGammaRamp(WORD (&ramp)[3][256], const char* action, bool requireZeroGreenBlue = false);
+    bool SetGammaRamp(WORD (&ramp)[3][256], const char* action, bool requireStrictRed = false);
     void BuildRedRamp();
-    static bool RampMatches(const WORD (&applied)[3][256], const WORD (&expected)[3][256], bool requireZeroGreenBlue);
 
     HDC hdc_;
     bool initialized_;

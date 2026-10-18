@@ -65,6 +65,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Support Unicode diagnostics paths and report log-write failures to the debugger.
 
 ### Fixed
+- Require exact red black/white endpoints during gamma filter confirmation and explicit verification, report endpoint mismatches separately from green/blue leakage, and roll back unconfirmed activation; retain middle-red tolerance, original-calibration restoration policy, and failed-rollback ownership for retry.
 - Roll failed live Magnification mode/Luma writes back to the prior confirmed red transform, preserve the original snapshot and preferences, and require inactive recovery after failed/unconfirmed rollback; new changes and recapture remain blocked until restoration succeeds.
 - Retain the latest Magnification snapshot across failed initial activation writes, attempt checked rollback, block recapture while inactive recovery is pending, and restore before shutdown cleanup; successful rollback preserves the activation error, while failed rollback stays recoverable without claiming active filtering.
 - Log failed startup-information and session-dialog message boxes; startup help/version/argument dialogs return failure when Windows cannot show them instead of reporting success.

@@ -24,6 +24,7 @@ struct BackendReadbackDetails {
     unsigned values = 0, mismatches = 0;
     double maximumDifference = 0;
     bool nonFiniteValues = false, unexpectedGreenBlue = false, gammaRamp = false;
+    bool redBlackEndpointMismatch = false, redWhiteEndpointMismatch = false;
 };
 struct BackendVerificationReport {
     BackendVerification state = BackendVerification::NotChecked;

@@ -141,8 +141,9 @@ BackendVerificationReport GammaRampFilter::inspectState() const {
         return {BackendVerification::Unavailable, std::nullopt, error};
     }
     const auto details = BackendComparison::Gamma(actual, redGammaRamp_, true);
-    Diagnostics::LogFormat("Gamma verification: %u/%u mismatches, maximum full-scale difference %.9g, unexpected G/B=%s; no filter reapplied.",
-        details.mismatches, details.values, details.maximumDifference, details.unexpectedGreenBlue ? "yes" : "no");
+    Diagnostics::LogFormat("Gamma verification: %u/%u mismatches, maximum full-scale difference %.9g, unexpected G/B=%s, red black/white endpoint mismatch=%s/%s; no filter reapplied.",
+        details.mismatches, details.values, details.maximumDifference, details.unexpectedGreenBlue ? "yes" : "no",
+        details.redBlackEndpointMismatch ? "yes" : "no", details.redWhiteEndpointMismatch ? "yes" : "no");
     if (details.mismatches == 0) operation.success();
     return {details.mismatches == 0 ? BackendVerification::Matches : BackendVerification::Changed, details};
 }
@@ -247,7 +248,7 @@ void GammaRampFilter::SetError(const char* action, DWORD error) {
     Diagnostics::LogFormat("%s: %s failed (GetLastError=%lu)", kFilterName, action, static_cast<unsigned long>(error));
 }
 
-bool GammaRampFilter::SetGammaRamp(WORD (&ramp)[3][256], const char* action, bool requireZeroGreenBlue) {
+bool GammaRampFilter::SetGammaRamp(WORD (&ramp)[3][256], const char* action, bool requireStrictRed) {
     if (!ownershipAcquired_) {
         SetError("gamma write without exclusive ownership", ERROR_INVALID_STATE);
         return false;
@@ -268,16 +269,16 @@ bool GammaRampFilter::SetGammaRamp(WORD (&ramp)[3][256], const char* action, boo
         SetError("gamma read-back", GetLastError());
         return false;
     }
-    if (!RampMatches(applied, ramp, requireZeroGreenBlue)) {
-        SetError("gamma read-back mismatch (driver rejected ramp)", ERROR_INVALID_DATA);
+    const auto comparison = BackendComparison::Gamma(applied, ramp, requireStrictRed);
+    if (comparison.mismatches != 0) {
+        Diagnostics::LogFormat("Gamma write confirmation mismatch: %u/%u entries, red black/white endpoints=%s/%s, unexpected G/B=%s.",
+            comparison.mismatches, comparison.values, comparison.redBlackEndpointMismatch ? "changed" : "match",
+            comparison.redWhiteEndpointMismatch ? "changed" : "match", comparison.unexpectedGreenBlue ? "yes" : "no");
+        SetError("gamma read-back mismatch (unconfirmed ramp)", ERROR_INVALID_DATA);
         return false;
     }
     lastError_[0] = '\0';
     return true;
-}
-
-bool GammaRampFilter::RampMatches(const WORD (&applied)[3][256], const WORD (&expected)[3][256], bool requireZeroGreenBlue) {
-    return BackendComparison::Gamma(applied, expected, requireZeroGreenBlue).mismatches == 0;
 }
 
 void GammaRampFilter::BuildRedRamp() {

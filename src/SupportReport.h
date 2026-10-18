@@ -71,6 +71,8 @@ inline std::string BuildSupportReport(const SupportReportState& state) {
             << (readback.gammaRamp ? " (gamma fraction of full scale)" : " (matrix coefficient)")
             << "\r\nNonfinite values: " << (readback.nonFiniteValues ? "yes" : "no")
             << "\r\nUnexpected green/blue entries: " << (readback.unexpectedGreenBlue ? "yes" : "no");
+        if (readback.gammaRamp) report << "\r\nRed black endpoint mismatch: " << (readback.redBlackEndpointMismatch ? "yes" : "no")
+            << "\r\nRed white endpoint mismatch: " << (readback.redWhiteEndpointMismatch ? "yes" : "no");
     }
     report << "\r\nVerification error code: " << state.verificationError
         << "\r\nSettings persistence: " << (state.preferencesUnsaved ? "unsaved changes" : "saved/default")

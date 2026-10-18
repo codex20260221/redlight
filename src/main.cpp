@@ -1021,11 +1021,14 @@ void VerifyBackendState(HWND owner) {
     char details[1024];
     if (report.readback) {
         const auto& values = *report.readback;
+        char endpoints[128] = {};
+        if (values.gammaRamp) sprintf_s(endpoints, "\nRed black endpoint mismatch: %s\nRed white endpoint mismatch: %s",
+            values.redBlackEndpointMismatch ? "yes" : "no", values.redWhiteEndpointMismatch ? "yes" : "no");
         sprintf_s(details, "%s\n\nValues compared: %u\nMismatches: %u\nLargest finite difference: %.9g (%s)\n"
-            "Nonfinite values: %s\nUnexpected green/blue entries: %s",
+            "Nonfinite values: %s\nUnexpected green/blue entries: %s%s",
             message, values.values, values.mismatches, values.maximumDifference,
             values.gammaRamp ? "gamma fraction of full scale" : "matrix coefficient",
-            values.nonFiniteValues ? "yes" : "no", values.unexpectedGreenBlue ? "yes" : "no");
+            values.nonFiniteValues ? "yes" : "no", values.unexpectedGreenBlue ? "yes" : "no", endpoints);
     } else if (report.state == BackendVerification::Unavailable) {
         sprintf_s(details, "%s\n\nVerification error code: %lu", message, static_cast<unsigned long>(report.errorCode));
     } else strcpy_s(details, message);

@@ -25,14 +25,17 @@ inline BackendReadbackDetails Matrix(const float (&actual)[5][5], const float (&
     }
     return result;
 }
-inline BackendReadbackDetails Gamma(const std::uint16_t (&actual)[3][256], const std::uint16_t (&expected)[3][256], bool requireZeroGreenBlue) noexcept {
+inline BackendReadbackDetails Gamma(const std::uint16_t (&actual)[3][256], const std::uint16_t (&expected)[3][256], bool requireStrictRed) noexcept {
     BackendReadbackDetails result;
     result.gammaRamp = true;
     for (int channel = 0; channel < 3; ++channel) for (int i = 0; i < 256; ++i) {
         ++result.values;
-        const bool unexpected = requireZeroGreenBlue && channel > 0 && actual[channel][i] != 0;
+        const bool unexpected = requireStrictRed && channel > 0 && actual[channel][i] != 0;
+        const bool endpointMismatch = requireStrictRed && channel == 0 && (i == 0 || i == 255) && actual[channel][i] != expected[channel][i];
+        if (endpointMismatch && i == 0) result.redBlackEndpointMismatch = true;
+        if (endpointMismatch && i == 255) result.redWhiteEndpointMismatch = true;
         result.unexpectedGreenBlue = result.unexpectedGreenBlue || unexpected;
-        if (unexpected || (actual[channel][i] >> 8) != (expected[channel][i] >> 8)) ++result.mismatches;
+        if (unexpected || endpointMismatch || (actual[channel][i] >> 8) != (expected[channel][i] >> 8)) ++result.mismatches;
         const double difference = std::abs(static_cast<double>(actual[channel][i]) - static_cast<double>(expected[channel][i])) / 65535.0;
         if (difference > result.maximumDifference) result.maximumDifference = difference;
     }
