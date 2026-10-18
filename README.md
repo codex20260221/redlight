@@ -130,6 +130,7 @@ Do not run software you do not trust. RedLight is provided as-is and without war
 
 ## Troubleshooting
 * **Expert controls → Verify backend state** reads the active Magnification matrix or gamma ramp and compares it with the requested transform. It does not reapply, restore, or change modes. A mismatch or failed read is shown in the tray and support report until the next filter operation. Inactive checks do not inspect another tool's display state. Recovery data remains available. A matching read-back describes software state, not physical panel output.
+* An export that cannot be created reports failure while keeping active filtering intact. An interrupted filter-changing action requests restoration; failed restoration retains recovery data and Restore remains available.
 * **Expert controls → Copy support report** copies the version, backend/startup policy, red mode, luma detail preset, session limit/countdown, shortcut/session registration, and last backend error. Paste it into a support request or text editor. It includes no screenshot, account name, or filesystem path, and it reports backend call results rather than measuring the display. Clipboard access happens only when you choose this command; a busy clipboard is reported without clearing its existing contents.
 * Log file: `%LOCALAPPDATA%\RedLight\redlight.log`
 * Reset commands:

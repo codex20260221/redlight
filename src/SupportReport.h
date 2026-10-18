@@ -23,6 +23,7 @@ struct SupportReportState {
 };
 inline std::string BuildSupportReport(const SupportReportState& state) {
     std::ostringstream report;
+    report.exceptions(std::ios::badbit | std::ios::failbit);
     report << "RedLight support report\r\nVersion: " << state.version << " (Windows x64)\r\n"
         << "Build revision: " << state.buildRevision << " (" << state.sourceState << ")\r\n"
         << "Backend: " << state.backend << "\r\nStartup policy: " << state.startupPolicy

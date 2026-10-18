@@ -6,14 +6,18 @@
 #include <new>
 namespace {
 thread_local bool failNext = false;
+thread_local unsigned allocationsBeforeFailure = 0;
 }
 namespace TestMemory {
-void ArmAllocationFailure() noexcept { failNext = true; }
-void CancelAllocationFailure() noexcept { failNext = false; }
+void ArmAllocationFailure(unsigned allocationsToSkip) noexcept { failNext = true; allocationsBeforeFailure = allocationsToSkip; }
+void CancelAllocationFailure() noexcept { failNext = false; allocationsBeforeFailure = 0; }
 bool AllocationFailurePending() noexcept { return failNext; }
 }
 void* operator new(std::size_t bytes) {
-    if (failNext) { failNext = false; throw std::bad_alloc(); }
+    if (failNext) {
+        if (!allocationsBeforeFailure) { failNext = false; throw std::bad_alloc(); }
+        --allocationsBeforeFailure;
+    }
     if (void* memory = std::malloc(bytes ? bytes : 1)) return memory;
     throw std::bad_alloc();
 }

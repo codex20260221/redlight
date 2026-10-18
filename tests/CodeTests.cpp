@@ -12,6 +12,7 @@
 #include "HotkeyManager.h"
 #include "CommandIds.h"
 #include "MemoryFault.h"
+#include "UiSafety.h"
 #include <map>
 #include "Clipboard.h"
 #include <limits>
@@ -677,6 +678,87 @@ void PreferenceImportAllocationFailure() {
     Check(result == PreferenceImportResult::SaveFailed && !filter.isActive() && !filter.needsRestore(), "failed allocation after restoration remains an ordinary import failure with display off");
     Check(fake.registryWrites == writes && LoadPreferences().preferences == AppPreferences{}, "import allocation failure preserves old stored preferences");
 }
+void ReadOnlyUiFailureRetainsFilter() {
+    MagnificationFilter filter;
+    Check(filter.initialize() && filter.enable(), "active filter");
+    SupportReportState state;
+    bool caught = false;
+    const long result = GuardUiCall<long>([&] {
+        TestMemory::FailNextAllocation fail;
+        const auto report = BuildSupportReport(state);
+        return CopyUtf8TextToClipboard(nullptr, report) ? 1L : 2L;
+    }, [&](const char*) {
+        caught = true;
+        if (CommandMayChangeFilter(ID_TRAY_COPY_REPORT)) filter.disable();
+        return 0L;
+    });
+    Check(result == 0 && caught && filter.isActive() && filter.needsRestore() && fake.magWrites == 1 && fake.clipOpens == 0,
+        "read-only report allocation failure preserves filter and clipboard");
+}
+void MutatingUiFailureRestoresAfterUnwind() {
+    MagnificationFilter filter;
+    Check(filter.initialize(), "initialize");
+    const auto original = fake.effect;
+    bool busy = false, sawUnwind = false;
+    const long result = GuardUiCall<long>([&]() -> long {
+        ScopedFlag call(busy);
+        Check(filter.enable(), "enable inside action");
+        throw std::runtime_error("injected action failure");
+    }, [&](const char*) {
+        sawUnwind = !busy;
+        return CommandMayChangeFilter(ID_TRAY_TOGGLE) && filter.disable() ? 0L : -1L;
+    });
+    Check(result == 0 && sawUnwind && !busy && !filter.isActive() && Same(fake.effect, original),
+        "busy flag unwinds before failure recovery restores original display state");
+}
+void UiRecoveryFailureKeepsSnapshot() {
+    MagnificationFilter filter;
+    Check(filter.initialize() && filter.enable(), "active filter");
+    const auto writes = fake.magWrites;
+    fake.magSet = false;
+    const long result = GuardUiCall<long>([]() -> long { throw 42; }, [&](const char*) {
+        return filter.disable() ? 0L : -1L;
+    });
+    Check(result == -1 && filter.isActive() && filter.needsRestore() && fake.magWrites == writes + 1,
+        "failed emergency restore stays visible and retains recovery state");
+    fake.magSet = true;
+    Check(filter.disable(), "later restore retry remains possible");
+}
+void NestedUiFlagsAndFailureHandler() {
+    bool busy = false, deferred = false;
+    {
+        ScopedFlag outer(busy);
+        GuardUiCall<long>([&]() -> long { ScopedFlag inner(busy); throw 7; }, [&](const char*) {
+            deferred = busy;
+            return 0L;
+        });
+        Check(busy && deferred, "inner unwind preserves outer call ownership for deferred recovery");
+    }
+    Check(!busy, "outer scope restores prior state");
+    const auto result = GuardUiCall<long>([]() -> long { throw 1; }, [](const char*) -> long { throw 2; });
+    Check(result == 0, "failure-handler exceptions cannot cross native callback boundary");
+    Check(!CommandMayChangeFilter(ID_TRAY_COPY_PROFILE) && !CommandMayChangeFilter(ID_TRAY_LOGS) &&
+        CommandMayChangeFilter(ID_TRAY_IMPORT_PROFILE) && CommandMayChangeFilter(ID_TRAY_RESET_PREFERENCES), "display recovery policy distinguishes read-only tools from mutating actions");
+}
+void SupportReportAllocationFailuresNeverReturnPartial() {
+    const std::string longError(8192, 'e');
+    SupportReportState state; state.lastError = longError;
+    unsigned triggered = 0;
+    for (unsigned skip = 0; skip < 9; ++skip) {
+        bool caught = false, consumed = false;
+        std::optional<std::string> report;
+        {
+            TestMemory::FailNextAllocation fail(skip);
+            GuardUiCall<long>([&] { report = BuildSupportReport(state); return 1L; }, [&](const char*) { caught = true; return 0L; });
+            consumed = !TestMemory::AllocationFailurePending();
+        }
+        if (consumed) {
+            ++triggered;
+            Check(caught && !report, "allocation failure during report growth never returns a partial report as success");
+        } else Check(report && report->size() > longError.size(), "successful report is complete");
+    }
+    Check(triggered > 1, "faults covered construction and subsequent report allocations");
+}
 void Arguments() {
     using S = StartupAction;
     Check(ParseArguments({}) == S::Tray, "no arguments");
@@ -818,6 +900,9 @@ int main() {
         {"Shortcut partial rollback/retry", ShortcutPartialRollbackAndRetry}, {"Shortcut startup and schema migration", ShortcutStartupPartialAndSchemaMigration},
         {"Default preference restoration", DefaultPreferencesRestoreActiveGamma},
         {"Preference save allocation failure", PreferenceSaveAllocationFailure}, {"Preference import allocation failure", PreferenceImportAllocationFailure},
+        {"Read-only UI allocation failure", ReadOnlyUiFailureRetainsFilter}, {"Mutating UI exception recovery", MutatingUiFailureRestoresAfterUnwind},
+        {"UI restore retry after failure", UiRecoveryFailureKeepsSnapshot}, {"Nested UI flag ownership", NestedUiFlagsAndFailureHandler},
+        {"Complete reports under allocation failure", SupportReportAllocationFailuresNeverReturnPartial},
         {"Command line", Arguments}
     };
     int failed = 0;

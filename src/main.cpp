@@ -16,6 +16,7 @@
 #include "TrayMenu.h"
 #include "SessionLimitDialog.h"
 #include "HotkeyManager.h"
+#include "UiSafety.h"
 #include <cstdio>
 
 #include "Diagnostics.h"
@@ -24,6 +25,7 @@
 
 #define WM_TRAYICON (WM_USER + 1)
 #define WM_REDLIGHT_RESTORE (WM_APP + 1)
+#define WM_REDLIGHT_UI_ERROR (WM_APP + 2)
 
 namespace {
 
@@ -47,6 +49,7 @@ bool g_backendOverride = false;
 AppPreferences g_preferences;
 bool g_preferencesUnsaved = false;
 bool g_preferencesApplying = false;
+bool g_uiErrorVisible = false;
 BackendVerification g_verification = BackendVerification::NotChecked;
 
 }
@@ -86,7 +89,8 @@ void ConfirmPreferences(HWND owner, const AppPreferences& candidate, const char*
 void VerifyBackendState(HWND owner);
 const char* FilterStatusText();
 void ShowTrayInfo(const char* title, const char* message);
-LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) noexcept;
+LRESULT HandleWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
 int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPSTR lpCmdLine, _In_ int nShowCmd) {
     (void)hPrevInstance;
@@ -366,7 +370,9 @@ bool RequestRunningInstanceRestore(bool* handled) {
 void ReportError(const char* message, bool modal) {
     Diagnostics::Log(message);
     if (modal || !g_trayAdded) {
-        MessageBoxA(nid.hWnd, message, "RedLight", MB_OK | MB_ICONERROR);
+        if (!MessageBoxA(nid.hWnd, message, "RedLight", MB_OK | MB_ICONERROR)) {
+            Diagnostics::LogFormat("MessageBox(error) failed (error %lu).", GetLastError());
+        }
         return;
     }
     NOTIFYICONDATAA notification = nid;
@@ -383,9 +389,11 @@ bool RestoreFilter(bool showError, bool notifyFailure) {
     if (g_busy) { g_pendingRestore = true; return false; }
     g_pendingRestore = false;
     g_verification = BackendVerification::NotChecked;
-    g_busy = true;
-    const bool restored = !g_displayFilter->needsRestore() || g_displayFilter->disable();
-    g_busy = false;
+    bool restored = false;
+    {
+        ScopedFlag busy(g_busy);
+        restored = !g_displayFilter->needsRestore() || g_displayFilter->disable();
+    }
     if (restored) {
         g_pendingRestore = false;
         StopSessionTimer();
@@ -438,12 +446,14 @@ void ToggleRedlight() {
         RestoreFilter(true);
     } else {
         Diagnostics::LogFormat("Enable request: %s (%s)", g_displayFilter->name(), RedModeDisplayName(g_displayFilter->redMode()));
-        g_busy = true;
-        g_verification = BackendVerification::NotChecked;
-        const bool enabled = g_displayFilter->enable();
+        bool enabled = false;
         char enableError[256] = {};
-        if (!enabled) strcpy_s(enableError, g_displayFilter->lastError());
-        g_busy = false;
+        {
+            ScopedFlag busy(g_busy);
+            g_verification = BackendVerification::NotChecked;
+            enabled = g_displayFilter->enable();
+            if (!enabled) strcpy_s(enableError, g_displayFilter->lastError());
+        }
         if (g_pendingRestore) RestoreFilter(false);
         if (enabled && g_displayFilter->isActive()) StartSessionTimer();
         if (!enabled) {
@@ -453,7 +463,6 @@ void ToggleRedlight() {
         }
         RefreshTrayIconTip();
     }
-    g_busy = false;
 }
 
 void StopSessionTimer() {
@@ -581,9 +590,8 @@ bool InitializeTrayIcon(HINSTANCE hInstance) {
 
 void SetShortcutProfile(ShortcutProfile profile) {
     if (g_busy || g_preferencesApplying || !IsValidShortcutProfile(static_cast<unsigned>(profile))) return;
-    g_busy = true;
-    const bool changed = g_hotkeys.change(profile);
-    g_busy = false;
+    bool changed = false;
+    { ScopedFlag busy(g_busy); changed = g_hotkeys.change(profile); }
     if (g_pendingRestore) RestoreFilter(false);
     if (!changed) {
         ReportError("The shortcut profile could not be applied. The prior preference was kept and rollback was attempted. About lists the actual active bindings.");
@@ -627,12 +635,14 @@ void SaveRedMode(RedMode mode) {
 void SetLumaProfile(LumaProfile profile) {
     if (g_busy || g_preferencesApplying || !g_displayFilter->supportsRedMode(RedMode::LumaRed) ||
         !IsValidLumaProfile(static_cast<unsigned>(profile))) return;
-    g_busy = true;
-    g_verification = BackendVerification::NotChecked;
-    const bool applied = g_displayFilter->setLumaProfile(profile);
+    bool applied = false;
     char error[256] = {};
-    if (!applied) strcpy_s(error, g_displayFilter->lastError());
-    g_busy = false;
+    {
+        ScopedFlag busy(g_busy);
+        g_verification = BackendVerification::NotChecked;
+        applied = g_displayFilter->setLumaProfile(profile);
+        if (!applied) strcpy_s(error, g_displayFilter->lastError());
+    }
     if (g_pendingRestore) RestoreFilter(false);
     if (!applied) {
         ReportError(error);
@@ -662,12 +672,14 @@ void SetRedModeFromTray(RedMode mode) {
         return;
     }
 
-    g_busy = true;
-    g_verification = BackendVerification::NotChecked;
-    const bool changed = g_displayFilter->setRedMode(mode);
+    bool changed = false;
     char modeError[256] = {};
-    if (!changed) strcpy_s(modeError, g_displayFilter->lastError());
-    g_busy = false;
+    {
+        ScopedFlag busy(g_busy);
+        g_verification = BackendVerification::NotChecked;
+        changed = g_displayFilter->setRedMode(mode);
+        if (!changed) strcpy_s(modeError, g_displayFilter->lastError());
+    }
     if (g_pendingRestore) RestoreFilter(false);
     if (!changed) {
         Diagnostics::LogFormat("Red mode change to %s failed.", RedModeDisplayName(mode));
@@ -762,13 +774,12 @@ void ConfirmPreferences(HWND owner, const AppPreferences& candidate, const char*
         "The display will be restored and stay off. Backend selection applies on the next start.\n"
         "Luma preferences are retained for Magnification when the current backend is gamma.",
         RedModeDisplayName(candidate.mode), LumaProfileName(candidate.luma), BackendPreferenceName(candidate.backend), candidate.sessionMinutes, ShortcutProfileName(candidate.shortcuts));
-    if (MessageBoxA(owner, preview, title, MB_YESNO | MB_DEFBUTTON2 | MB_ICONQUESTION) != IDYES) return;
+    const int answer = MessageBoxA(owner, preview, title, MB_YESNO | MB_DEFBUTTON2 | MB_ICONQUESTION);
+    if (!answer) Diagnostics::LogFormat("MessageBox(preferences) failed (error %lu).", GetLastError());
+    if (answer != IDYES) return;
     // Recheck after the modal preview: native callbacks may have run while it was open.
     if (g_busy || g_preferencesApplying) return;
-    struct Transaction {
-        Transaction() { g_preferencesApplying = true; }
-        ~Transaction() { g_preferencesApplying = false; }
-    } transaction;
+    ScopedFlag transaction(g_preferencesApplying);
     const auto saved = SaveImportedPreferences(candidate, [] { return RestoreFilter(true); });
     if (saved == PreferenceImportResult::Rejected || saved == PreferenceImportResult::RestoreFailed) return;
     if (saved == PreferenceImportResult::SaveFailed) {
@@ -796,9 +807,7 @@ const char* FilterStatusText() {
 
 void VerifyBackendState(HWND owner) {
     if (g_busy) return;
-    g_busy = true;
-    g_verification = g_displayFilter->verifyState();
-    g_busy = false;
+    { ScopedFlag busy(g_busy); g_verification = g_displayFilter->verifyState(); }
     if (g_pendingRestore) RestoreFilter(false);
     RefreshTrayIconTip();
     const char* message = BackendVerificationName(g_verification);
@@ -810,7 +819,8 @@ void VerifyBackendState(HWND owner) {
     } else if (g_verification == BackendVerification::Unavailable) {
         message = "The backend state could not be read. See the diagnostics log and use Restore display if recovery is needed.";
     }
-    MessageBoxA(owner, message, "RedLight backend state", MB_OK | MB_ICONINFORMATION);
+    if (!MessageBoxA(owner, message, "RedLight backend state", MB_OK | MB_ICONINFORMATION))
+        Diagnostics::LogFormat("MessageBox(verification) failed (error %lu).", GetLastError());
 }
 
 void ShowAboutDialog(HWND parent) {
@@ -833,7 +843,8 @@ void ShowAboutDialog(HWND parent) {
         g_sessionNotifications ? "Available" : "Unavailable (registration failed)",
         Diagnostics::FileStateName(logging.file), static_cast<unsigned long long>(logging.droppedLines),
         static_cast<unsigned long long>(logging.truncatedLines), static_cast<unsigned long>(logging.lastFileError));
-    MessageBoxA(parent, aboutText, "About RedLight", MB_OK | MB_ICONINFORMATION);
+    if (!MessageBoxA(parent, aboutText, "About RedLight", MB_OK | MB_ICONINFORMATION))
+        Diagnostics::LogFormat("MessageBox(about) failed (error %lu).", GetLastError());
 }
 
 void ShowTrayMenu(HWND hwnd) {
@@ -865,7 +876,28 @@ void ShowTrayMenu(HWND hwnd) {
     if (!DestroyMenu(menu)) Diagnostics::Log("DestroyMenu failed.");
 }
 
-LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) noexcept {
+    return GuardUiCall<LRESULT>([&] { return HandleWindowMessage(hwnd, uMsg, wParam, lParam); },
+        [&](const char* error) -> LRESULT {
+            Diagnostics::LogFormat("C++ failure in window message %u: %s", uMsg, error);
+            const bool mayChangeFilter = uMsg == WM_COMMAND ? CommandMayChangeFilter(LOWORD(wParam)) : uMsg != WM_TRAYICON;
+            if (mayChangeFilter) {
+                if (g_busy) g_pendingRestore = true;
+                else {
+                    try { RestoreFilter(false); }
+                    catch (...) { Diagnostics::Log("C++ failure during emergency restoration; recovery data retained."); }
+                }
+            }
+            if (uMsg != WM_REDLIGHT_UI_ERROR && !PostMessageA(hwnd, WM_REDLIGHT_UI_ERROR, mayChangeFilter ? 1 : 0, 0))
+                Diagnostics::LogFormat("Posting internal-error notification failed (error %lu).", GetLastError());
+            if (uMsg == WM_NCCREATE) return FALSE;
+            if (uMsg == WM_CREATE) return -1;
+            if (uMsg == WM_QUERYENDSESSION) return TRUE;
+            return 0;
+        });
+}
+
+LRESULT HandleWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     if (g_taskbarCreated && uMsg == g_taskbarCreated) {
         g_trayAdded = false;
         Diagnostics::Log("Explorer restarted; restoring display and tray control.");
@@ -874,6 +906,14 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         return 0;
     }
     switch (uMsg) {
+    case WM_REDLIGHT_UI_ERROR: {
+        if (g_uiErrorVisible) return 0;
+        ScopedFlag visible(g_uiErrorVisible);
+        if (!wParam) ReportError("The action could not complete because of an internal error. Filtering controls remain available. See the diagnostics log.");
+        else if (g_displayFilter->needsRestore()) ReportError("An internal error interrupted an action and restoration needs attention. Use Restore display to retry. Recovery data remains available.");
+        else ReportError("An internal error interrupted an action. RedLight requested restoration and its filter is off. See the diagnostics log.");
+        return 0;
+    }
     case WM_TIMER:
         if (wParam == ID_SESSION_TIMER) { OnSessionTimer(); return 0; }
         if (wParam == ID_TRAY_RETRY_TIMER && (g_trayAdded || AddTrayIcon())) {

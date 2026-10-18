@@ -1,10 +1,10 @@
 #pragma once
 namespace TestMemory {
-void ArmAllocationFailure() noexcept;
+void ArmAllocationFailure(unsigned allocationsToSkip = 0) noexcept;
 void CancelAllocationFailure() noexcept;
 bool AllocationFailurePending() noexcept;
 struct FailNextAllocation {
-    FailNextAllocation() noexcept { ArmAllocationFailure(); }
+    explicit FailNextAllocation(unsigned allocationsToSkip = 0) noexcept { ArmAllocationFailure(allocationsToSkip); }
     ~FailNextAllocation() { CancelAllocationFailure(); }
     FailNextAllocation(const FailNextAllocation&) = delete;
     FailNextAllocation& operator=(const FailNextAllocation&) = delete;
