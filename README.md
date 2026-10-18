@@ -135,6 +135,8 @@ The explicit encoding works across Windows PowerShell and PowerShell; their defa
 
 **Expert controls → Reset preferences to defaults** previews the default Luma Red/Classic, Automatic backend, Unlimited session, warnings Off, and Ctrl+Alt+R shortcut choices. Confirmation uses the same restore-before-save path as import and leaves the display off. It does not delete logs or recovery information, change clipboard contents, or restart the app. Backend selection takes effect on the next start.
 
+Import and reset previews name the fields that differ from current in-session choices while retaining every candidate value for review. If values are identical, the preview says so and still explains that confirmation restores the display and leaves filtering off. An incomplete preview is rejected before confirmation or applying settings.
+
 The format uses a RedLightProfile section. Version 3 exports explicit mode/luma/backend/session_minutes/hotkeys/expiry_warning fields. The expiry_warning tokens are off, 30s, 1m, or 5m; hotkeys tokens are default, f9, f10, or disabled. Version 1/2 profiles are accepted with warnings Off; version 1 also uses default shortcuts. New fields require their corresponding profile version. Blank lines, whole-line comments, whitespace around fields, and UTF-8 BOMs are accepted by the parser; text must be valid UTF-8, including comments. Duplicates, unknown fields, missing fields, unsupported versions, and invalid ranges are rejected. Profiles are data and contain no commands to execute.
 
 Check a saved profile offline with `--validate-profile=<file>`. In PowerShell, quote the entire option when the path contains spaces:

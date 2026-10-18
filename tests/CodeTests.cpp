@@ -10,6 +10,7 @@
 #include "Preferences.h"
 #include "PreferencesStore.h"
 #include "PreferencesImport.h"
+#include "PreferencePreview.h"
 #include "HotkeyManager.h"
 #include "CommandIds.h"
 #include "MemoryFault.h"
@@ -2403,6 +2404,69 @@ void ProfileComparisonOwnedPathArguments() {
         Check(GetStartupOptions().action == StartupAction::Failed && !fake.argumentsOutstanding, "failed owned comparison path releases native argv");
     }
 }
+void PreferencePreviewChangedFields() {
+    constexpr const char* labels[] = {"Red mode", "Luma detail", "Next-start backend", "Session limit", "Shortcuts", "Expiry warning"};
+    char text[1024];
+    for (unsigned mask = 1; mask < 64; ++mask) {
+        const auto preview = FormatPreferencePreview({}, ComparisonCandidate(mask), text);
+        Check(preview.has_value(), "all valid combinations produce a complete confirmation preview");
+        const auto start = preview->find("Changes from current choices: ");
+        const auto end = preview->find("\n\nMode:", start);
+        Check(start != std::string_view::npos && end != std::string_view::npos, "changed choices have a distinct review line before full candidate values");
+        const auto changes = preview->substr(start, end - start);
+        for (unsigned index = 0; index < 6; ++index)
+            Check((changes.find(labels[index]) != std::string_view::npos) == ((mask & (1u << index)) != 0),
+                "preview names exactly the fields differing from current choices");
+    }
+}
+void PreferencePreviewIdenticalAndFullValues() {
+    const auto candidate = ComparisonCandidate(63);
+    char text[1024];
+    const auto preview = FormatPreferencePreview(candidate, candidate, text);
+    Check(preview && preview->find("None; current preference values are identical") != std::string_view::npos &&
+        preview->find("restored and stay off, even when preference values are identical") != std::string_view::npos,
+        "identical preferences still disclose the confirmed display-restoration action");
+    Check(preview->find("Mode: Strict Red") != std::string_view::npos && preview->find("Luma detail: Equal color detail") != std::string_view::npos &&
+        preview->find("Session limit: 240 minutes") != std::string_view::npos && preview->find("Expiry warning: 5 minutes") != std::string_view::npos &&
+        preview->find("Shortcut profile: Disabled") != std::string_view::npos,
+        "change summary supplements full candidate choices rather than hiding unchanged values");
+}
+void PreferencePreviewBoundsAndInvalidInput() {
+    char text[1024];
+    const auto preview = FormatPreferencePreview({}, ComparisonCandidate(63), text);
+    Check(preview.has_value(), "prepare maximum-field preview boundary");
+    const auto length = preview->size();
+    Check(FormatPreferencePreview({}, ComparisonCandidate(63), std::span<char>(text, length + 1))->size() == length && text[length] == '\0',
+        "preview succeeds with an exact buffer including its native-dialog terminator");
+    Check(!FormatPreferencePreview({}, ComparisonCandidate(63), std::span<char>(text, length)) && !FormatPreferencePreview({}, {}, {}),
+        "truncated or absent preview output is never exposed as complete");
+    auto invalid = AppPreferences{}; invalid.sessionMinutes = 241;
+    Check(!FormatPreferencePreview(invalid, {}, text) && !FormatPreferencePreview({}, invalid, text), "invalid current or candidate settings cannot produce a confirmation");
+}
+void PreferencePreviewNoCppAllocation() {
+    char text[1024];
+    std::optional<std::string_view> preview;
+    bool allocationUnused = false;
+    {
+        TestMemory::FailNextAllocation fail;
+        preview = FormatPreferencePreview({}, ComparisonCandidate(63), text);
+        allocationUnused = TestMemory::AllocationFailurePending();
+    }
+    Check(preview && allocationUnused && preview->find("Changes from current choices: Red mode, Luma detail") != std::string_view::npos,
+        "complete changed-field confirmation preparation uses no C++ heap allocation");
+}
+void PreferencePreviewPreservesCurrentBackendAndStorage() {
+    GammaRampFilter filter;
+    Check(filter.initialize() && filter.enable() && SavePreferences({}), "active backend and saved settings for preview isolation");
+    const auto reads = fake.gammaReads, writes = fake.gammaWrites, registryReads = fake.registryReads, registryWrites = fake.registryWrites;
+    const auto statistics = filter.statistics();
+    char text[1024];
+    Check(FormatPreferencePreview({}, ComparisonCandidate(63), text).has_value() && filter.isActive() && filter.needsRestore() &&
+        filter.statistics() == statistics && fake.gammaReads == reads && fake.gammaWrites == writes && fake.registryReads == registryReads &&
+        fake.registryWrites == registryWrites && fake.hotkeyRegisters == 0 && fake.clipOpens == 0,
+        "preparing a preview changes no live display, ownership, stored preferences, shortcut, or clipboard state");
+    Check(filter.disable(), "preview leaves original restoration data intact");
+}
 } // namespace
 
 DWORD GetLastError() { return fake.lastError; }
@@ -2707,6 +2771,9 @@ int main() {
         {"Profile comparison older/legacy defaults", ProfileComparisonOlderAndLegacyDefaults}, {"Profile comparison input failure gates", ProfileComparisonInputFailureGates},
         {"Profile comparison stored-data refusal", ProfileComparisonStoredFailureRefusal}, {"Profile comparison output/allocation failures", ProfileComparisonOutputAndAllocationFailures},
         {"Profile comparison owned path arguments", ProfileComparisonOwnedPathArguments},
+        {"Preference preview exact changed fields", PreferencePreviewChangedFields}, {"Preference preview identical/full choices", PreferencePreviewIdenticalAndFullValues},
+        {"Preference preview bounds/validation", PreferencePreviewBoundsAndInvalidInput}, {"Preference preview without C++ allocation", PreferencePreviewNoCppAllocation},
+        {"Preference preview backend/storage isolation", PreferencePreviewPreservesCurrentBackendAndStorage},
         {"Command line", Arguments}
     };
     int failed = 0;

@@ -16,6 +16,7 @@
 #include "Preferences.h"
 #include "PreferencesStore.h"
 #include "PreferencesImport.h"
+#include "PreferencePreview.h"
 #include "CommandIds.h"
 #include "TrayMenu.h"
 #include "SessionLimitDialog.h"
@@ -925,13 +926,13 @@ void ImportSettingsProfile(HWND owner) {
 
 void ConfirmPreferences(HWND owner, const AppPreferences& candidate, const char* title) {
     if (g_busy || g_preferencesApplying || !ValidPreferences(candidate)) return;
-    char preview[768];
-    sprintf_s(preview, "Apply these preferences?\n\nMode: %s\nLuma detail: %s\nBackend on next start: %s\n"
-        "Session limit: %u minutes (0 = unlimited)\nExpiry warning: %s\nShortcut profile: %s\n\n"
-        "The display will be restored and stay off. Backend selection applies on the next start.\n"
-        "Luma preferences are retained for Magnification when the current backend is gamma.",
-        RedModeDisplayName(candidate.mode), LumaProfileName(candidate.luma), BackendPreferenceName(candidate.backend), candidate.sessionMinutes,
-        ExpiryWarningName(candidate.expiryWarning), ShortcutProfileName(candidate.shortcuts));
+    char preview[1024];
+    if (!FormatPreferencePreview(g_preferences, candidate, preview)) {
+        Diagnostics::Log("Preference confirmation preview could not be prepared completely; no change applied.");
+        ReportError("The complete preference preview could not be prepared. No settings were applied.");
+        return;
+    }
+    preview[sizeof(preview) - 1] = '\0'; // Keep native termination explicit across the formatter boundary.
     const int answer = MessageBoxA(owner, preview, title, MB_YESNO | MB_DEFBUTTON2 | MB_ICONQUESTION);
     if (!answer) Diagnostics::LogFormat("MessageBox(preferences) failed (error %lu).", GetLastError());
     if (answer != IDYES) return;
