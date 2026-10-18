@@ -1,8 +1,8 @@
 #include "MagnificationFilter.h"
 #include "Diagnostics.h"
+#include "BackendComparison.h"
 
 #include <cstdio>
-#include <cmath>
 
 namespace {
 
@@ -132,27 +132,22 @@ bool MagnificationFilter::needsRestore() const { return active_; }
 
 const char* MagnificationFilter::lastError() const { return lastError_; }
 
-BackendVerification MagnificationFilter::verifyState() const {
+BackendVerificationReport MagnificationFilter::inspectState() const {
     RecordBackendOperation operation(statistics_.verification);
-    if (!initialized_) return BackendVerification::Unavailable;
-    if (!needsRestore()) { operation.success(); return BackendVerification::Inactive; }
+    if (!initialized_) return {BackendVerification::Unavailable, std::nullopt, ERROR_INVALID_HANDLE};
+    if (!needsRestore()) { operation.success(); return {BackendVerification::Inactive}; }
     MAGCOLOREFFECT actual = {};
     if (!MagGetFullscreenColorEffect(&actual)) {
-        Diagnostics::LogFormat("Magnification verification read failed (error %lu).", GetLastError());
-        return BackendVerification::Unavailable;
+        const auto error = static_cast<std::uint32_t>(GetLastError());
+        Diagnostics::LogFormat("Magnification verification read failed (error %lu).", static_cast<unsigned long>(error));
+        return {BackendVerification::Unavailable, std::nullopt, error};
     }
     const auto expected = ColorEffectForMode(redMode_, lumaProfile_);
-    for (int row = 0; row < 5; ++row) for (int column = 0; column < 5; ++column) {
-        const float found = actual.transform[row][column];
-        const float wanted = expected.transform[row][column];
-        if (!std::isfinite(found) || (wanted == 0 ? found != 0 : std::abs(found - wanted) > 0.000001f)) {
-            Diagnostics::Log("Magnification read-back differs from requested transform; no filter was reapplied.");
-            return BackendVerification::Changed;
-        }
-    }
-    Diagnostics::Log("Magnification read-back matches requested transform.");
-    operation.success();
-    return BackendVerification::Matches;
+    const auto details = BackendComparison::Matrix(actual.transform, expected.transform);
+    Diagnostics::LogFormat("Magnification verification: %u/%u mismatches, maximum finite coefficient difference %.9g, nonfinite=%s, unexpected G/B=%s; no filter reapplied.",
+        details.mismatches, details.values, details.maximumDifference, details.nonFiniteValues ? "yes" : "no", details.unexpectedGreenBlue ? "yes" : "no");
+    if (details.mismatches == 0) operation.success();
+    return {details.mismatches == 0 ? BackendVerification::Matches : BackendVerification::Changed, details};
 }
 
 bool MagnificationFilter::setRedMode(RedMode mode) {

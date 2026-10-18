@@ -1,6 +1,7 @@
 #pragma once
 #include "LumaProfile.h"
 #include "BackendStatistics.h"
+#include <optional>
 
 enum class RedMode {
     StrictRed,
@@ -19,6 +20,16 @@ inline const char* RedModeDisplayName(RedMode mode) {
 }
 
 enum class BackendVerification { NotChecked, Inactive, Matches, Changed, Unavailable };
+struct BackendReadbackDetails {
+    unsigned values = 0, mismatches = 0;
+    double maximumDifference = 0;
+    bool nonFiniteValues = false, unexpectedGreenBlue = false, gammaRamp = false;
+};
+struct BackendVerificationReport {
+    BackendVerification state = BackendVerification::NotChecked;
+    std::optional<BackendReadbackDetails> readback;
+    std::uint32_t errorCode = 0;
+};
 inline const char* BackendVerificationName(BackendVerification value) {
     switch (value) {
     case BackendVerification::NotChecked: return "Not checked since last filter operation";
@@ -48,7 +59,8 @@ public:
     // A failed/partial write or pending ownership cleanup can require recovery while inactive.
     virtual bool needsRestore() const = 0;
     virtual const char* lastError() const = 0;
-    virtual BackendVerification verifyState() const = 0;
+    virtual BackendVerification verifyState() const { return inspectState().state; }
+    virtual BackendVerificationReport inspectState() const = 0;
     virtual bool setRedMode(RedMode mode) = 0;
     virtual RedMode redMode() const = 0;
     virtual bool setLumaProfile(LumaProfile profile) = 0;

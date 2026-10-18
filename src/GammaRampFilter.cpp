@@ -1,5 +1,6 @@
 #include "GammaRampFilter.h"
 #include "Diagnostics.h"
+#include "BackendComparison.h"
 
 #include <cstdio>
 #include <cstring>
@@ -128,20 +129,21 @@ bool GammaRampFilter::needsRestore() const { return active_ || restorePending_ |
 
 const char* GammaRampFilter::lastError() const { return lastError_; }
 
-BackendVerification GammaRampFilter::verifyState() const {
+BackendVerificationReport GammaRampFilter::inspectState() const {
     RecordBackendOperation operation(statistics_.verification);
-    if (!initialized_) return BackendVerification::Unavailable;
-    if (!active_ && !restorePending_) { operation.success(); return BackendVerification::Inactive; }
+    if (!initialized_) return {BackendVerification::Unavailable, std::nullopt, ERROR_INVALID_HANDLE};
+    if (!active_ && !restorePending_) { operation.success(); return {BackendVerification::Inactive}; }
     WORD actual[3][256] = {};
     if (!hdc_ || !GetDeviceGammaRamp(hdc_, actual)) {
-        Diagnostics::LogFormat("Gamma verification read failed (error %lu).", GetLastError());
-        return BackendVerification::Unavailable;
+        const auto error = static_cast<std::uint32_t>(hdc_ ? GetLastError() : ERROR_INVALID_HANDLE);
+        Diagnostics::LogFormat("Gamma verification read failed (error %lu).", static_cast<unsigned long>(error));
+        return {BackendVerification::Unavailable, std::nullopt, error};
     }
-    const bool matches = RampMatches(actual, redGammaRamp_, true);
-    Diagnostics::Log(matches ? "Gamma read-back matches requested ramp." :
-        "Gamma read-back differs from requested ramp; no filter was reapplied.");
-    if (matches) operation.success();
-    return matches ? BackendVerification::Matches : BackendVerification::Changed;
+    const auto details = BackendComparison::Gamma(actual, redGammaRamp_, true);
+    Diagnostics::LogFormat("Gamma verification: %u/%u mismatches, maximum full-scale difference %.9g, unexpected G/B=%s; no filter reapplied.",
+        details.mismatches, details.values, details.maximumDifference, details.unexpectedGreenBlue ? "yes" : "no");
+    if (details.mismatches == 0) operation.success();
+    return {details.mismatches == 0 ? BackendVerification::Matches : BackendVerification::Changed, details};
 }
 
 bool GammaRampFilter::setRedMode(RedMode mode) {
@@ -244,7 +246,7 @@ void GammaRampFilter::SetError(const char* action, DWORD error) {
     Diagnostics::LogFormat("%s: %s failed (GetLastError=%lu)", kFilterName, action, static_cast<unsigned long>(error));
 }
 
-bool GammaRampFilter::SetGammaRamp(WORD ramp[3][256], const char* action, bool requireZeroGreenBlue) {
+bool GammaRampFilter::SetGammaRamp(WORD (&ramp)[3][256], const char* action, bool requireZeroGreenBlue) {
     if (!ownershipAcquired_) {
         SetError("gamma write without exclusive ownership", ERROR_INVALID_STATE);
         return false;
@@ -273,12 +275,8 @@ bool GammaRampFilter::SetGammaRamp(WORD ramp[3][256], const char* action, bool r
     return true;
 }
 
-bool GammaRampFilter::RampMatches(const WORD applied[3][256], const WORD expected[3][256], bool requireZeroGreenBlue) {
-    for (int channel = 0; channel < 3; ++channel) for (int i = 0; i < 256; ++i) {
-        if ((requireZeroGreenBlue && channel > 0 && applied[channel][i] != 0) ||
-            (applied[channel][i] >> 8) != (expected[channel][i] >> 8)) return false;
-    }
-    return true;
+bool GammaRampFilter::RampMatches(const WORD (&applied)[3][256], const WORD (&expected)[3][256], bool requireZeroGreenBlue) {
+    return BackendComparison::Gamma(applied, expected, requireZeroGreenBlue).mismatches == 0;
 }
 
 void GammaRampFilter::BuildRedRamp() {

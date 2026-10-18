@@ -20,6 +20,7 @@
 #include "ProfileValidation.h"
 #include "ProfileExport.h"
 #include "JsonString.h"
+#include "BackendComparison.h"
 #include <map>
 #include <algorithm>
 #include "Clipboard.h"
@@ -1396,6 +1397,89 @@ void SavedProfileExportCommandPolicy() {
     Check(GetStartupOptions().action == StartupAction::ExportProfile && fake.argumentFrees == 1 && !fake.argumentsOutstanding,
         "native export argument loading retains no argv allocation");
 }
+void DetailedMatrixVerification() {
+    MagnificationFilter filter;
+    Check(filter.initialize() && filter.enable(), "activate matrix backend");
+    const auto originalWrites = fake.magWrites;
+    auto report = filter.inspectState();
+    Check(report.state == BackendVerification::Matches && report.readback && report.readback->values == 25 && report.readback->mismatches == 0 &&
+        report.readback->maximumDifference == 0 && !report.readback->gammaRamp, "matrix report compares all coefficients in coefficient units");
+    fake.effect.transform[0][0] += 0.125f;
+    fake.effect.transform[1][1] = 0.01f;
+    fake.effect.transform[1][0] = (std::numeric_limits<float>::quiet_NaN)();
+    report = filter.inspectState();
+    Check(report.state == BackendVerification::Changed && report.readback && report.readback->values == 25 && report.readback->mismatches == 3 &&
+        std::abs(report.readback->maximumDifference - 0.125) < 0.000001 && report.readback->nonFiniteValues && report.readback->unexpectedGreenBlue,
+        "all mismatches are counted; nonfinite inputs do not poison the finite maximum");
+    Check(fake.magWrites == originalWrites && filter.isActive() && filter.needsRestore() && !filter.lastError()[0], "inspection never writes or changes backend ownership/error state");
+    fake.magGet = false; fake.lastError = 4321; fake.diagnosticsClobbersError = true;
+    report = filter.inspectState();
+    Check(report.state == BackendVerification::Unavailable && !report.readback && report.errorCode == 4321, "read error survives diagnostic logging without stale numerical data");
+    fake.magGet = true; fake.diagnosticsClobbersError = false;
+    Check(filter.disable() && fake.effect.transform[0][0] == 1 && fake.effect.transform[1][1] == 1, "original matrix remains recoverable after detailed checks");
+}
+void DetailedGammaVerification() {
+    GammaRampFilter filter;
+    Check(filter.initialize() && filter.enable(), "activate gamma backend");
+    auto report = filter.inspectState();
+    Check(report.state == BackendVerification::Matches && report.readback && report.readback->values == 768 && report.readback->gammaRamp && report.readback->maximumDifference == 0,
+        "gamma report covers all entries in normalized full-scale units");
+    fake.ramp[0][42] ^= 1;
+    report = filter.inspectState();
+    Check(report.state == BackendVerification::Matches && report.readback->mismatches == 0 && std::abs(report.readback->maximumDifference - 1.0 / 65535) < 1e-12,
+        "tolerated red low-byte rounding is quantified without changing significant-byte acceptance");
+    fake.ramp[1][100] = 1; fake.ramp[2][101] = 257; fake.ramp[0][10] ^= 0x100;
+    const auto writes = fake.gammaWrites, releases = fake.mutexReleases;
+    report = filter.inspectState();
+    Check(report.state == BackendVerification::Changed && report.readback->values == 768 && report.readback->mismatches == 3 && report.readback->unexpectedGreenBlue &&
+        !report.readback->nonFiniteValues && std::abs(report.readback->maximumDifference - 257.0 / 65535) < 1e-12, "low-byte green leakage and all other mismatches are counted exactly");
+    Check(fake.gammaWrites == writes && fake.mutexReleases == releases && fake.mutexOwned && filter.isActive() && filter.needsRestore(), "detailed gamma verification preserves snapshot and exclusive ownership");
+    fake.gammaGet = false; fake.lastError = 987; fake.diagnosticsClobbersError = true;
+    report = filter.inspectState();
+    Check(report.state == BackendVerification::Unavailable && !report.readback && report.errorCode == 987, "gamma read failure has checked error detail without stale comparison");
+    fake.gammaGet = true; fake.diagnosticsClobbersError = false;
+    Check(filter.disable() && fake.ramp[1][100] == 100 * 257, "restores original calibration after mismatches");
+    const auto reads = fake.gammaReads;
+    report = filter.inspectState();
+    Check(report.state == BackendVerification::Inactive && !report.readback && report.errorCode == 0 && fake.gammaReads == reads, "inactive report never samples another tool's state");
+}
+void ComparisonToleranceAndFiniteRange() {
+    float expected[5][5] = {}, actual[5][5] = {};
+    expected[0][0] = actual[0][0] = 1;
+    actual[0][0] = std::nextafter(1.0f, 2.0f);
+    auto matrix = BackendComparison::Matrix(actual, expected);
+    Check(matrix.mismatches == 0 && matrix.maximumDifference > 0, "nonzero matrix coefficients retain established float tolerance");
+    actual[0][1] = (std::numeric_limits<float>::denorm_min)();
+    matrix = BackendComparison::Matrix(actual, expected);
+    Check(matrix.mismatches == 1 && matrix.unexpectedGreenBlue, "every nonzero expected-zero coefficient is a mismatch, including subnormal leakage");
+    actual[0][1] = -0.0f;
+    expected[0][0] = -(std::numeric_limits<float>::max)(); actual[0][0] = (std::numeric_limits<float>::max)();
+    matrix = BackendComparison::Matrix(actual, expected);
+    Check(matrix.mismatches == 1 && std::isfinite(matrix.maximumDifference) && !matrix.nonFiniteValues && !matrix.unexpectedGreenBlue,
+        "finite extreme values retain a finite double-precision maximum; signed zero stays zero");
+    WORD gammaExpected[3][256] = {}, gammaActual[3][256] = {};
+    gammaActual[1][0] = 10;
+    Check(BackendComparison::Gamma(gammaActual, gammaExpected, true).mismatches == 1 && BackendComparison::Gamma(gammaActual, gammaExpected, false).mismatches == 0,
+        "strict red zero checks and ordinary restoration significant-byte checks retain distinct policies");
+    gammaActual[0][0] = 65535;
+    Check(BackendComparison::Gamma(gammaActual, gammaExpected, true).maximumDifference == 1, "normalized gamma full-scale difference is exactly one");
+}
+void DetailedVerificationReportFormatting() {
+    SupportReportState state;
+    state.verification = BackendVerification::Changed;
+    state.readback = BackendReadbackDetails{25, 3, 0.125, true, true, false};
+    auto text = BuildSupportReport(state);
+    Check(text.find("Read-back values/mismatches: 25 / 3") != std::string::npos && text.find("Largest finite difference: 0.125 (matrix coefficient)") != std::string::npos &&
+        text.find("Nonfinite values: yes") != std::string::npos && text.find("Unexpected green/blue entries: yes") != std::string::npos, "cached report contains numerical interpretation and flags");
+    state.verification = BackendVerification::Unavailable; state.verificationError = 4321; state.readback.reset();
+    text = BuildSupportReport(state);
+    Check(text.find("Verification error code: 4321") != std::string::npos && text.find("Read-back values/mismatches:") == std::string::npos,
+        "unavailable reports cannot retain prior comparison values");
+    BackendVerificationReport cached{BackendVerification::Changed, BackendReadbackDetails{25, 1}, 0};
+    cached = {};
+    Check(cached.state == BackendVerification::NotChecked && !cached.readback && cached.errorCode == 0, "filter-operation cache reset discards all numerical/error details");
+    Check(fake.magReads == 0 && fake.gammaReads == 0 && fake.magWrites == 0 && fake.gammaWrites == 0, "formatting cached detail performs no backend operation");
+}
 } // namespace
 
 DWORD GetLastError() { return fake.lastError; }
@@ -1641,6 +1725,8 @@ int main() {
         {"UTF-8 scalar boundaries", Utf8ScalarBoundaries}, {"Strict profile encoding", ProfileUtf8Validation}, {"Clipboard embedded NUL rejection", ClipboardEmbeddedNulRejection},
         {"Saved profile export defaults/migration", SavedProfileExportDefaultsAndMigration}, {"Saved profile export failure isolation", SavedProfileExportPreservesRecoveryOnFailures},
         {"Saved profile export command policy", SavedProfileExportCommandPolicy},
+        {"Detailed matrix read-back", DetailedMatrixVerification}, {"Detailed gamma read-back", DetailedGammaVerification},
+        {"Comparison tolerance/finite range", ComparisonToleranceAndFiniteRange}, {"Detailed verification support report", DetailedVerificationReportFormatting},
         {"Command line", Arguments}
     };
     int failed = 0;

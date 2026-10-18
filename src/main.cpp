@@ -55,7 +55,7 @@ AppPreferences g_preferences;
 bool g_preferencesUnsaved = false;
 bool g_preferencesApplying = false;
 bool g_uiErrorVisible = false;
-BackendVerification g_verification = BackendVerification::NotChecked;
+BackendVerificationReport g_verification;
 
 }
 
@@ -411,7 +411,7 @@ void ReportError(const char* message, bool modal) {
 bool RestoreFilter(bool showError, bool notifyFailure) {
     if (g_busy) { g_pendingRestore = true; return false; }
     g_pendingRestore = false;
-    g_verification = BackendVerification::NotChecked;
+    g_verification = {};
     bool restored = false;
     {
         ScopedFlag busy(g_busy);
@@ -473,7 +473,7 @@ void ToggleRedlight() {
         char enableError[256] = {};
         {
             ScopedFlag busy(g_busy);
-            g_verification = BackendVerification::NotChecked;
+            g_verification = {};
             enabled = g_displayFilter->enable();
             if (!enabled) strcpy_s(enableError, g_displayFilter->lastError());
         }
@@ -680,7 +680,7 @@ void SetLumaProfile(LumaProfile profile) {
     char error[256] = {};
     {
         ScopedFlag busy(g_busy);
-        g_verification = BackendVerification::NotChecked;
+        g_verification = {};
         applied = g_displayFilter->setLumaProfile(profile);
         if (!applied) strcpy_s(error, g_displayFilter->lastError());
     }
@@ -717,7 +717,7 @@ void SetRedModeFromTray(RedMode mode) {
     char modeError[256] = {};
     {
         ScopedFlag busy(g_busy);
-        g_verification = BackendVerification::NotChecked;
+        g_verification = {};
         changed = g_displayFilter->setRedMode(mode);
         if (!changed) strcpy_s(modeError, g_displayFilter->lastError());
     }
@@ -748,7 +748,9 @@ void CopySupportReport(HWND owner) {
     state.droppedLogLines = logging.droppedLines;
     state.truncatedLogLines = logging.truncatedLines;
     state.lastFileError = logging.lastFileError;
-    state.verification = g_verification;
+    state.verification = g_verification.state;
+    state.readback = g_verification.readback;
+    state.verificationError = g_verification.errorCode;
     state.redMode = RedModeDisplayName(g_displayFilter->redMode());
     state.lumaProfile = g_displayFilter->supportsRedMode(RedMode::LumaRed) ?
         LumaProfileName(g_displayFilter->lumaProfile()) : "Unavailable on gamma";
@@ -846,24 +848,35 @@ void ConfirmPreferences(HWND owner, const AppPreferences& candidate, const char*
 
 const char* FilterStatusText() {
     return FilterStatusDescription(g_displayFilter->isActive(), g_displayFilter->needsRestore(),
-        g_displayFilter->lastError()[0] != 0, g_verification);
+        g_displayFilter->lastError()[0] != 0, g_verification.state);
 }
 
 void VerifyBackendState(HWND owner) {
     if (g_busy) return;
-    { ScopedFlag busy(g_busy); g_verification = g_displayFilter->verifyState(); }
+    { ScopedFlag busy(g_busy); g_verification = g_displayFilter->inspectState(); }
     if (g_pendingRestore) RestoreFilter(false);
     RefreshTrayIconTip();
-    const char* message = BackendVerificationName(g_verification);
-    if (g_verification == BackendVerification::Matches) {
+    const char* message = BackendVerificationName(g_verification.state);
+    if (g_verification.state == BackendVerification::Matches) {
         message = "Software read-back matches the requested red-only transform. Physical display output was not measured.";
-    } else if (g_verification == BackendVerification::Changed) {
+    } else if (g_verification.state == BackendVerification::Changed) {
         message = "Read-back differs from the requested transform. Another color tool or display change may be involved.\n\n"
             "This check did not reapply the filter. Use Restore display to restore the saved state, then re-enable when ready.";
-    } else if (g_verification == BackendVerification::Unavailable) {
+    } else if (g_verification.state == BackendVerification::Unavailable) {
         message = "The backend state could not be read. See the diagnostics log and use Restore display if recovery is needed.";
     }
-    if (!MessageBoxA(owner, message, "RedLight backend state", MB_OK | MB_ICONINFORMATION))
+    char details[1024];
+    if (g_verification.readback) {
+        const auto& values = *g_verification.readback;
+        sprintf_s(details, "%s\n\nValues compared: %u\nMismatches: %u\nLargest finite difference: %.9g (%s)\n"
+            "Nonfinite values: %s\nUnexpected green/blue entries: %s",
+            message, values.values, values.mismatches, values.maximumDifference,
+            values.gammaRamp ? "gamma fraction of full scale" : "matrix coefficient",
+            values.nonFiniteValues ? "yes" : "no", values.unexpectedGreenBlue ? "yes" : "no");
+    } else if (g_verification.state == BackendVerification::Unavailable) {
+        sprintf_s(details, "%s\n\nVerification error code: %lu", message, static_cast<unsigned long>(g_verification.errorCode));
+    } else strcpy_s(details, message);
+    if (!MessageBoxA(owner, details, "RedLight backend state", MB_OK | MB_ICONINFORMATION))
         Diagnostics::LogFormat("MessageBox(verification) failed (error %lu).", GetLastError());
 }
 
@@ -963,7 +976,7 @@ LRESULT HandleWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         state.backend = g_displayFilter == &g_magnificationFilter ? StatusBackend::Magnification : StatusBackend::Gamma;
         state.mode = g_displayFilter->redMode();
         state.luma = g_displayFilter->lumaProfile();
-        state.verification = g_verification;
+        state.verification = g_verification.state;
         state.sessionMinutes = g_sessionTimer.minutes();
         state.timerArmed = g_sessionTimer.armed();
         state.remainingSeconds = static_cast<unsigned>((g_sessionTimer.remainingMilliseconds(GetTickCount64()) + 999) / 1000);

@@ -18,7 +18,7 @@ public:
     bool isActive() const override;
     bool needsRestore() const override;
     const char* lastError() const override;
-    BackendVerification verifyState() const override;
+    BackendVerificationReport inspectState() const override;
     bool setRedMode(RedMode mode) override;
     RedMode redMode() const override;
     bool setLumaProfile(LumaProfile profile) override;

@@ -17,7 +17,7 @@ public:
     bool isActive() const override;
     bool needsRestore() const override;
     const char* lastError() const override;
-    BackendVerification verifyState() const override;
+    BackendVerificationReport inspectState() const override;
     bool setRedMode(RedMode mode) override;
     RedMode redMode() const override;
     bool setLumaProfile(LumaProfile profile) override;
@@ -32,9 +32,9 @@ private:
     bool AcquireOwnership();
     bool ReleaseOwnership();
     void SetError(const char* action, DWORD error);
-    bool SetGammaRamp(WORD ramp[3][256], const char* action, bool requireZeroGreenBlue = false);
+    bool SetGammaRamp(WORD (&ramp)[3][256], const char* action, bool requireZeroGreenBlue = false);
     void BuildRedRamp();
-    static bool RampMatches(const WORD applied[3][256], const WORD expected[3][256], bool requireZeroGreenBlue);
+    static bool RampMatches(const WORD (&applied)[3][256], const WORD (&expected)[3][256], bool requireZeroGreenBlue);
 
     HDC hdc_;
     bool initialized_;

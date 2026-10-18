@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <optional>
 #include <sstream>
+#include <iomanip>
 #include <string>
 #include <string_view>
 
@@ -10,6 +11,8 @@ struct SupportReportState {
     std::string_view version, backend, startupPolicy, nextStartupPolicy, redMode, lumaProfile, lastError;
     std::string_view buildRevision = "unversioned", sourceState = "unknown";
     BackendVerification verification = BackendVerification::NotChecked;
+    std::optional<BackendReadbackDetails> readback;
+    std::uint32_t verificationError = 0;
     bool commandLineOverride = false;
     bool preferencesUnsaved = false;
     std::string_view shortcutProfile = "Default", toggleBinding = "none", restoreBinding = "none";
@@ -33,7 +36,16 @@ inline std::string BuildSupportReport(const SupportReportState& state) {
         << "\r\nNext-start preference: " << state.nextStartupPolicy << "\r\nMode: " << state.redMode
         << "\r\nLuma detail: " << state.lumaProfile << "\r\nState: "
         << FilterStatusDescription(state.active, state.needsRestore, !state.lastError.empty(), state.verification)
-        << "\r\nBackend verification: " << BackendVerificationName(state.verification)
+        << "\r\nBackend verification: " << BackendVerificationName(state.verification);
+    if (state.readback) {
+        const auto& readback = *state.readback;
+        report << "\r\nRead-back values/mismatches: " << readback.values << " / " << readback.mismatches
+            << "\r\nLargest finite difference: " << std::setprecision(9) << readback.maximumDifference
+            << (readback.gammaRamp ? " (gamma fraction of full scale)" : " (matrix coefficient)")
+            << "\r\nNonfinite values: " << (readback.nonFiniteValues ? "yes" : "no")
+            << "\r\nUnexpected green/blue entries: " << (readback.unexpectedGreenBlue ? "yes" : "no");
+    }
+    report << "\r\nVerification error code: " << state.verificationError
         << "\r\nSettings persistence: " << (state.preferencesUnsaved ? "unsaved changes" : "saved/default")
         << "\r\nRecovery data pending: " << (state.needsRestore ? "yes" : "no")
         << "\r\nShortcut preference: " << state.shortcutProfile
