@@ -19,6 +19,8 @@
 #include "UiSafety.h"
 #include "TrayStatus.h"
 #include "StatusQuery.h"
+#include "ProfileValidation.h"
+#include "StandardOutput.h"
 #include <cstdio>
 
 #include "Diagnostics.h"
@@ -110,8 +112,19 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
         Diagnostics::Shutdown();
         return 1;
     }
+    if (action == StartupAction::Invalid && options.jsonErrors) {
+        Diagnostics::Log("Invalid machine-readable command-line request.");
+        const bool written = WriteStandardOutput("{\"protocol\":1,\"status\":\"invalid-arguments\"}\n");
+        Diagnostics::Shutdown();
+        return written ? 2 : 1;
+    }
     if (action == StartupAction::Status) {
         const int result = QueryRunningStatus();
+        Diagnostics::Shutdown();
+        return result;
+    }
+    if (action == StartupAction::ValidateProfile) {
+        const int result = ValidateSettingsProfileFile(options.profilePath.c_str());
         Diagnostics::Shutdown();
         return result;
     }
@@ -121,6 +134,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
             "--restore / --reset-display: restore display colors\n"
             "--help: show this help\n--version: show version\n"
             "--status: report cached tray state as JSON without starting it\n"
+            "--validate-profile=<file>: validate a settings file offline (JSON)\n"
             "--backend=auto|magnification|gamma: one-start backend override\n\n"
             "Without options, start in the tray with the filter off.\n"
             "Default shortcuts: Ctrl+Alt+R toggles; Ctrl+Alt+Shift+R restores.\n"

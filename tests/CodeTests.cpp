@@ -17,6 +17,8 @@
 #include "StatusQuery.h"
 #include "StandardOutput.h"
 #include "StartupOptions.h"
+#include "ProfileValidation.h"
+#include "JsonString.h"
 #include <map>
 #include <algorithm>
 #include "Clipboard.h"
@@ -72,6 +74,19 @@ struct Fake {
     bool argumentsRead = true, argumentsFree = true, argumentsOutstanding = false;
     int argumentsCount = 1, argumentReads = 0, argumentFrees = 0;
     std::array<LPWSTR, 8> arguments{};
+    bool profileOpen = true, profileHandleOpen = false, profileRead = true, profileEofError = false, profileOverRead = false;
+    bool profileClose = true, errorModeSet = true, errorModeRestore = true;
+    DWORD profileType = FILE_TYPE_DISK, profileChunk = (std::numeric_limits<DWORD>::max)();
+    DWORD profileTypeError = ERROR_SUCCESS;
+    DWORD profileAccess = 0, profileShare = 0, profileDisposition = 0, profileFlags = 0, errorMode = 2;
+    unsigned profileOpens = 0, profileReads = 0, profileCloses = 0, errorModeCalls = 0;
+    DWORD profileModeAtOpen = 0;
+    const wchar_t* profilePath = nullptr;
+    std::size_t profilePosition = 0;
+    std::string profileData;
+    unsigned stdoutWhileProfileOpen = 0;
+    DWORD stdoutErrorMode = 0;
+    bool diagnosticsClobbersError = false;
 } fake;
 
 void Reset() {
@@ -908,7 +923,7 @@ void Arguments() {
     const std::wstring_view conflict[] = {L"--restore", L"--help"};
     Check(ParseArguments(help) == S::Help && ParseArguments(version) == S::Version, "informational commands");
     const std::wstring_view status[] = {L"--status"}, statusConflict[] = {L"--status", L"--backend=gamma"};
-    Check(ParseArguments(status) == S::Status && ParseArguments(statusConflict) == S::Invalid, "read-only status accepts no startup override");
+    Check(ParseArguments(status) == S::Status && ParseArguments(statusConflict) == S::Invalid && ParseStartupOptions(statusConflict).jsonErrors, "read-only status accepts no startup override and invalid combinations keep JSON error policy");
     Check(ParseArguments(typo) == S::Invalid && ParseArguments(conflict) == S::Invalid, "reject ambiguity before backend initialization");
 }
 void StatusProtocolRoundTrip() {
@@ -1186,6 +1201,102 @@ void NativeStartupArgumentFailures() {
     }
     Check(GetStartupOptions().action == StartupAction::Status && fake.argumentFrees == 3, "later startup parsing can succeed after a transient allocation failure");
 }
+void ProfileValidationOwnedPathArguments() {
+    std::wstring option = L"--validate-profile=C:\\profiles\\night mode.txt";
+    const std::wstring_view args[] = {option};
+    const auto parsed = ParseStartupOptions(args);
+    Check(parsed.action == StartupAction::ValidateProfile && parsed.profilePath == L"C:\\profiles\\night mode.txt" && !parsed.backendOverride,
+        "validation owns a full Unicode-capable path with spaces");
+    for (const auto bad : {L"--validate-profile=", L"--validate-profile"}) {
+        const std::wstring_view input[] = {bad};
+        Check(ParseStartupOptions(input).action == StartupAction::Invalid && ParseStartupOptions(input).jsonErrors, "empty/missing path rejected without GUI error policy");
+    }
+    const std::wstring_view combined[] = {option, L"--status"};
+    Check(ParseStartupOptions(combined).action == StartupAction::Invalid, "offline validation cannot combine with other actions");
+    std::wstring nul = option; nul.push_back(L'\0'); nul += L"extra";
+    const std::wstring_view nulArgs[] = {nul};
+    Check(ParseStartupOptions(nulArgs).action == StartupAction::Invalid, "embedded path NUL rejected");
+    const std::wstring longOption = L"--validate-profile=" + std::wstring(32768, L'a');
+    const std::wstring_view longArgs[] = {longOption};
+    Check(ParseStartupOptions(longArgs).action == StartupAction::Invalid, "path length is bounded");
+    fake.argumentsCount = 2; fake.arguments[1] = option.data();
+    const auto loaded = GetStartupOptions();
+    option.assign(L"changed native storage");
+    Check(loaded.profilePath == L"C:\\profiles\\night mode.txt" && !fake.argumentsOutstanding, "native argv cleanup cannot invalidate owned path");
+    option = L"--validate-profile=C:\\profiles\\long enough for allocation.txt"; fake.arguments[1] = option.data();
+    {
+        TestMemory::FailNextAllocation fail(1); // Views allocate first; the owned path allocates second.
+        Check(GetStartupOptions().action == StartupAction::Failed && !fake.argumentsOutstanding,
+            "path allocation failure unwinds native argument ownership and returns startup failure");
+    }
+}
+void ProfileFileValidationReadOnly() {
+    MagnificationFilter filter;
+    Check(filter.initialize() && filter.enable(), "active backend for isolation check");
+    const auto reads = fake.magReads, writes = fake.magWrites;
+    fake.profileData = *SerializePreferences(AppPreferences{}); fake.profileChunk = 7;
+    Check(ValidateSettingsProfileFile(L"C:\\profiles\\赤 光.txt") == 0 && fake.stdoutText.find("\"valid\":true") != std::string::npos, "valid profile returns JSON after partial disk reads");
+    Check(std::wstring_view(fake.profilePath) == L"C:\\profiles\\赤 光.txt" && fake.profileAccess == GENERIC_READ && fake.profileShare == FILE_SHARE_READ &&
+        fake.profileDisposition == OPEN_EXISTING && (fake.profileFlags & FILE_FLAG_SEQUENTIAL_SCAN) != 0, "opens exact Unicode path read-only without write/delete sharing");
+    Check(!fake.profileHandleOpen && fake.profileCloses == 1 && fake.profilePosition == fake.profileData.size() && fake.profileReads > 2 &&
+        fake.profileModeAtOpen == 3 && fake.errorMode == 2 && fake.errorModeCalls == 2 && fake.stdoutWhileProfileOpen == 0 && fake.stdoutErrorMode == 2, "file closes and original thread error mode returns before output");
+    Check(filter.isActive() && filter.needsRestore() && fake.magReads == reads && fake.magWrites == writes && fake.gammaReads == 0 && fake.gammaWrites == 0 &&
+        fake.statusSends == 0 && fake.registryWrites == 0 && fake.hotkeyRegisters == 0 && fake.clipOpens == 0, "offline validation cannot query/change display, tray, preferences, shortcuts or clipboard");
+}
+void ProfileFileValidationBoundsAndEncoding() {
+    const auto valid = *SerializePreferences(AppPreferences{});
+    fake.profileData = valid; fake.profileData.resize(4096, ' ');
+    Check(ValidateSettingsProfileFile(L"profile.txt") == 0 && fake.profilePosition == 4096, "exact 4096-byte valid profile accepted");
+    Reset(); fake.profileData.assign(20000, ' ');
+    Check(ValidateSettingsProfileFile(L"large.txt") == 4 && fake.profilePosition == 4097 && fake.stdoutText.find("too large") != std::string::npos && !fake.profileHandleOpen,
+        "oversized input detected with only one extra byte, never truncated into a valid profile");
+    Reset(); fake.profileData = valid; fake.profileData.push_back('\0');
+    Check(ValidateSettingsProfileFile(L"nul.txt") == 4 && fake.stdoutText.find("NUL byte") != std::string::npos, "NUL-containing/UTF-16-style input is rejected");
+    Reset(); fake.profileData = std::string("\xef\xbb\xbf") + valid; fake.profileEofError = true;
+    Check(ValidateSettingsProfileFile(L"bom.txt") == 0 && fake.profileReads == 2, "UTF-8 BOM and explicit EOF result accepted");
+    Reset();
+    Check(ValidateSettingsProfileFile(L"empty.txt") == 4 && fake.stdoutText.find("\"line\":0") != std::string::npos, "empty file is invalid profile data");
+    Reset(); fake.profileData = "[RedLightProfile]\nversion=999\n";
+    Check(ValidateSettingsProfileFile(L"future.txt") == 4 && fake.stdoutText.find("\"line\":2") != std::string::npos && fake.stdoutText.find("Unsupported profile version") != std::string::npos,
+        "parser reason and exact line are machine-readable");
+}
+void ProfileFileValidationIoFailures() {
+    fake.profileOpen = false;
+    Check(ValidateSettingsProfileFile(L"missing.txt") == 1 && fake.stdoutText.find("\"stage\":\"open\"") != std::string::npos && fake.profileCloses == 0 && fake.errorMode == 2, "open failure restores thread mode");
+    for (const auto type : {FILE_TYPE_PIPE, FILE_TYPE_CHAR, FILE_TYPE_UNKNOWN}) {
+        Reset(); fake.profileType = type; fake.profileTypeError = ERROR_ACCESS_DENIED;
+        Check(ValidateSettingsProfileFile(L"device") == 1 && fake.profileReads == 0 && fake.profileCloses == 1 && fake.stdoutText.find("\"stage\":\"type\"") != std::string::npos,
+            "non-disk handles/type errors are rejected before reads");
+    }
+    Reset(); fake.profileRead = false;
+    Check(ValidateSettingsProfileFile(L"read.txt") == 1 && fake.stdoutText.find("\"stage\":\"read\"") != std::string::npos && fake.stdoutText.find("\"error_code\":5") != std::string::npos && !fake.profileHandleOpen, "read error preserved through cleanup");
+    Reset(); fake.profileOverRead = true;
+    Check(ValidateSettingsProfileFile(L"count.txt") == 1 && fake.profilePosition == 0 && fake.stdoutText.find("\"error_code\":13") != std::string::npos, "impossible byte count rejected before buffer use");
+    Reset(); fake.profileClose = false; fake.diagnosticsClobbersError = true;
+    Check(ValidateSettingsProfileFile(L"close.txt") == 1 && fake.profileCloses == 2 && fake.stdoutText.find("\"stage\":\"close\"") != std::string::npos && fake.stdoutText.find("\"error_code\":5") != std::string::npos && fake.errorMode == 2,
+        "failed close is retried without claiming successful validation");
+    Reset(); fake.errorModeSet = false;
+    Check(ValidateSettingsProfileFile(L"mode.txt") == 1 && fake.profileOpens == 0 && fake.errorMode == 2 && fake.stdoutText.find("\"stage\":\"error-mode\"") != std::string::npos, "suppression failure blocks file I/O");
+    Reset(); fake.errorModeRestore = false; fake.diagnosticsClobbersError = true;
+    Check(ValidateSettingsProfileFile(L"mode.txt") == 1 && fake.errorModeCalls == 3 && !fake.profileHandleOpen && fake.stdoutText.find("error-mode-restore") != std::string::npos && fake.stdoutText.find("\"error_code\":5") != std::string::npos, "failed thread mode restoration is reported and retried with original error preserved");
+}
+void ProfileFileValidationOutputFailures() {
+    fake.profileData = *SerializePreferences(AppPreferences{}); fake.stdoutWrite = false;
+    Check(ValidateSettingsProfileFile(L"valid.txt") == 1 && !fake.profileHandleOpen && fake.errorMode == 2, "valid data cannot hide output failure");
+    Reset(); fake.stdoutValid = false; fake.consoleAttach = false;
+    Check(ValidateSettingsProfileFile(L"invalid.txt") == 1 && !fake.profileHandleOpen && fake.errorMode == 2, "invalid data cannot hide unavailable output");
+    Reset();
+    Check(ValidateSettingsProfileFile(nullptr) == 1 && fake.profileOpens == 0 && fake.stdoutText.find("\"stage\":\"arguments\"") != std::string::npos, "defensive null path check never reaches file APIs");
+}
+void BoundedJsonStringEncoding() {
+    std::array<char, 128> output{};
+    Check(QuoteJsonString("quote\"slash\\", output) == "\"quote\\\"slash\\\\\"", "quotes and slashes escaped");
+    const std::string controls("a\0\n\t", 4);
+    Check(QuoteJsonString(controls, output) == "\"a\\u0000\\u000a\\u0009\"", "all control bytes are escaped, including embedded NUL");
+    Check(QuoteJsonString("\xc3\xa9", output) == "\"\xc3\xa9\"", "UTF-8 bytes preserved");
+    std::array<char, 3> exact{}; std::array<char, 2> small{};
+    Check(QuoteJsonString("a", exact) == "\"a\"" && !QuoteJsonString("a", small) && !QuoteJsonString("", {}), "exact-fit encoding succeeds and incomplete output is never returned");
+}
 } // namespace
 
 DWORD GetLastError() { return fake.lastError; }
@@ -1202,6 +1313,32 @@ HLOCAL LocalFree(HLOCAL block) {
     if (!fake.argumentsFree) return block;
     fake.argumentsOutstanding = false;
     return nullptr;
+}
+HANDLE CreateFileW(const wchar_t* path, DWORD access, DWORD share, void*, DWORD disposition, DWORD flags, HANDLE) {
+    ++fake.profileOpens; fake.profilePath = path; fake.profileAccess = access; fake.profileShare = share;
+    fake.profileDisposition = disposition; fake.profileFlags = flags; fake.profileModeAtOpen = fake.errorMode;
+    if (!fake.profileOpen) return INVALID_HANDLE_VALUE;
+    fake.profileHandleOpen = true;
+    return &fake.profileHandleOpen;
+}
+DWORD GetFileType(HANDLE) { fake.lastError = fake.profileTypeError; return fake.profileType; }
+BOOL ReadFile(HANDLE, void* data, DWORD size, DWORD* received, void*) {
+    ++fake.profileReads; *received = 0;
+    if (!fake.profileRead) { fake.lastError = ERROR_ACCESS_DENIED; return FALSE; }
+    if (fake.profileOverRead) { *received = size + 1; return 1; }
+    if (fake.profilePosition == fake.profileData.size() && fake.profileEofError) { fake.lastError = ERROR_HANDLE_EOF; return FALSE; }
+    *received = static_cast<DWORD>((std::min)((std::min)(fake.profileData.size() - fake.profilePosition, static_cast<std::size_t>(size)), static_cast<std::size_t>(fake.profileChunk)));
+    std::memcpy(data, fake.profileData.data() + fake.profilePosition, *received);
+    fake.profilePosition += *received;
+    return 1;
+}
+DWORD GetThreadErrorMode() { return fake.errorMode; }
+BOOL SetThreadErrorMode(DWORD mode, DWORD* previous) {
+    ++fake.errorModeCalls;
+    if (!(previous ? fake.errorModeSet : fake.errorModeRestore)) { fake.lastError = ERROR_ACCESS_DENIED; return FALSE; }
+    if (previous) *previous = fake.errorMode;
+    fake.errorMode = mode;
+    return 1;
 }
 HANDLE CreateMutexW(void*, BOOL initialOwner, const wchar_t* name) {
     ++fake.mutexCreates; fake.mutexName = name; fake.mutexInitialOwner = initialOwner;
@@ -1220,7 +1357,13 @@ BOOL ReleaseMutex(HANDLE) {
     fake.mutexOwned = false;
     return 1;
 }
-BOOL CloseHandle(HANDLE) {
+BOOL CloseHandle(HANDLE handle) {
+    if (handle == &fake.profileHandleOpen) {
+        ++fake.profileCloses;
+        if (!fake.profileClose) { fake.lastError = ERROR_ACCESS_DENIED; return FALSE; }
+        fake.profileHandleOpen = false;
+        return 1;
+    }
     ++fake.mutexCloses;
     if (fake.mutexOwned) ++fake.mutexClosesWhileOwned;
     if (!fake.mutexClose) return FALSE;
@@ -1236,6 +1379,8 @@ BOOL AttachConsole(DWORD) { ++fake.consoleAttaches; return fake.consoleAttach; }
 BOOL FreeConsole() { ++fake.consoleFrees; return fake.consoleFree; }
 BOOL WriteFile(HANDLE, const void* data, DWORD size, DWORD* written, void*) {
     ++fake.stdoutWrites;
+    if (fake.profileHandleOpen) ++fake.stdoutWhileProfileOpen;
+    fake.stdoutErrorMode = fake.errorMode;
     if (!fake.stdoutWrite) { *written = 0; return FALSE; }
     if (fake.stdoutOverWrite) { *written = size + 1; return 1; }
     *written = fake.stdoutZeroWrite ? 0 : (std::min)(size, fake.stdoutChunk);
@@ -1341,7 +1486,7 @@ BOOL UnregisterHotKey(HWND, int id) {
 }
 namespace Diagnostics {
 void Log(const char*) noexcept {}
-void LogFormat(const char*, ...) noexcept {}
+void LogFormat(const char*, ...) noexcept { if (fake.diagnosticsClobbersError) fake.lastError = ERROR_DISK_FULL; }
 }
 int main() {
     const std::pair<const char*, void(*)()> tests[] = {
@@ -1391,6 +1536,9 @@ int main() {
         {"Magnification operation counters", MagnificationStatisticsAndSafeReset}, {"Gamma operation counters", GammaStatisticsAndCleanupReset},
         {"Backend counters saturation/reset guard", BackendStatisticsSaturationAndInProgress}, {"Backend counters support report", BackendStatisticsSupportReport},
         {"Native startup argument ownership", NativeStartupArgumentOwnership}, {"Native startup argument failures", NativeStartupArgumentFailures},
+        {"Profile validation owned path", ProfileValidationOwnedPathArguments}, {"Profile validation read-only file", ProfileFileValidationReadOnly},
+        {"Profile validation file bounds/encoding", ProfileFileValidationBoundsAndEncoding}, {"Profile validation I/O failures", ProfileFileValidationIoFailures},
+        {"Profile validation output failures", ProfileFileValidationOutputFailures}, {"Bounded JSON string encoding", BoundedJsonStringEncoding},
         {"Command line", Arguments}
     };
     int failed = 0;
