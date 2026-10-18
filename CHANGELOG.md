@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Added an explicit Save current preferences command (labeled Retry after failed saves) with transaction guarding and unchanged filtering/countdowns, plus persistent startup preference-source/load-warning details in About and support reports.
 - Added numerical backend-verification details to the check dialog, logs, and cached support reports: complete value/mismatch counts, largest finite difference with units, nonfinite/unexpected green-blue flags, and preserved read-error codes; comparison tolerances and restore policies remain unchanged.
 - Added read-only `--export-profile` for scriptable backups of saved/default preferences, with canonical current-format output, legacy conversion without storage writes, noninteractive failures, and rejection of corrupt storage before output.
 - Added offline `--validate-profile=<file>` JSON validation with bounded read-only disk-file access, strict parser reasons/line numbers, checked cleanup, and preserved thread error modes; machine-readable commands report invalid arguments as JSON without help dialogs.

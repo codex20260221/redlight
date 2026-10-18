@@ -83,6 +83,8 @@ The menu provides **Turn on / Turn off**, **Restore display**, **Strict Red**, *
 
 Preferences are saved as one validated SettingsProfile record under `HKCU\Software\RedLight`. Prior individual settings are loaded when this record is absent and migrated on the next save. Corrupt or unreadable settings are reported and use safe defaults. About and support reports identify unsaved changes after a failed save. An unavailable Luma Red preference is retained for a future Magnification session, while gamma fallback uses Strict Red. The enabled state is never saved. Exit first restores display state; if restoration fails, RedLight stays available for another attempt.
 
+**Expert controls → Save current preferences** retries saving the complete current configuration; after a failed save its label becomes **Retry saving current preferences**. It preserves filtering, recovery data, active countdowns, and actual shortcuts. Failures remain marked unsaved and can be retried after fixing storage access. About and support reports also retain the startup preference source (Defaults, Legacy values, or Versioned record) and load warnings. These describe the initial load, even after a later successful save, so the reason for fallback defaults remains visible. Loading settings alone never overwrites a corrupt record.
+
 On an Explorer restart, display change, sleep/wake, or session change, RedLight attempts to restore the saved state and leaves the filter off. If restoration fails, an error is logged and recovery data is kept. Use **Restore display** to retry. No automatic re-enabling occurs.
 
 ### Shortcut profiles

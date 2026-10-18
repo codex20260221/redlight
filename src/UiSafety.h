@@ -22,6 +22,7 @@ inline bool CommandMayChangeFilter(unsigned command) noexcept {
     case ID_TRAY_VERIFY_BACKEND:
     case ID_TRAY_RETRY_LOGGING:
     case ID_TRAY_RESET_BACKEND_COUNTS:
+    case ID_TRAY_SAVE_PREFERENCES:
         return false;
     default:
         return true;

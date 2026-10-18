@@ -24,7 +24,10 @@ LoadedPreferences LoadPreferences() {
     const LSTATUS read = RegGetValueW(HKEY_CURRENT_USER, kKey, L"SettingsProfile", RRF_RT_REG_BINARY, NULL, text.data(), &bytes);
     if (read == ERROR_SUCCESS) {
         const auto parsed = ParsePreferences(std::string_view(text.data(), bytes));
-        if (parsed.preferences) result.preferences = *parsed.preferences;
+        if (parsed.preferences) {
+            result.preferences = *parsed.preferences;
+            result.source = PreferenceSource::VersionedRecord;
+        }
         else {
             result.warning = true;
             Diagnostics::LogFormat("Saved profile invalid at line %u: %s. Using safe defaults.", parsed.line, parsed.error);
@@ -57,7 +60,10 @@ LoadedPreferences LoadPreferences() {
         if (*value <= SessionTimer::maxMinutes) result.preferences.sessionMinutes = *value;
         else result.warning = true;
     }
-    if (result.legacy) Diagnostics::Log("Loaded legacy preferences; next save will use one versioned settings record.");
+    if (result.legacy) {
+        result.source = PreferenceSource::LegacyValues;
+        Diagnostics::Log("Loaded legacy preferences; next save will use one versioned settings record.");
+    }
     if (result.warning) Diagnostics::Log("Some legacy preferences were invalid; defaults retained for those fields.");
     return result;
 }

@@ -513,8 +513,11 @@ void SupportReportStates() {
     Check(report.find("State: Recovery needed") != std::string::npos && report.find("restore failed") != std::string::npos, "recovery status takes priority over prior active state");
     Check(report.find("no display output is measured") != std::string::npos, "report describes evidence scope");
     state.fileLogging = "Degraded"; state.droppedLogLines = 7; state.truncatedLogLines = 2; state.lastFileError = 5;
+    state.startupPreferenceSource = "Defaults"; state.startupPreferenceWarning = true;
     report = BuildSupportReport(state);
     Check(report.find("Missing file records: 7") != std::string::npos && report.find("Last file error: 5") != std::string::npos, "logging failures are visible even when no disk log is available");
+    Check(report.find("Startup preference source: Defaults") != std::string::npos && report.find("Startup preference load warnings: yes") != std::string::npos,
+        "startup load warnings remain reportable after the initial notification");
 }
 void ClipboardAllocationAndOpenFailures() {
     fake.clipAllocate = false;
@@ -601,17 +604,19 @@ void PutLegacy(const wchar_t* name, DWORD value) {
     fake.registry[name] = {REG_DWORD, bytes};
 }
 void PreferencesStoreDefaultsAndMigration() {
-    Check(LoadPreferences().preferences == AppPreferences{} && fake.registryWrites == 0, "defaults require no writes");
+    const auto initial = LoadPreferences();
+    Check(initial.preferences == AppPreferences{} && initial.source == PreferenceSource::Defaults && !initial.warning && fake.registryWrites == 0, "defaults require no writes and report their source");
     PutLegacy(L"RedMode", 0);
     PutLegacy(L"LumaProfile", 2);
     PutLegacy(L"BackendPreference", 2);
     PutLegacy(L"SessionLimitMinutes", 30);
     const AppPreferences expected{RedMode::StrictRed, LumaProfile::EqualDetail, BackendPreference::Gamma, 30};
     const auto loaded = LoadPreferences();
-    Check(loaded.preferences == expected && loaded.legacy && !loaded.warning && fake.registryWrites == 0, "read-only migration preserves all legacy choices");
+    Check(loaded.preferences == expected && loaded.legacy && loaded.source == PreferenceSource::LegacyValues && !loaded.warning && fake.registryWrites == 0, "read-only migration preserves all legacy choices and source");
     Check(SavePreferences(loaded.preferences) && fake.registryWrites == 1, "one save writes one record");
     PutLegacy(L"RedMode", 1);
-    Check(LoadPreferences().preferences == expected && !LoadPreferences().legacy, "new record takes precedence over stale legacy keys");
+    const auto stored = LoadPreferences();
+    Check(stored.preferences == expected && !stored.legacy && stored.source == PreferenceSource::VersionedRecord, "new record takes precedence over stale legacy keys and reports its source");
 }
 void PreferencesStoreFailureAtomicity() {
     const AppPreferences before{RedMode::StrictRed, LumaProfile::Classic, BackendPreference::Magnification, 15};
@@ -621,6 +626,7 @@ void PreferencesStoreFailureAtomicity() {
     Check(!SavePreferences(after), "failed registry write is reported");
     Check(LoadPreferences().preferences == before, "failed save cannot partially persist individual settings");
     fake.registryWrite = true;
+    Check(SavePreferences(after) && LoadPreferences().preferences == after, "retrying the same preferences after storage recovery saves the complete record");
     after.sessionMinutes = 999;
     const int writes = fake.registryWrites;
     Check(!SavePreferences(after) && fake.registryWrites == writes, "invalid preferences never reach registry");
@@ -629,7 +635,7 @@ void PreferencesStoreCorruption() {
     PutLegacy(L"RedMode", 0);
     fake.registry[L"SettingsProfile"] = {REG_BINARY, {'b', 'a', 'd'}};
     auto loaded = LoadPreferences();
-    Check(loaded.warning && loaded.preferences == AppPreferences{} && !loaded.legacy, "corrupt new profile is visible and never falls back to stale legacy values");
+    Check(loaded.warning && loaded.preferences == AppPreferences{} && !loaded.legacy && loaded.source == PreferenceSource::Defaults, "corrupt new profile reports warned defaults and never falls back to stale legacy values");
     fake.registry[L"SettingsProfile"] = {REG_BINARY, std::vector<char>(4097, 'x')};
     Check(LoadPreferences().warning, "oversized persisted record rejected");
     fake.registryRead = false;
@@ -640,7 +646,7 @@ void PreferencesStoreInvalidLegacy() {
     PutLegacy(L"SessionLimitMinutes", 241);
     PutLegacy(L"BackendPreference", 0);
     const auto loaded = LoadPreferences();
-    Check(loaded.warning && loaded.preferences == AppPreferences{}, "invalid legacy settings use per-field defaults with diagnostics");
+    Check(loaded.warning && loaded.preferences == AppPreferences{} && loaded.source == PreferenceSource::LegacyValues, "invalid legacy settings use per-field defaults and keep origin/warning diagnostics");
 }
 void ClipboardProfileRead() {
     const auto text = *SerializePreferences(AppPreferences{});
@@ -820,6 +826,10 @@ void PreferenceSaveAllocationFailure() {
     }
     Check(!saved && faultConsumed && fake.registryWrites == writes, "allocation failure returns false before any storage write");
     Check(LoadPreferences().preferences == before && filter.isActive() && filter.needsRestore(), "previous configuration and active filter ownership retained");
+    const auto reads = fake.magReads, displayWrites = fake.magWrites;
+    Check(SavePreferences(candidate) && LoadPreferences().preferences == candidate && filter.isActive() && filter.needsRestore() && fake.magReads == reads && fake.magWrites == displayWrites,
+        "explicit retry persists current choices without restarting or restoring active filtering");
+    Check(!CommandMayChangeFilter(ID_TRAY_SAVE_PREFERENCES), "save-retry failures retain read-only display recovery policy");
 }
 void PreferenceImportAllocationFailure() {
     MagnificationFilter filter;

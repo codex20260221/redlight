@@ -53,6 +53,8 @@ BackendPreference g_startupBackendPreference = BackendPreference::Automatic;
 bool g_backendOverride = false;
 AppPreferences g_preferences;
 bool g_preferencesUnsaved = false;
+PreferenceSource g_startupPreferenceSource = PreferenceSource::Defaults;
+bool g_startupPreferenceWarning = false;
 bool g_preferencesApplying = false;
 bool g_uiErrorVisible = false;
 BackendVerificationReport g_verification;
@@ -76,6 +78,7 @@ bool AddTrayIcon();
 void ScheduleTrayRecovery();
 void ShowTrayMenu(HWND hwnd);
 void SaveRedMode(RedMode mode);
+void SaveCurrentPreferences();
 
 void SetLumaProfile(LumaProfile profile);
 void LogSystemInfo();
@@ -180,6 +183,10 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
     }
 
     const LoadedPreferences loadedPreferences = LoadPreferences();
+    g_startupPreferenceSource = loadedPreferences.source;
+    g_startupPreferenceWarning = loadedPreferences.warning;
+    Diagnostics::LogFormat("Startup preference source: %s; load warnings: %s.",
+        PreferenceSourceName(g_startupPreferenceSource), g_startupPreferenceWarning ? "yes" : "no");
     g_preferences = loadedPreferences.preferences;
     g_backendPreference = g_preferences.backend;
     g_backendOverride = options.backendOverride.has_value();
@@ -566,6 +573,18 @@ void SetExpiryWarning(ExpiryWarning warning) {
     if (g_preferencesUnsaved) ReportError("The expiry warning changed, but could not be saved for the next start.");
 }
 
+void SaveCurrentPreferences() {
+    if (g_busy || g_preferencesApplying) return;
+    ScopedFlag transaction(g_preferencesApplying);
+    g_preferencesUnsaved = !SavePreferences(g_preferences);
+    if (g_preferencesUnsaved) {
+        ReportError("Current preferences are still unsaved. Filtering and recovery controls remain available. Fix storage access and retry Save current preferences.");
+        return;
+    }
+    Diagnostics::Log("Current preferences saved at user request; display state and countdown were not changed.");
+    ShowTrayInfo("RedLight preferences saved", "Current preferences were saved for the next start. Filtering and recovery data were preserved.");
+}
+
 void ScheduleTrayRecovery() {
     if (!SetTimer(nid.hWnd, ID_TRAY_RETRY_TIMER, 2000, NULL)) {
         Diagnostics::LogFormat("SetTimer for tray recovery failed (error %lu).", GetLastError());
@@ -743,6 +762,8 @@ void CopySupportReport(HWND owner) {
     state.nextStartupPolicy = BackendPreferenceName(g_backendPreference);
     state.commandLineOverride = g_backendOverride;
     state.preferencesUnsaved = g_preferencesUnsaved;
+    state.startupPreferenceSource = PreferenceSourceName(g_startupPreferenceSource);
+    state.startupPreferenceWarning = g_startupPreferenceWarning;
     const auto logging = Diagnostics::GetStatus();
     state.fileLogging = Diagnostics::FileStateName(logging.file);
     state.droppedLogLines = logging.droppedLines;
@@ -883,7 +904,7 @@ void VerifyBackendState(HWND owner) {
 void ShowAboutDialog(HWND parent) {
     char aboutText[1536];
     const auto logging = Diagnostics::GetStatus();
-    sprintf_s(aboutText, "RedLight " REDLIGHT_VERSION "\nBuild revision: " REDLIGHT_BUILD_REVISION " (" REDLIGHT_SOURCE_STATE ")\n\nBackend: %s\nStartup selection: %s%s\nNext start: %s\nMode: %s\nLuma detail: %s\nStatus: %s\nSettings: %s\n\n"
+    sprintf_s(aboutText, "RedLight " REDLIGHT_VERSION "\nBuild revision: " REDLIGHT_BUILD_REVISION " (" REDLIGHT_SOURCE_STATE ")\n\nBackend: %s\nStartup selection: %s%s\nNext start: %s\nMode: %s\nLuma detail: %s\nStatus: %s\nSettings: %s\nStartup preferences: %s%s\n\n"
         "Toggle shortcut: %s\nRestore shortcut: %s\nShortcut preference: %s\nSession recovery: %s\nExpiry warning: %s\n\n"
         "File logging: %s\nMissing file records: %llu\nTruncated records: %llu\nLast file error: %lu\n\n"
         "Logs: %%LOCALAPPDATA%%\\RedLight\nUnsigned release candidate\n"
@@ -894,6 +915,7 @@ void ShowAboutDialog(HWND parent) {
         g_displayFilter->supportsRedMode(RedMode::LumaRed) ? LumaProfileName(g_displayFilter->lumaProfile()) : "Unavailable on gamma",
         FilterStatusText(),
         g_preferencesUnsaved ? "Unsaved changes" : "Saved/default",
+        PreferenceSourceName(g_startupPreferenceSource), g_startupPreferenceWarning ? " (load warnings)" : "",
         g_hotkeys.toggle() ? ShortcutBindingName(*g_hotkeys.toggle()) : "Unavailable/disabled",
         g_hotkeys.restore() ? ShortcutBindingName(*g_hotkeys.restore()) : "Unavailable/disabled",
         ShortcutProfileName(g_preferences.shortcuts),
@@ -922,7 +944,7 @@ void ShowTrayMenu(HWND hwnd) {
         g_displayFilter->supportsRedMode(RedMode::LumaRed), g_displayFilter->lumaProfile(),
         g_backendPreference, g_sessionTimer.minutes(), g_preferences.shortcuts,
         g_hotkeys.toggle() ? ShortcutBindingName(*g_hotkeys.toggle()) : NULL,
-        g_hotkeys.restore() ? ShortcutBindingName(*g_hotkeys.restore()) : NULL, g_preferences.expiryWarning};
+        g_hotkeys.restore() ? ShortcutBindingName(*g_hotkeys.restore()) : NULL, g_preferences.expiryWarning, g_preferencesUnsaved};
     HMENU menu = BuildTrayMenu(state);
     if (!menu) { ReportError("Could not build the tray menu."); return; }
     if (!SetForegroundWindow(hwnd)) Diagnostics::Log("SetForegroundWindow failed for tray menu.");
@@ -1061,6 +1083,7 @@ LRESULT HandleWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         case ID_TRAY_MODE_LUMA_RED: SetRedModeFromTray(RedMode::LumaRed); break;
         case ID_TRAY_ABOUT: ShowAboutDialog(hwnd); break;
         case ID_TRAY_COPY_REPORT: CopySupportReport(hwnd); break;
+        case ID_TRAY_SAVE_PREFERENCES: SaveCurrentPreferences(); break;
         case ID_TRAY_RESET_BACKEND_COUNTS:
             if (!g_busy && !g_preferencesApplying) {
                 if (g_displayFilter->resetStatistics()) {

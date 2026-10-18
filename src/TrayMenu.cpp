@@ -71,6 +71,7 @@ HMENU BuildTrayMenu(const TrayMenuState& state) {
         !expert.add(ID_TRAY_RETRY_LOGGING, "&Retry file logging") ||
         !expert.add(ID_TRAY_RESET_BACKEND_COUNTS, "Reset backend cou&nters") ||
         !expert.add(0, NULL, MF_SEPARATOR) ||
+        !expert.add(ID_TRAY_SAVE_PREFERENCES, state.preferencesUnsaved ? "Retry saving current &preferences" : "Save current &preferences") ||
         !expert.add(ID_TRAY_COPY_PROFILE, "&Export settings profile to clipboard") ||
         !expert.add(ID_TRAY_IMPORT_PROFILE, "&Import settings profile from clipboard") ||
         !expert.add(0, NULL, MF_SEPARATOR) || !expert.add(ID_TRAY_RESET_PREFERENCES, "Reset preferences to &defaults...")) return NULL;

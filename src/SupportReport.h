@@ -15,6 +15,8 @@ struct SupportReportState {
     std::uint32_t verificationError = 0;
     bool commandLineOverride = false;
     bool preferencesUnsaved = false;
+    std::string_view startupPreferenceSource = "Not reported";
+    bool startupPreferenceWarning = false;
     std::string_view shortcutProfile = "Default", toggleBinding = "none", restoreBinding = "none";
     std::string_view fileLogging = "Not reported";
     std::uint64_t droppedLogLines = 0, truncatedLogLines = 0;
@@ -47,6 +49,8 @@ inline std::string BuildSupportReport(const SupportReportState& state) {
     }
     report << "\r\nVerification error code: " << state.verificationError
         << "\r\nSettings persistence: " << (state.preferencesUnsaved ? "unsaved changes" : "saved/default")
+        << "\r\nStartup preference source: " << state.startupPreferenceSource
+        << "\r\nStartup preference load warnings: " << (state.startupPreferenceWarning ? "yes" : "no")
         << "\r\nRecovery data pending: " << (state.needsRestore ? "yes" : "no")
         << "\r\nShortcut preference: " << state.shortcutProfile
         << "\r\nToggle shortcut: " << (state.toggleHotkey ? "registered" : "unavailable") << " (" << state.toggleBinding << ")"
