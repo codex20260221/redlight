@@ -13,12 +13,23 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Portable release: no separate Visual C++ runtime installer required.
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 configure_file(src/Version.h.in generated/Version.h @ONLY)
+option(REDLIGHT_EMBED_SOURCE_REVISION "Include local source revision/state in support reports" ON)
+add_custom_target(RedLightBuildInfo
+    COMMAND "${CMAKE_COMMAND}" "-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+        "-DOUTPUT_FILE=${CMAKE_CURRENT_BINARY_DIR}/generated/BuildInfo.h"
+        "-DEMBED_SOURCE_REVISION=${REDLIGHT_EMBED_SOURCE_REVISION}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/GenerateBuildInfo.cmake"
+    BYPRODUCTS "${CMAKE_CURRENT_BINARY_DIR}/generated/BuildInfo.h"
+    COMMENT "Read local source identity for support reports"
+    VERBATIM
+)
 
 add_executable(RedLight WIN32
     src/Diagnostics.cpp src/Clipboard.cpp src/PreferencesStore.cpp src/TrayMenu.cpp src/SessionLimitDialog.cpp src/HotkeyManager.cpp src/main.cpp
     src/GammaRampFilter.cpp src/MagnificationFilter.cpp
     resources/app.rc
 )
+add_dependencies(RedLight RedLightBuildInfo)
 target_include_directories(RedLight PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated" resources)
 target_compile_definitions(RedLight PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00)
 target_link_libraries(RedLight PRIVATE user32 gdi32 Shell32 Magnification Wtsapi32 Advapi32)

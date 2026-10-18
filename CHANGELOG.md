@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Added path-free build revision/source-state identity to About, startup diagnostics, and support reports, refreshed on each build; source archives and opt-out builds remain supported.
 - Added a confirmed Reset preferences to defaults command that restores the display before saving, resets the complete preference record, and leaves filtering off.
 - Added file-logging health, missing/truncated record counts, and last file errors to About/support reports, plus an Expert retry command that confirms recovery with an actual log write.
 - Added saved shortcut profiles for Ctrl+Alt+R, Ctrl+Alt+F9, Ctrl+Alt+F10, or disabled shortcuts; restore adds Shift. Track actual bindings through registration/rollback failures and reject stale queued shortcut messages. Settings profiles now export version 2 while accepting version 1 with default shortcuts.

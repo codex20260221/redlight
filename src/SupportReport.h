@@ -8,6 +8,7 @@
 
 struct SupportReportState {
     std::string_view version, backend, startupPolicy, nextStartupPolicy, redMode, lumaProfile, lastError;
+    std::string_view buildRevision = "unversioned", sourceState = "unknown";
     BackendVerification verification = BackendVerification::NotChecked;
     bool commandLineOverride = false;
     bool preferencesUnsaved = false;
@@ -23,6 +24,7 @@ struct SupportReportState {
 inline std::string BuildSupportReport(const SupportReportState& state) {
     std::ostringstream report;
     report << "RedLight support report\r\nVersion: " << state.version << " (Windows x64)\r\n"
+        << "Build revision: " << state.buildRevision << " (" << state.sourceState << ")\r\n"
         << "Backend: " << state.backend << "\r\nStartup policy: " << state.startupPolicy
         << (state.commandLineOverride ? " (command-line override)" : "")
         << "\r\nNext-start preference: " << state.nextStartupPolicy << "\r\nMode: " << state.redMode

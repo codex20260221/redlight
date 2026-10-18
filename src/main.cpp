@@ -4,6 +4,7 @@
 #include <vector>
 #include "CommandLine.h"
 #include "Version.h"
+#include "BuildInfo.h"
 #include "SessionTimer.h"
 #include "BackendSelection.h"
 #include "SupportReport.h"
@@ -94,6 +95,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
 
     Diagnostics::Initialize();
     Diagnostics::Log("RedLight " REDLIGHT_VERSION " starting.");
+    Diagnostics::LogFormat("Build revision: %s (%s).", REDLIGHT_BUILD_REVISION, REDLIGHT_SOURCE_STATE);
     LogSystemInfo();
 
     const StartupOptions options = GetStartupOptions();
@@ -681,6 +683,8 @@ void SetRedModeFromTray(RedMode mode) {
 void CopySupportReport(HWND owner) {
     SupportReportState state;
     state.version = REDLIGHT_VERSION;
+    state.buildRevision = REDLIGHT_BUILD_REVISION;
+    state.sourceState = REDLIGHT_SOURCE_STATE;
     state.backend = g_displayFilter->name();
     state.startupPolicy = BackendPreferenceName(g_startupBackendPreference);
     state.nextStartupPolicy = BackendPreferenceName(g_backendPreference);
@@ -812,7 +816,7 @@ void VerifyBackendState(HWND owner) {
 void ShowAboutDialog(HWND parent) {
     char aboutText[1536];
     const auto logging = Diagnostics::GetStatus();
-    sprintf_s(aboutText, "RedLight " REDLIGHT_VERSION "\n\nBackend: %s\nStartup selection: %s%s\nNext start: %s\nMode: %s\nLuma detail: %s\nStatus: %s\nSettings: %s\n\n"
+    sprintf_s(aboutText, "RedLight " REDLIGHT_VERSION "\nBuild revision: " REDLIGHT_BUILD_REVISION " (" REDLIGHT_SOURCE_STATE ")\n\nBackend: %s\nStartup selection: %s%s\nNext start: %s\nMode: %s\nLuma detail: %s\nStatus: %s\nSettings: %s\n\n"
         "Toggle shortcut: %s\nRestore shortcut: %s\nShortcut preference: %s\nSession recovery: %s\n\n"
         "File logging: %s\nMissing file records: %llu\nTruncated records: %llu\nLast file error: %lu\n\n"
         "Logs: %%LOCALAPPDATA%%\\RedLight\nUnsigned release candidate\n"

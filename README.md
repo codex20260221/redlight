@@ -178,6 +178,8 @@ cpack --config build/CPackConfig.cmake -C Release -B build/packages
 ./tools/Verify-Package.ps1
 ```
 
+About and support reports include the local source revision and clean/modified state captured when built. Source archives without their own Git metadata show an unversioned identity. Configure with `-DREDLIGHT_EMBED_SOURCE_REVISION=OFF` to omit revision inspection. Generated identity contains no repository path.
+
 The code-test targets compile production backends and supporting helpers against fake Win32 functions. The import check permits only KERNEL32.dll for both executables. Tests cover transforms/recovery, preferences, timers, clipboard, shortcuts, and logging; display, registry, clipboard, and diagnostics-file operations use fakes. The diagnostics suite also checks concurrent records and runtime rotation in memory. Build the manual probe only when explicitly wanted with `-DREDLIGHT_BUILD_PROBE=ON`; it is excluded by default and is never a CTest test.
 
 The ZIP includes the executable, SHA-256 checksum, license, README, changelog, and documentation. Verify a downloaded executable with `Get-FileHash .\RedLight.exe -Algorithm SHA256` against its published checksum. SHA-256 identifies the file; it does not establish publisher trust.
