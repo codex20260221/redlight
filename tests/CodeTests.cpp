@@ -16,6 +16,7 @@
 #include "TrayStatus.h"
 #include "StatusQuery.h"
 #include "StandardOutput.h"
+#include "StartupOptions.h"
 #include <map>
 #include <algorithm>
 #include "Clipboard.h"
@@ -68,10 +69,14 @@ struct Fake {
     int mutexClosesWhileOwned = 0, gammaUnownedWrites = 0, gammaWritesAtMutexRelease = -1;
     const wchar_t* mutexName = nullptr;
     BOOL mutexInitialOwner = -1;
+    bool argumentsRead = true, argumentsFree = true, argumentsOutstanding = false;
+    int argumentsCount = 1, argumentReads = 0, argumentFrees = 0;
+    std::array<LPWSTR, 8> arguments{};
 } fake;
 
 void Reset() {
     fake = {};
+    fake.arguments[0] = const_cast<LPWSTR>(L"RedLight.exe");
     for (int i = 0; i < 5; ++i) fake.effect.transform[i][i] = 1;
     for (int c = 0; c < 3; ++c)
         for (int i = 0; i < 256; ++i) fake.ramp[c][i] = static_cast<WORD>(i * 257);
@@ -1156,10 +1161,48 @@ void BackendStatisticsSupportReport() {
     Check(!CommandMayChangeFilter(ID_TRAY_RESET_BACKEND_COUNTS) && fake.magReads == 0 && fake.gammaReads == 0 && fake.magWrites == 0 && fake.gammaWrites == 0,
         "report/reset diagnostic paths have no display effect");
 }
+void NativeStartupArgumentOwnership() {
+    Check(GetStartupOptions().action == StartupAction::Tray && fake.argumentReads == 1 && fake.argumentFrees == 1 && !fake.argumentsOutstanding,
+        "no-option startup frees native argument block");
+    fake.arguments[1] = const_cast<LPWSTR>(L"--status"); fake.argumentsCount = 2;
+    Check(GetStartupOptions().action == StartupAction::Status && fake.argumentFrees == 2 && !fake.argumentsOutstanding, "read-only option is parsed and freed");
+    fake.arguments[1] = const_cast<LPWSTR>(L"--backend=gamma");
+    Check(GetStartupOptions().backendOverride == BackendPreference::Gamma && fake.argumentFrees == 3, "backend override survives freeing native arguments");
+    fake.arguments[1] = const_cast<LPWSTR>(L"--unknown");
+    Check(GetStartupOptions().action == StartupAction::Invalid && fake.argumentFrees == 4, "invalid user arguments remain distinct from internal failure");
+    Check(fake.magInitializes == 0 && fake.dcRequests == 0 && fake.magWrites == 0 && fake.gammaWrites == 0 && fake.registryWrites == 0,
+        "loading startup arguments cannot initialize or change display/settings state");
+}
+void NativeStartupArgumentFailures() {
+    fake.argumentsRead = false;
+    Check(GetStartupOptions().action == StartupAction::Failed && fake.argumentFrees == 0, "native argument API failure is a startup failure, not a user syntax error");
+    fake.argumentsRead = true; fake.argumentsCount = 0;
+    Check(GetStartupOptions().action == StartupAction::Failed && fake.argumentFrees == 1 && !fake.argumentsOutstanding, "invalid native argument count still frees returned block");
+    fake.argumentsCount = 2; fake.arguments[1] = const_cast<LPWSTR>(L"--status");
+    {
+        TestMemory::FailNextAllocation fail;
+        Check(GetStartupOptions().action == StartupAction::Failed && fake.argumentFrees == 2 && !fake.argumentsOutstanding,
+            "allocation exception is contained and unwinds native ownership before returning failure");
+    }
+    Check(GetStartupOptions().action == StartupAction::Status && fake.argumentFrees == 3, "later startup parsing can succeed after a transient allocation failure");
+}
 } // namespace
 
 DWORD GetLastError() { return fake.lastError; }
 void SetLastError(DWORD value) { fake.lastError = value; }
+LPWSTR GetCommandLineW() { return fake.arguments[0]; }
+LPWSTR* CommandLineToArgvW(const wchar_t*, int* count) {
+    ++fake.argumentReads; *count = fake.argumentsCount;
+    if (!fake.argumentsRead) return nullptr;
+    fake.argumentsOutstanding = true;
+    return fake.arguments.data();
+}
+HLOCAL LocalFree(HLOCAL block) {
+    ++fake.argumentFrees;
+    if (!fake.argumentsFree) return block;
+    fake.argumentsOutstanding = false;
+    return nullptr;
+}
 HANDLE CreateMutexW(void*, BOOL initialOwner, const wchar_t* name) {
     ++fake.mutexCreates; fake.mutexName = name; fake.mutexInitialOwner = initialOwner;
     if (!fake.mutexCreate) return nullptr;
@@ -1347,6 +1390,7 @@ int main() {
         {"Expiry warning schema migration", ExpiryWarningSchemaMigrationAndValidation},
         {"Magnification operation counters", MagnificationStatisticsAndSafeReset}, {"Gamma operation counters", GammaStatisticsAndCleanupReset},
         {"Backend counters saturation/reset guard", BackendStatisticsSaturationAndInProgress}, {"Backend counters support report", BackendStatisticsSupportReport},
+        {"Native startup argument ownership", NativeStartupArgumentOwnership}, {"Native startup argument failures", NativeStartupArgumentFailures},
         {"Command line", Arguments}
     };
     int failed = 0;

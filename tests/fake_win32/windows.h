@@ -115,3 +115,7 @@ constexpr DWORD ERROR_BUSY = 170, ERROR_ABANDONED_WAIT_0 = 735;
 HANDLE CreateMutexW(void*, BOOL, const wchar_t*);
 DWORD WaitForSingleObject(HANDLE, DWORD);
 BOOL ReleaseMutex(HANDLE);
+using LPWSTR = wchar_t*;
+using HLOCAL = void*;
+LPWSTR GetCommandLineW();
+HLOCAL LocalFree(HLOCAL);

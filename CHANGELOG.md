@@ -43,6 +43,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Support Unicode diagnostics paths and report log-write failures to the debugger.
 
 ### Fixed
+- Free native command-line arguments during C++ allocation failures, contain option-construction exceptions before display initialization, and distinguish internal startup failures from invalid user arguments.
 - Contain C++ exceptions at the native callback boundary, unwind busy/transaction flags safely, preserve active filtering after read-only tool failures, and request recoverable restoration after interrupted mutating actions.
 - Reject incomplete support reports on stream/allocation failure instead of copying partial output; log failed error/about/confirmation dialogs.
 - Contain preference serialization/allocation failures as normal failed-save results, preserving prior stored settings and import restore-before-save behavior; allocation fault injection is restricted to code-test binaries.

@@ -3,7 +3,7 @@
 #include <span>
 #include <string_view>
 
-enum class StartupAction { Tray, Restore, Help, Version, Status, Invalid };
+enum class StartupAction { Tray, Restore, Help, Version, Status, Invalid, Failed };
 struct StartupOptions {
     StartupAction action = StartupAction::Tray;
     std::optional<BackendPreference> backendOverride;

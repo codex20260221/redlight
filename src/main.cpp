@@ -1,8 +1,8 @@
 #include <windows.h>
 #include <shellapi.h>
 #include <wtsapi32.h>
-#include <vector>
 #include "CommandLine.h"
+#include "StartupOptions.h"
 #include "Version.h"
 #include "BuildInfo.h"
 #include "SessionTimer.h"
@@ -56,7 +56,6 @@ BackendVerification g_verification = BackendVerification::NotChecked;
 
 }
 
-StartupOptions GetStartupOptions();
 bool ApplyInactivePreferences(const AppPreferences& preferences);
 void SetBackendPreference(BackendPreference preference);
 bool RestoreFilter(bool showError, bool notifyFailure = true);
@@ -107,6 +106,10 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
 
     const StartupOptions options = GetStartupOptions();
     const StartupAction action = options.action;
+    if (action == StartupAction::Failed) {
+        Diagnostics::Shutdown();
+        return 1;
+    }
     if (action == StartupAction::Status) {
         const int result = QueryRunningStatus();
         Diagnostics::Shutdown();
@@ -218,17 +221,6 @@ void DestroyTrayWindow(HWND hwnd) {
         Diagnostics::LogFormat("DestroyWindow failed (error %lu).", GetLastError());
         ReportError("RedLight could not close its controls. Please retry Exit.");
     }
-}
-
-StartupOptions GetStartupOptions() {
-    int argc = 0;
-    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    if (!argv) return {StartupAction::Invalid, std::nullopt};
-    std::vector<std::wstring_view> args;
-    for (int i = 1; i < argc; ++i) args.emplace_back(argv[i]);
-    const StartupOptions options = ParseStartupOptions(args);
-    if (LocalFree(argv)) Diagnostics::Log("Freeing command-line arguments failed.");
-    return options;
 }
 
 void LogSystemInfo() {
