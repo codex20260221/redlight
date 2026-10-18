@@ -1101,14 +1101,18 @@ void VerifyBackendState(HWND owner) {
     char details[1024];
     if (report.readback) {
         const auto& values = *report.readback;
+        char first[ReadbackLocationBufferSize], maximum[ReadbackLocationBufferSize];
+        const auto firstLocation = FormatReadbackLocation(values.firstMismatch, values.gammaRamp, first).value_or("unavailable");
+        const auto maximumLocation = FormatReadbackLocation(values.maximumDifferenceAt, values.gammaRamp, maximum).value_or("unavailable");
         char endpoints[128] = {};
         if (values.gammaRamp) sprintf_s(endpoints, "\nRed black endpoint mismatch: %s\nRed white endpoint mismatch: %s",
             values.redBlackEndpointMismatch ? "yes" : "no", values.redWhiteEndpointMismatch ? "yes" : "no");
         sprintf_s(details, "%s\n\nValues compared: %u\nMismatches: %u\nLargest finite difference: %.9g (%s)\n"
-            "Nonfinite values: %s\nUnexpected green/blue entries: %s%s",
+            "Nonfinite values: %s\nUnexpected green/blue entries: %s%s\nFirst mismatch: %.*s\nLargest finite difference at: %.*s",
             message, values.values, values.mismatches, values.maximumDifference,
             values.gammaRamp ? "gamma fraction of full scale" : "matrix coefficient",
-            values.nonFiniteValues ? "yes" : "no", values.unexpectedGreenBlue ? "yes" : "no", endpoints);
+            values.nonFiniteValues ? "yes" : "no", values.unexpectedGreenBlue ? "yes" : "no", endpoints,
+            static_cast<int>(firstLocation.size()), firstLocation.data(), static_cast<int>(maximumLocation.size()), maximumLocation.data());
     } else if (report.state == BackendVerification::Unavailable) {
         sprintf_s(details, "%s\n\nVerification error code: %lu", message, static_cast<unsigned long>(report.errorCode));
     } else strcpy_s(details, message);

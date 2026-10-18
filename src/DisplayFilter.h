@@ -20,11 +20,16 @@ inline const char* RedModeDisplayName(RedMode mode) {
 }
 
 enum class BackendVerification { NotChecked, Inactive, Matches, Changed, Unavailable };
+struct BackendValueLocation {
+    unsigned row = 0, column = 0; // Matrix row/column or gamma channel/entry; zero-based.
+    bool operator==(const BackendValueLocation&) const = default;
+};
 struct BackendReadbackDetails {
     unsigned values = 0, mismatches = 0;
     double maximumDifference = 0;
     bool nonFiniteValues = false, unexpectedGreenBlue = false, gammaRamp = false;
     bool redBlackEndpointMismatch = false, redWhiteEndpointMismatch = false;
+    std::optional<BackendValueLocation> firstMismatch, maximumDifferenceAt;
 };
 struct BackendVerificationReport {
     BackendVerification state = BackendVerification::NotChecked;

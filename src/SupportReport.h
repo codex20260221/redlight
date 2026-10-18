@@ -4,6 +4,7 @@
 #include "RestorationHistory.h"
 #include "SessionTimer.h"
 #include "CountdownTimerDiagnostics.h"
+#include "ReadbackLocation.h"
 #include "DisplayContext.h"
 #include "Diagnostics.h"
 #include <cstdint>
@@ -75,6 +76,11 @@ inline std::string BuildSupportReport(const SupportReportState& state) {
             << (readback.gammaRamp ? " (gamma fraction of full scale)" : " (matrix coefficient)")
             << "\r\nNonfinite values: " << (readback.nonFiniteValues ? "yes" : "no")
             << "\r\nUnexpected green/blue entries: " << (readback.unexpectedGreenBlue ? "yes" : "no");
+        char first[ReadbackLocationBufferSize], maximum[ReadbackLocationBufferSize];
+        const auto firstLocation = FormatReadbackLocation(readback.firstMismatch, readback.gammaRamp, first);
+        const auto maximumLocation = FormatReadbackLocation(readback.maximumDifferenceAt, readback.gammaRamp, maximum);
+        report << "\r\nFirst mismatch location: " << firstLocation.value_or("unavailable (invalid cached location)")
+            << "\r\nLargest finite difference location: " << maximumLocation.value_or("unavailable (invalid cached location)");
         if (readback.gammaRamp) report << "\r\nRed black endpoint mismatch: " << (readback.redBlackEndpointMismatch ? "yes" : "no")
             << "\r\nRed white endpoint mismatch: " << (readback.redWhiteEndpointMismatch ? "yes" : "no");
     }

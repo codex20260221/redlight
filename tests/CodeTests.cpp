@@ -1992,6 +1992,128 @@ void DetailedVerificationReportFormatting() {
     Check(cached.state == BackendVerification::NotChecked && !cached.readback && cached.errorCode == 0, "filter-operation cache reset discards all numerical/error details");
     Check(fake.magReads == 0 && fake.gammaReads == 0 && fake.magWrites == 0 && fake.gammaWrites == 0, "formatting cached detail performs no backend operation");
 }
+void MatrixComparisonLocationCoverage() {
+    float expected[5][5] = {}, actual[5][5] = {};
+    auto details = BackendComparison::Matrix(actual, expected);
+    Check(details.mismatches == 0 && !details.firstMismatch && !details.maximumDifferenceAt, "identical finite matrices invent no value locations");
+    for (unsigned row = 0; row < 5; ++row) for (unsigned column = 0; column < 5; ++column) {
+        actual[row][column] = 0.25f;
+        details = BackendComparison::Matrix(actual, expected);
+        Check(details.mismatches == 1 && details.firstMismatch == BackendValueLocation{row, column} &&
+            details.maximumDifferenceAt == BackendValueLocation{row, column} && details.maximumDifference == 0.25,
+            "every matrix coefficient preserves its row/column in first and maximum diagnostics");
+        actual[row][column] = 0;
+    }
+}
+void MatrixComparisonLocationsToleranceNonfiniteAndTies() {
+    float expected[5][5] = {}, actual[5][5] = {};
+    expected[0][0] = 1; actual[0][0] = std::nextafter(1.0f, 2.0f);
+    auto details = BackendComparison::Matrix(actual, expected);
+    Check(!details.firstMismatch && details.maximumDifferenceAt == BackendValueLocation{0, 0} && details.mismatches == 0,
+        "a tolerated finite coefficient difference has a maximum location without a mismatch location");
+    actual[0][1] = (std::numeric_limits<float>::denorm_min)();
+    actual[1][0] = actual[3][4] = 0.25f;
+    details = BackendComparison::Matrix(actual, expected);
+    Check(details.mismatches == 3 && details.firstMismatch == BackendValueLocation{0, 1} && details.maximumDifferenceAt == BackendValueLocation{1, 0},
+        "expected-zero subnormal mismatch and first equal maximum are deterministic row-major locations");
+    actual[0][0] = (std::numeric_limits<float>::quiet_NaN)();
+    details = BackendComparison::Matrix(actual, expected);
+    Check(details.mismatches == 4 && details.nonFiniteValues && details.firstMismatch == BackendValueLocation{0, 0} &&
+        details.maximumDifferenceAt == BackendValueLocation{1, 0} && details.maximumDifference == 0.25,
+        "a nonfinite first mismatch does not replace the finite maximum location/value");
+    for (auto& row : actual) for (auto& value : row) value = (std::numeric_limits<float>::infinity)();
+    details = BackendComparison::Matrix(actual, expected);
+    Check(details.mismatches == 25 && details.firstMismatch == BackendValueLocation{0, 0} && !details.maximumDifferenceAt && details.maximumDifference == 0,
+        "all nonfinite values record the first failure without inventing a finite-difference location");
+}
+void GammaComparisonLocationCoverage() {
+    WORD expected[3][256] = {}, actual[3][256] = {};
+    for (bool strict : {false, true}) for (unsigned channel = 0; channel < 3; ++channel) for (unsigned entry = 0; entry < 256; ++entry) {
+        actual[channel][entry] = 256;
+        const auto details = BackendComparison::Gamma(actual, expected, strict);
+        Check(details.gammaRamp && details.values == 768 && details.mismatches == 1 &&
+            details.firstMismatch == BackendValueLocation{channel, entry} && details.maximumDifferenceAt == BackendValueLocation{channel, entry},
+            "all gamma channels/entries preserve locations under strict and restoration comparison policies");
+        actual[channel][entry] = 0;
+    }
+    const auto details = BackendComparison::Gamma(actual, expected, true);
+    Check(!details.firstMismatch && !details.maximumDifferenceAt && details.maximumDifference == 0, "identical ramps invent no failure/maximum location");
+}
+void GammaComparisonLocationsToleranceEndpointsAndTies() {
+    WORD expected[3][256] = {}, actual[3][256] = {};
+    actual[0][100] = 1;
+    auto details = BackendComparison::Gamma(actual, expected, true);
+    Check(details.mismatches == 0 && !details.firstMismatch && details.maximumDifferenceAt == BackendValueLocation{0, 100},
+        "allowed red low-byte rounding still has a finite maximum location");
+    actual[1][0] = 1;
+    details = BackendComparison::Gamma(actual, expected, true);
+    Check(details.mismatches == 1 && details.firstMismatch == BackendValueLocation{1, 0} && details.maximumDifferenceAt == BackendValueLocation{0, 100},
+        "forbidden green low bytes are mismatches even when a tolerated red entry ties the maximum difference");
+    actual[2][255] = 257;
+    details = BackendComparison::Gamma(actual, expected, false);
+    Check(details.mismatches == 1 && details.firstMismatch == BackendValueLocation{2, 255} && details.maximumDifferenceAt == BackendValueLocation{2, 255},
+        "original-ramp restoration retains significant-byte acceptance independently from diagnostic locations");
+    actual[0][0] = 1;
+    details = BackendComparison::Gamma(actual, expected, true);
+    Check(details.mismatches == 3 && details.redBlackEndpointMismatch && details.firstMismatch == BackendValueLocation{0, 0} &&
+        details.maximumDifferenceAt == BackendValueLocation{2, 255}, "strict red endpoint checks retain exact acceptance with separate first/maximum coordinates");
+}
+void ReadbackLocationFormattingBoundsAndAllocation() {
+    struct Example { std::optional<BackendValueLocation> location; bool gamma; std::string_view expected; };
+    const Example examples[] = {
+        {std::nullopt, false, "none recorded"}, {{BackendValueLocation{4, 4}}, false, "matrix row 4, column 4 (zero-based)"},
+        {{BackendValueLocation{0, 0}}, true, "gamma red channel (0), entry 0 (zero-based)"},
+        {{BackendValueLocation{1, 255}}, true, "gamma green channel (1), entry 255 (zero-based)"},
+        {{BackendValueLocation{2, 255}}, true, "gamma blue channel (2), entry 255 (zero-based)"}
+    };
+    for (const auto& example : examples) {
+        char output[ReadbackLocationBufferSize];
+        Check(FormatReadbackLocation(example.location, example.gamma, output) == example.expected && output[example.expected.size()] == '\0',
+            "bounded location text has exact backend labels, channel/index semantics, and a complete terminator");
+        Check(!FormatReadbackLocation(example.location, example.gamma, std::span<char>(output, example.expected.size())) &&
+            FormatReadbackLocation(example.location, example.gamma, std::span<char>(output, example.expected.size() + 1)) == example.expected,
+            "exact text size refuses a missing terminator and text-plus-terminator size succeeds");
+    }
+    char output[ReadbackLocationBufferSize];
+    Check(!FormatReadbackLocation(BackendValueLocation{5, 0}, false, output) && !FormatReadbackLocation(BackendValueLocation{0, 5}, false, output) &&
+        !FormatReadbackLocation(BackendValueLocation{3, 0}, true, output) && !FormatReadbackLocation(BackendValueLocation{0, 256}, true, output) &&
+        !FormatReadbackLocation(std::nullopt, false, {}), "invalid cached coordinates and empty destinations are refused before unsafe channel indexing");
+    bool formatted = false, unused = false;
+    {
+        TestMemory::FailNextAllocation fail;
+        formatted = FormatReadbackLocation(BackendValueLocation{2, 255}, true, output).has_value();
+        unused = TestMemory::AllocationFailurePending();
+    }
+    Check(formatted && unused, "preparing valid location text requires no C++ allocation");
+}
+void ReadbackLocationCacheReportsPreserveRecovery() {
+    GammaRampFilter filter;
+    Check(filter.initialize(), "initialize gamma for pending recovery diagnostics");
+    fake.writes = {Write::FailAfterApply, Write::Fail};
+    Check(!filter.enable() && filter.needsRestore(), "retain failed activation rollback snapshot");
+    fake.ramp[1][0] = 1; fake.ramp[2][255] = 257;
+    BackendVerificationCache cache;
+    const auto inspected = filter.inspectState(); cache.record(inspected, 100, 120);
+    Check(inspected.state == BackendVerification::Changed && inspected.readback && inspected.readback->firstMismatch == BackendValueLocation{1, 0} &&
+        inspected.readback->maximumDifferenceAt == BackendValueLocation{2, 255}, "production read-back carries deterministic locations into the verification cache");
+    const auto statistics = filter.statistics(); const auto clocks = fake.backendClockReads;
+    const auto reads = fake.gammaReads, writes = fake.gammaWrites, releases = fake.mutexReleases;
+    const auto error = std::string(filter.lastError());
+    SupportReportState state; state.readback = cache.result().readback;
+    const auto report = BuildSupportReport(state);
+    Check(report.find("First mismatch location: gamma green channel (1), entry 0 (zero-based)") != std::string::npos &&
+        report.find("Largest finite difference location: gamma blue channel (2), entry 255 (zero-based)") != std::string::npos &&
+        fake.gammaReads == reads && fake.gammaWrites == writes && fake.mutexReleases == releases && fake.backendClockReads == clocks &&
+        filter.statistics() == statistics && error == filter.lastError() && fake.mutexOwned && filter.needsRestore() && !filter.isActive(),
+        "cached location reporting cannot read/reapply/restore or release pending calibration recovery");
+    cache = {};
+    Check(!cache.result().readback && state.readback->firstMismatch == BackendValueLocation{1, 0} && !cache.ageSeconds(1000),
+        "cache invalidation discards locations/timing together while prior copied snapshots stay stable");
+    state.readback->firstMismatch = BackendValueLocation{3, 0};
+    Check(BuildSupportReport(state).find("First mismatch location: unavailable (invalid cached location)") != std::string::npos,
+        "invalid report coordinates are disclosed instead of interpreted as an in-range channel");
+    Check(filter.disable(), "original calibration stays recoverable after location formatting");
+}
 void SessionNotificationOwnership() {
     SessionNotifications notifications;
     const auto first = reinterpret_cast<HWND>(std::uintptr_t{0x1234});
@@ -5057,6 +5179,9 @@ int main() {
         {"Saved profile export command policy", SavedProfileExportCommandPolicy},
         {"Detailed matrix read-back", DetailedMatrixVerification}, {"Detailed gamma read-back", DetailedGammaVerification},
         {"Comparison tolerance/finite range", ComparisonToleranceAndFiniteRange}, {"Detailed verification support report", DetailedVerificationReportFormatting},
+        {"Matrix location coverage", MatrixComparisonLocationCoverage}, {"Matrix locations tolerance/nonfinite/ties", MatrixComparisonLocationsToleranceNonfiniteAndTies},
+        {"Gamma location coverage", GammaComparisonLocationCoverage}, {"Gamma locations tolerance/endpoints/ties", GammaComparisonLocationsToleranceEndpointsAndTies},
+        {"Read-back location formatting bounds/allocation", ReadbackLocationFormattingBoundsAndAllocation}, {"Read-back location cache preserves recovery", ReadbackLocationCacheReportsPreserveRecovery},
         {"Session notification ownership", SessionNotificationOwnership}, {"Session notification failure/retry", SessionNotificationFailureRecovery},
         {"Session notification reentrancy/unwind", SessionNotificationReentrancyAndUnwind}, {"Session notification support report", SessionNotificationReport},
         {"Read-only exception with queued restore", ReadOnlyFailureHonorsQueuedRestore}, {"Queued restore under outer busy scope", QueuedRestoreRetainsOuterBusyOwnership},

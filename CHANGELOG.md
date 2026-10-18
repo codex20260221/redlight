@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Identify the first mismatching matrix coefficient or gamma entry and the largest finite-difference location in cached support reports and explicit verification details, with validated zero-based coordinates, bounded formatting, deterministic ties, and unchanged comparison tolerances/restoration behavior.
 - Include signed virtual-desktop origins and overflow-safe exclusive right/bottom bounds in cached support diagnostics and origin-aware refresh logs, preserving negative multi-monitor coordinates, prior complete snapshots on refresh failure, and read-only reporting.
 - Retain the last countdown SetTimer/KillTimer failure in cached support reports, preserve exact window/id ownership across failed cleanup/replacement, and refuse thread-only or mismatched registrations without weakening restore-on-timer-failure behavior.
 - Added read-only `--current-settings` JSON for an existing tray's complete cached preference snapshot, sharing clipboard capture/formatting through a separate validated x64 scalar packet with schema/reserved-bit checks, bounded IPC, noninteractive errors, and no storage/backend inspection or instance creation.
