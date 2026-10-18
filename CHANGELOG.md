@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Retain the last countdown SetTimer/KillTimer failure in cached support reports, preserve exact window/id ownership across failed cleanup/replacement, and refuse thread-only or mismatched registrations without weakening restore-on-timer-failure behavior.
 - Added read-only `--current-settings` JSON for an existing tray's complete cached preference snapshot, sharing clipboard capture/formatting through a separate validated x64 scalar packet with schema/reserved-bit checks, bounded IPC, noninteractive errors, and no storage/backend inspection or instance creation.
 - Added Expert Copy current preferences JSON with in-memory choices, unsaved/busy state and historical startup-load context, sharing a bounded canonical preference formatter with saved/offline JSON and preserving clipboard ownership/backend state without storage reads or preference writes.
 - Show input/canonical schema and exact older-version default choices in clipboard-import confirmations, share schema-default policy with parsing/offline validation, pin historical defaults, and reject inconsistent provenance before confirmation or mutation.

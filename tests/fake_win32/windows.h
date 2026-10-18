@@ -123,6 +123,9 @@ LRESULT SendMessageTimeoutA(HWND, unsigned, WPARAM, LPARAM, unsigned, unsigned, 
 constexpr unsigned WM_COMMAND = 0x0111;
 constexpr DWORD ERROR_INVALID_WINDOW_HANDLE = 1400;
 BOOL PostMessageA(HWND, unsigned, WPARAM, LPARAM);
+using TIMERPROC = void (*)(HWND, UINT, UINT_PTR, DWORD);
+UINT_PTR SetTimer(HWND, UINT_PTR, UINT, TIMERPROC);
+BOOL KillTimer(HWND, UINT_PTR);
 
 constexpr DWORD WAIT_OBJECT_0 = 0, WAIT_ABANDONED = 128, WAIT_TIMEOUT = 258, WAIT_FAILED = 0xfffffffful;
 constexpr DWORD ERROR_BUSY = 170, ERROR_ABANDONED_WAIT_0 = 735;

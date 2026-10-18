@@ -4,6 +4,7 @@
 #include "GammaRampFilter.h"
 #include "CommandLine.h"
 #include "SessionTimer.h"
+#include "CountdownTimerRegistration.h"
 #include "SessionControl.h"
 #include "BackendSelection.h"
 #include "SupportReport.h"
@@ -105,6 +106,13 @@ struct Fake {
     unsigned statusSends = 0, statusMessageId = 0, statusFlags = 0, statusTimeout = 0;
     WPARAM statusWparam = 0;
     LPARAM statusLparam = 0;
+    bool countdownSet = true, countdownKill = true, countdownInstalled = false;
+    std::optional<DWORD> countdownSetError = ERROR_ACCESS_DENIED, countdownKillError = ERROR_ACCESS_DENIED;
+    unsigned countdownSets = 0, countdownKills = 0, countdownInterval = 0;
+    HWND countdownSetOwner = nullptr, countdownKillOwner = nullptr, countdownOwner = nullptr;
+    UINT_PTR countdownSetId = 0, countdownKillId = 0, countdownId = 0, countdownReturn = 999;
+    TIMERPROC countdownCallback = nullptr;
+    DWORD countdownErrorBeforeSet = 0, countdownErrorBeforeKill = 0;
     bool mutexCreate = true, mutexRelease = true, mutexClose = true, mutexOwned = false, mutexOpen = false;
     DWORD mutexWaitResult = WAIT_OBJECT_0, mutexWaitMilliseconds = 999;
     int mutexCreates = 0, mutexWaits = 0, mutexReleases = 0, mutexCloses = 0;
@@ -3403,6 +3411,117 @@ void NativeCountdownDiagnosticsAndReports() {
     Check(BuildSupportReport(state).find("retry allowed now (message processing/busy state may delay)") != std::string::npos,
         "zero wait means policy eligibility rather than a promised immediate display operation");
 }
+void CountdownRegistrationLifecycle() {
+    CountdownTimerRegistration registration;
+    const auto owner = reinterpret_cast<HWND>(std::uintptr_t{0x1234});
+    Check(!registration.installed() && !registration.lastFailure() && registration.remove() && fake.countdownKills == 0,
+        "fresh registration has no ownership/failure and no-op cleanup calls no native API");
+    Check(registration.install(owner, ID_SESSION_TIMER) && registration.installed() && fake.countdownInstalled &&
+        fake.countdownSetOwner == owner && fake.countdownSetId == ID_SESSION_TIMER && fake.countdownInterval == 1000 &&
+        fake.countdownCallback == nullptr && fake.countdownErrorBeforeSet == ERROR_SUCCESS,
+        "countdown uses the exact nonnull window/id, one-second messages, checked last-error, and no callback timer");
+    Check(registration.install(owner, ID_SESSION_TIMER) && fake.countdownSets == 2 && !registration.lastFailure(),
+        "a deliberate replacement resets the same window timer without creating a different owner");
+    Check(registration.remove() && !registration.installed() && !fake.countdownInstalled && fake.countdownKills == 1 &&
+        fake.countdownKillOwner == owner && fake.countdownKillId == ID_SESSION_TIMER && fake.countdownKillId != fake.countdownReturn &&
+        fake.countdownErrorBeforeKill == ERROR_SUCCESS && registration.remove() && fake.countdownKills == 1,
+        "window timer cleanup uses the requested id rather than the API's arbitrary nonzero success result and is idempotent");
+}
+void CountdownRegistrationInstallFailures() {
+    for (bool generic : {false, true}) {
+        Reset(); CountdownTimerRegistration registration;
+        fake.countdownSet = false; fake.lastError = 0xbad; fake.diagnosticsClobbersError = true;
+        if (generic) fake.countdownSetError.reset();
+        const auto owner = reinterpret_cast<HWND>(std::uintptr_t{0x1234});
+        const CountdownTimerFailure failure{CountdownTimerApi::Install, generic ? 0u : ERROR_ACCESS_DENIED};
+        Check(!registration.install(owner, ID_SESSION_TIMER) && !registration.installed() && !fake.countdownInstalled &&
+            registration.lastFailure() == failure && fake.countdownErrorBeforeSet == ERROR_SUCCESS && fake.lastError == ERROR_DISK_FULL,
+            "failed initial registration retains exact/generic error before logging and cannot report native installation");
+        fake.countdownSet = true;
+        Check(registration.install(owner, ID_SESSION_TIMER) && registration.installed() && registration.lastFailure() == failure &&
+            registration.remove() && registration.lastFailure() == failure,
+            "successful retry and cleanup preserve historical failure separately from current ownership");
+    }
+}
+void CountdownRegistrationRemovalRetry() {
+    CountdownTimerRegistration registration; SessionTimer timer;
+    const auto owner = reinterpret_cast<HWND>(std::uintptr_t{0x1234});
+    Check(timer.configure(1, 0, true) && registration.install(owner, ID_SESSION_TIMER), "prepare armed countdown and native timer");
+    timer.cancel(); fake.countdownKill = false; fake.diagnosticsClobbersError = true;
+    Check(!registration.remove() && registration.installed() && fake.countdownInstalled &&
+        registration.lastFailure() == CountdownTimerFailure{CountdownTimerApi::Remove, ERROR_ACCESS_DENIED} &&
+        CountdownTimerState(timer.armed(), registration.installed()) == NativeCountdownTimerState::CleanupPending &&
+        fake.countdownErrorBeforeKill == ERROR_SUCCESS && fake.lastError == ERROR_DISK_FULL,
+        "failed native removal retains exact ownership and visible cleanup obligation after the logical countdown is canceled");
+    const auto failure = registration.lastFailure(); fake.countdownKill = true;
+    Check(registration.remove() && !registration.installed() && !fake.countdownInstalled && fake.countdownKills == 2 &&
+        fake.countdownKillOwner == owner && fake.countdownKillId == ID_SESSION_TIMER && registration.lastFailure() == failure,
+        "a later cleanup retries the original window/id and clears ownership only after native success");
+}
+void CountdownRegistrationReplacementAndInvalidTargets() {
+    CountdownTimerRegistration registration;
+    const auto owner = reinterpret_cast<HWND>(std::uintptr_t{0x1234}), other = reinterpret_cast<HWND>(std::uintptr_t{0x5678});
+    Check(!registration.install(nullptr, ID_SESSION_TIMER) && !registration.install(owner, 0) && !registration.installed() && fake.countdownSets == 0,
+        "invalid targets cannot create an unhandled thread timer or zero-id window timer");
+    Check(registration.install(owner, ID_SESSION_TIMER), "prepare original timer");
+    fake.countdownSet = false;
+    Check(!registration.install(owner, ID_SESSION_TIMER) && registration.installed() && fake.countdownInstalled &&
+        fake.countdownOwner == owner && fake.countdownId == ID_SESSION_TIMER && fake.countdownSets == 2,
+        "failed replacement cannot silently forget the original cleanup obligation");
+    Check(!registration.install(other, ID_SESSION_TIMER) && !registration.install(owner, ID_SESSION_TIMER + 1) &&
+        fake.countdownSets == 2 && registration.installed() && registration.lastFailure() == CountdownTimerFailure{CountdownTimerApi::Install, ERROR_INVALID_STATE},
+        "a retained timer cannot be replaced with another window/id or overwritten in local state");
+    Check(registration.remove() && fake.countdownKillOwner == owner && fake.countdownKillId == ID_SESSION_TIMER,
+        "rejected replacements leave the original target available for cleanup");
+}
+void CountdownRegistrationReportsAndAllocation() {
+    CountdownTimerRegistration registration;
+    const auto owner = reinterpret_cast<HWND>(std::uintptr_t{0x1234});
+    bool checked = false, unused = false;
+    {
+        TestMemory::FailNextAllocation fail;
+        checked = registration.install(owner, ID_SESSION_TIMER);
+        fake.countdownKill = false; fake.countdownKillError.reset();
+        checked = checked && !registration.remove() && registration.installed() &&
+            registration.lastFailure() == CountdownTimerFailure{CountdownTimerApi::Remove, 0};
+        fake.countdownKill = true;
+        checked = checked && registration.remove();
+        unused = TestMemory::AllocationFailurePending();
+    }
+    Check(checked && unused, "native registration, failures, cached diagnostics, and cleanup allocate no C++ memory");
+    SupportReportState state;
+    Check(BuildSupportReport(state).find("Last countdown timer API failure (retained after retry): none recorded") != std::string::npos,
+        "no recorded failure is distinct from an unreported current registration state");
+    state.nativeCountdownTimer = CountdownTimerState(false, registration.installed()); state.countdownTimerFailure = registration.lastFailure();
+    const auto calls = fake.countdownSets + fake.countdownKills;
+    const auto report = BuildSupportReport(state);
+    Check(report.find("Native countdown timer: Not armed") != std::string::npos &&
+        report.find("Last countdown timer API failure (retained after retry): KillTimer (no native error code)") != std::string::npos &&
+        fake.countdownSets + fake.countdownKills == calls, "cached report distinguishes successful current cleanup from historical generic failure without native calls");
+    state.countdownTimerFailure = CountdownTimerFailure{CountdownTimerApi::Install, (std::numeric_limits<std::uint32_t>::max)()};
+    Check(BuildSupportReport(state).find("SetTimer (error 4294967295)") != std::string::npos, "maximum native error remains an unsigned decimal value");
+}
+void CountdownRegistrationPreservesRecovery() {
+    GammaRampFilter filter; CountdownTimerRegistration registration; SessionTimer timer;
+    Check(filter.initialize(), "initialize gamma for retained recovery");
+    fake.writes = {Write::FailAfterApply, Write::Fail};
+    Check(!filter.enable() && filter.needsRestore(), "prepare failed rollback with original calibration");
+    const auto owner = reinterpret_cast<HWND>(std::uintptr_t{0x1234});
+    const auto reads = fake.gammaReads, writes = fake.gammaWrites, releases = fake.mutexReleases;
+    const auto clockReads = fake.backendClockReads; const auto statistics = filter.statistics();
+    const auto error = std::string(filter.lastError());
+    Check(timer.configure(17, 1234, true) && registration.install(owner, ID_SESSION_TIMER), "prepare independent countdown registration");
+    fake.countdownKill = false; timer.cancel();
+    Check(!registration.remove(), "retain native timer cleanup");
+    SupportReportState state; state.countdownTimerFailure = registration.lastFailure();
+    state.nativeCountdownTimer = CountdownTimerState(timer.armed(), registration.installed());
+    Check(BuildSupportReport(state).find("KillTimer (error 5)") != std::string::npos && filter.needsRestore() && !filter.isActive() &&
+        fake.mutexOwned && fake.gammaReads == reads && fake.gammaWrites == writes && fake.mutexReleases == releases &&
+        filter.statistics() == statistics && fake.backendClockReads == clockReads && error == filter.lastError() &&
+        fake.registryReads == 0 && fake.registryWrites == 0, "timer bookkeeping/reporting cannot inspect, recapture, or release pending display recovery");
+    fake.countdownKill = true;
+    Check(registration.remove() && filter.disable(), "both original timer ownership and gamma calibration remain retryable");
+}
 void CountdownDiagnosticsPreserveBackendAndPolicy() {
     MagnificationFilter filter;
     Check(filter.initialize() && filter.enable(), "active backend for timer-report isolation");
@@ -4664,6 +4783,22 @@ LRESULT SendMessageTimeoutA(HWND, unsigned message, WPARAM wparam, LPARAM lparam
     if (fake.statusSendError) fake.lastError = *fake.statusSendError;
     return fake.statusMessage;
 }
+UINT_PTR SetTimer(HWND owner, UINT_PTR id, UINT interval, TIMERPROC callback) {
+    ++fake.countdownSets; fake.countdownSetOwner = owner; fake.countdownSetId = id;
+    fake.countdownInterval = interval; fake.countdownCallback = callback; fake.countdownErrorBeforeSet = fake.lastError;
+    if (!fake.countdownSet) { if (fake.countdownSetError) fake.lastError = *fake.countdownSetError; return 0; }
+    fake.countdownInstalled = true; fake.countdownOwner = owner; fake.countdownId = id;
+    return fake.countdownReturn;
+}
+BOOL KillTimer(HWND owner, UINT_PTR id) {
+    ++fake.countdownKills; fake.countdownKillOwner = owner; fake.countdownKillId = id; fake.countdownErrorBeforeKill = fake.lastError;
+    if (!fake.countdownKill || !fake.countdownInstalled || owner != fake.countdownOwner || id != fake.countdownId) {
+        if (fake.countdownKillError) fake.lastError = *fake.countdownKillError;
+        return 0;
+    }
+    fake.countdownInstalled = false; fake.countdownOwner = nullptr; fake.countdownId = 0;
+    return 1;
+}
 HDC GetDC(HWND) { ++fake.dcRequests; return fake.dc ? &fake : nullptr; }
 int ReleaseDC(HWND, HDC) { ++fake.releases; return fake.release ? 1 : 0; }
 BOOL GetDeviceGammaRamp(HDC, void* ramp) {
@@ -4905,6 +5040,9 @@ int main() {
         {"Mag unconfirmed live rollback/read-back", MagLiveUnconfirmedRollbackCannotClaimActive}, {"Mag live rollback without C++ allocation", MagLiveRollbackWithoutCppAllocation},
         {"Countdown retry diagnostics exact boundaries", CountdownRetryDiagnosticsBoundaries}, {"Countdown retry diagnostics wrap/reset", CountdownRetryDiagnosticsWrapAndReset},
         {"Countdown warning/restore attempt lifecycle", CountdownAttemptDiagnosticsLifecycle}, {"Native countdown diagnostics/reports", NativeCountdownDiagnosticsAndReports},
+        {"Countdown registration lifecycle", CountdownRegistrationLifecycle}, {"Countdown registration install failures", CountdownRegistrationInstallFailures},
+        {"Countdown registration removal retry", CountdownRegistrationRemovalRetry}, {"Countdown registration replacement/invalid targets", CountdownRegistrationReplacementAndInvalidTargets},
+        {"Countdown registration reports/allocation", CountdownRegistrationReportsAndAllocation}, {"Countdown registration preserves recovery", CountdownRegistrationPreservesRecovery},
         {"Countdown diagnostics preserve backend/policy", CountdownDiagnosticsPreserveBackendAndPolicy},
         {"Backend timing completed scopes/zero", BackendTimingCompletedScopesAndZero}, {"Backend timing nested exception/reset guard", BackendTimingNestedExceptionAndResetGuard},
         {"Backend timing wrap/saturation", BackendTimingWrapAndSaturation}, {"Mag timing includes rollback/read-back", MagnificationTimingIncludesRollbackAndReadback},

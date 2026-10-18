@@ -3,6 +3,7 @@
 #include "ShortcutDiagnostics.h"
 #include "RestorationHistory.h"
 #include "SessionTimer.h"
+#include "CountdownTimerDiagnostics.h"
 #include "DisplayContext.h"
 #include "Diagnostics.h"
 #include <cstdint>
@@ -41,6 +42,7 @@ struct SupportReportState {
     BackendStatistics backendStatistics{};
     std::optional<std::uint64_t> remainingSeconds;
     std::optional<NativeCountdownTimerState> nativeCountdownTimer;
+    std::optional<CountdownTimerFailure> countdownTimerFailure;
     bool expiryRestoreAttempted = false, expiryWarningAttempted = false;
     std::optional<std::uint64_t> expiryRetryMilliseconds;
     RestorationHistory restorationHistory;
@@ -102,7 +104,13 @@ inline std::string BuildSupportReport(const SupportReportState& state) {
     if (state.remainingSeconds) report << *state.remainingSeconds << " seconds remaining";
     else report << "not armed";
     report << "\r\nNative countdown timer: " << (state.nativeCountdownTimer ? NativeCountdownTimerStateName(*state.nativeCountdownTimer) : "Not reported")
-        << "\r\nExpiry warning attempted this countdown: " << (state.expiryWarningAttempted ? "yes" : "no")
+        << "\r\nLast countdown timer API failure (retained after retry): ";
+    if (state.countdownTimerFailure) {
+        report << CountdownTimerApiName(state.countdownTimerFailure->operation);
+        if (state.countdownTimerFailure->errorCode) report << " (error " << state.countdownTimerFailure->errorCode << ")";
+        else report << " (no native error code)";
+    } else report << "none recorded";
+    report << "\r\nExpiry warning attempted this countdown: " << (state.expiryWarningAttempted ? "yes" : "no")
         << "\r\nExpiry restoration attempted this countdown: " << (state.expiryRestoreAttempted ? "yes" : "no")
         << "\r\nExpiry retry policy: ";
     if (!state.expiryRetryMilliseconds) report << "not applicable (countdown off or unexpired)";

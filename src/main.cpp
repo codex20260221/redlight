@@ -9,6 +9,7 @@
 #include "VerificationCache.h"
 #include "RestorationHistory.h"
 #include "SessionTimer.h"
+#include "CountdownTimerRegistration.h"
 #include "SessionControl.h"
 #include "BackendSelection.h"
 #include "SupportReport.h"
@@ -65,7 +66,7 @@ HotkeyManager g_hotkeys;
 bool g_busy = false;
 bool g_pendingRestore = false;
 SessionTimer g_sessionTimer;
-bool g_sessionTimerInstalled = false;
+CountdownTimerRegistration g_countdownRegistration;
 bool g_autoRestoreFailureNotified = false;
 BackendPreference g_backendPreference = BackendPreference::Automatic;
 BackendPreference g_startupBackendPreference = BackendPreference::Automatic;
@@ -598,10 +599,7 @@ void EnableRedlight() { ControlRedlight(false); }
 void StopSessionTimer() {
     g_sessionTimer.cancel();
     g_autoRestoreFailureNotified = false;
-    if (g_sessionTimerInstalled) {
-        if (KillTimer(nid.hWnd, ID_SESSION_TIMER)) g_sessionTimerInstalled = false;
-        else Diagnostics::LogFormat("KillTimer(session) failed (error %lu).", GetLastError());
-    }
+    g_countdownRegistration.remove(); // Failure retains ownership for the next cleanup attempt.
 }
 
 bool StartSessionTimer(bool restartOnly) {
@@ -611,15 +609,13 @@ bool StartSessionTimer(bool restartOnly) {
     } else g_sessionTimer.start(now);
     g_autoRestoreFailureNotified = false;
     if (!g_sessionTimer.armed()) return true;
-    if (!SetTimer(nid.hWnd, ID_SESSION_TIMER, 1000, NULL)) {
-        Diagnostics::LogFormat("SetTimer(session) failed (error %lu).", GetLastError());
+    if (!g_countdownRegistration.install(nid.hWnd, ID_SESSION_TIMER)) {
         g_sessionTimer.cancel();
         const bool restored = RestoreFilter(RestoreReason::TimerFailure, false);
         ReportError(restored ? "The auto-restore timer could not be started. The display was restored." :
             "The auto-restore timer could not be started, and restoration needs attention. Use Restore display to retry.");
         return false;
     }
-    g_sessionTimerInstalled = true;
     Diagnostics::LogFormat("Auto-restore armed for %u minutes.", g_sessionTimer.minutes());
     return true;
 }
@@ -988,7 +984,8 @@ void CopySupportReport(HWND owner) {
     state.sessionMinutes = g_sessionTimer.minutes();
     state.expiryWarning = ExpiryWarningName(g_preferences.expiryWarning);
     state.backendStatistics = g_displayFilter->statistics();
-    state.nativeCountdownTimer = CountdownTimerState(g_sessionTimer.armed(), g_sessionTimerInstalled);
+    state.nativeCountdownTimer = CountdownTimerState(g_sessionTimer.armed(), g_countdownRegistration.installed());
+    state.countdownTimerFailure = g_countdownRegistration.lastFailure();
     state.expiryRestoreAttempted = g_sessionTimer.restoreAttempted();
     state.expiryWarningAttempted = g_sessionTimer.warningAttempted();
     state.expiryRetryMilliseconds = g_sessionTimer.restoreRetryMilliseconds(state.reportTick);
