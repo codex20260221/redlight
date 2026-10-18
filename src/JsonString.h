@@ -1,10 +1,12 @@
 #pragma once
+#include "Utf8.h"
 #include <optional>
 #include <span>
 #include <string_view>
 
 // Encode a UTF-8 string with JSON quotes; incomplete output is never returned.
 inline std::optional<std::string_view> QuoteJsonString(std::string_view input, std::span<char> output) noexcept {
+    if (!IsValidUtf8(input)) return std::nullopt;
     std::size_t position = 0;
     const auto put = [&](char value) {
         if (position == output.size()) return false;

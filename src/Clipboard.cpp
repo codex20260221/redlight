@@ -12,6 +12,10 @@ void FreeClipboardBlock(HGLOBAL block) {
 
 bool CopyUtf8TextToClipboard(HWND owner, std::string_view text) {
     if (text.empty() || text.size() > static_cast<std::size_t>((std::numeric_limits<int>::max)())) return false;
+    if (text.find('\0') != std::string_view::npos) {
+        Diagnostics::Log("Clipboard export rejected embedded NUL bytes to avoid a truncated successful copy.");
+        return false;
+    }
     const int length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.data(), static_cast<int>(text.size()), NULL, 0);
     if (!length) {
         Diagnostics::LogFormat("Clipboard UTF-8 conversion failed (error %lu).", GetLastError());

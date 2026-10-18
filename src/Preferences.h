@@ -4,6 +4,7 @@
 #include "SessionTimer.h"
 #include "ShortcutProfile.h"
 #include "ExpiryWarning.h"
+#include "Utf8.h"
 #include <charconv>
 #include <optional>
 #include <string>
@@ -45,6 +46,7 @@ inline std::string_view TrimProfileField(std::string_view value) {
 }
 inline PreferencesParseResult ParsePreferences(std::string_view input) {
     if (input.size() > 4096 || input.find('\0') != std::string_view::npos) return {std::nullopt, "Profile is too large or contains a NUL byte", 0};
+    if (!IsValidUtf8(input)) return {std::nullopt, "Profile contains invalid UTF-8", 0};
     if (input.size() >= 3 && static_cast<unsigned char>(input[0]) == 0xef &&
         static_cast<unsigned char>(input[1]) == 0xbb && static_cast<unsigned char>(input[2]) == 0xbf) input.remove_prefix(3);
     AppPreferences value;

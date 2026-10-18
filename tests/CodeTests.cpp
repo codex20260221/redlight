@@ -1296,6 +1296,42 @@ void BoundedJsonStringEncoding() {
     Check(QuoteJsonString("\xc3\xa9", output) == "\"\xc3\xa9\"", "UTF-8 bytes preserved");
     std::array<char, 3> exact{}; std::array<char, 2> small{};
     Check(QuoteJsonString("a", exact) == "\"a\"" && !QuoteJsonString("a", small) && !QuoteJsonString("", {}), "exact-fit encoding succeeds and incomplete output is never returned");
+    Check(!QuoteJsonString("\xff", output) && !QuoteJsonString("\xed\xa0\x80", output), "malformed UTF-8 cannot produce an invalid JSON string");
+}
+void Utf8ScalarBoundaries() {
+    Check(IsValidUtf8({}), "empty UTF-8 is valid");
+    for (unsigned byte = 0; byte < 256; ++byte) {
+        const char value = static_cast<char>(byte);
+        Check(IsValidUtf8(std::string_view(&value, 1)) == (byte < 128), "only ASCII bytes are valid standalone characters");
+    }
+    for (const std::string_view scalar : {"\xc2\x80", "\xdf\xbf", "\xe0\xa0\x80", "\xed\x9f\xbf", "\xee\x80\x80", "\xef\xbf\xbf", "\xf0\x90\x80\x80", "\xf4\x8f\xbf\xbf"}) {
+        Check(IsValidUtf8(scalar), "canonical scalar boundaries accepted");
+        for (std::size_t length = 1; length < scalar.size(); ++length) Check(!IsValidUtf8(scalar.substr(0, length)), "truncated prefixes rejected");
+    }
+    for (const auto invalid : {"\xc0\x80", "\xc1\xbf", "\xe0\x9f\xbf", "\xed\xa0\x80", "\xed\xbf\xbf", "\xf0\x8f\xbf\xbf", "\xf4\x90\x80\x80", "\xf5\x80\x80\x80", "\xfe\xff", "\xc2x", "\xe2\x82x", "\xf0\x90\x80x", "\xc2\xa0\x80"})
+        Check(!IsValidUtf8(invalid), "overlong/surrogate/out-of-range/malformed sequences rejected");
+    Check(IsValidUtf8("café 赤 🌙") && IsValidUtf8("\xef\xbb\xbf"), "Unicode text and UTF-8 BOM accepted");
+}
+void ProfileUtf8Validation() {
+    const auto text = *SerializePreferences(AppPreferences{});
+    Check(ParsePreferences(std::string("# café 赤 🌙\n") + text).preferences == AppPreferences{}, "valid Unicode comments accepted");
+    const auto invalid = std::string("# ") + "\xed\xa0\x80" + "\n" + text;
+    const auto parsed = ParsePreferences(invalid);
+    Check(!parsed.preferences && parsed.line == 0 && std::string_view(parsed.error).find("invalid UTF-8") != std::string_view::npos, "malformed comment bytes rejected before field parsing");
+    fake.registry[L"SettingsProfile"] = {REG_BINARY, std::vector<char>(invalid.begin(), invalid.end())};
+    Check(LoadPreferences().warning && fake.registryWrites == 0, "invalid persisted encoding warns without rewriting settings");
+    fake.profileData = invalid;
+    Check(ValidateSettingsProfileFile(L"invalid-encoding.txt") == 4 && fake.stdoutText.find("invalid UTF-8") != std::string::npos && !fake.profileHandleOpen,
+        "offline validation reports encoding failure as invalid data after checked cleanup");
+    Check(fake.magInitializes == 0 && fake.dcRequests == 0 && fake.clipOpens == 0 && fake.hotkeyRegisters == 0, "encoding validation has no display/clipboard/shortcut side effects");
+}
+void ClipboardEmbeddedNulRejection() {
+    fake.clipMemory = {L'p', L'r', L'i', L'o', L'r', L'\0'};
+    const auto prior = fake.clipMemory;
+    const std::string text("complete\0hidden", 15);
+    Check(!CopyUtf8TextToClipboard(nullptr, text) && !CopyUtf8TextToClipboard(nullptr, std::string_view("\0", 1)), "NUL-containing text is never reported as a complete clipboard export");
+    Check(fake.clipConversions == 0 && fake.clipAllocations == 0 && fake.clipOpens == 0 && fake.clipEmpties == 0 && fake.clipSets == 0 && fake.clipMemory == prior,
+        "rejection occurs before conversion, allocation or clipboard mutation");
 }
 } // namespace
 
@@ -1539,6 +1575,7 @@ int main() {
         {"Profile validation owned path", ProfileValidationOwnedPathArguments}, {"Profile validation read-only file", ProfileFileValidationReadOnly},
         {"Profile validation file bounds/encoding", ProfileFileValidationBoundsAndEncoding}, {"Profile validation I/O failures", ProfileFileValidationIoFailures},
         {"Profile validation output failures", ProfileFileValidationOutputFailures}, {"Bounded JSON string encoding", BoundedJsonStringEncoding},
+        {"UTF-8 scalar boundaries", Utf8ScalarBoundaries}, {"Strict profile encoding", ProfileUtf8Validation}, {"Clipboard embedded NUL rejection", ClipboardEmbeddedNulRejection},
         {"Command line", Arguments}
     };
     int failed = 0;
