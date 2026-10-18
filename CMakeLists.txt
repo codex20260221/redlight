@@ -25,7 +25,7 @@ add_custom_target(RedLightBuildInfo
 )
 
 add_executable(RedLight WIN32
-    src/Diagnostics.cpp src/Clipboard.cpp src/PreferencesStore.cpp src/TrayMenu.cpp src/SessionLimitDialog.cpp src/HotkeyManager.cpp src/main.cpp
+    src/Diagnostics.cpp src/Clipboard.cpp src/PreferencesStore.cpp src/TrayMenu.cpp src/SessionLimitDialog.cpp src/HotkeyManager.cpp src/StandardOutput.cpp src/StatusQuery.cpp src/main.cpp
     src/GammaRampFilter.cpp src/MagnificationFilter.cpp
     resources/app.rc
 )
@@ -47,7 +47,7 @@ endif()
 include(CTest)
 if(BUILD_TESTING)
     add_executable(RedLightCodeTests
-        tests/CodeTests.cpp tests/MemoryFault.cpp src/MagnificationFilter.cpp src/GammaRampFilter.cpp src/Clipboard.cpp src/PreferencesStore.cpp src/HotkeyManager.cpp)
+        tests/CodeTests.cpp tests/MemoryFault.cpp src/MagnificationFilter.cpp src/GammaRampFilter.cpp src/Clipboard.cpp src/PreferencesStore.cpp src/HotkeyManager.cpp src/StandardOutput.cpp src/StatusQuery.cpp)
     # Fake headers provide every display API: this target cannot call real display APIs.
     target_include_directories(RedLightCodeTests BEFORE PRIVATE tests/fake_win32 src)
     target_compile_definitions(RedLightCodeTests PRIVATE REDLIGHT_FAKE_WIN32=1)

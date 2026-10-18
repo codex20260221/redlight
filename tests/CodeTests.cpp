@@ -13,7 +13,11 @@
 #include "CommandIds.h"
 #include "MemoryFault.h"
 #include "UiSafety.h"
+#include "TrayStatus.h"
+#include "StatusQuery.h"
+#include "StandardOutput.h"
 #include <map>
+#include <algorithm>
 #include "Clipboard.h"
 #include <limits>
 #include <array>
@@ -48,6 +52,16 @@ struct Fake {
     std::map<int, ShortcutBinding> registeredHotkeys;
     std::deque<bool> hotkeyRegisterResults, hotkeyUnregisterResults;
     int hotkeyRegisters = 0, hotkeyUnregisters = 0;
+    bool stdoutValid = true, stdoutInvalidHandle = false, consoleAttach = true, consoleFree = true, attachedOutputValid = true;
+    bool stdoutWrite = true, stdoutZeroWrite = false, stdoutOverWrite = false;
+    DWORD stdoutChunk = (std::numeric_limits<DWORD>::max)();
+    int consoleAttaches = 0, consoleFrees = 0, stdoutLookups = 0, stdoutWrites = 0;
+    std::string stdoutText;
+    bool trayExists = true, statusMessage = true;
+    std::uint64_t statusReply = 0;
+    unsigned statusSends = 0, statusMessageId = 0, statusFlags = 0, statusTimeout = 0;
+    WPARAM statusWparam = 0;
+    LPARAM statusLparam = 0;
 } fake;
 
 void Reset() {
@@ -769,12 +783,147 @@ void Arguments() {
     const std::wstring_view help[] = {L"--help"}, version[] = {L"--version"}, typo[] = {L"--restor"};
     const std::wstring_view conflict[] = {L"--restore", L"--help"};
     Check(ParseArguments(help) == S::Help && ParseArguments(version) == S::Version, "informational commands");
+    const std::wstring_view status[] = {L"--status"}, statusConflict[] = {L"--status", L"--backend=gamma"};
+    Check(ParseArguments(status) == S::Status && ParseArguments(statusConflict) == S::Invalid, "read-only status accepts no startup override");
     Check(ParseArguments(typo) == S::Invalid && ParseArguments(conflict) == S::Invalid, "reject ambiguity before backend initialization");
+}
+void StatusProtocolRoundTrip() {
+    TrayStatus state;
+    const auto initial = PackTrayStatus(state);
+    Check(initial && UnpackTrayStatus(*initial) == state, "default state round trips");
+    state.backendActive = true; state.restorePending = true; state.backendError = true;
+    state.luma = LumaProfile::EqualDetail; state.verification = BackendVerification::Unavailable;
+    state.sessionMinutes = 240; state.timerArmed = true; state.remainingSeconds = 14400;
+    state.shortcutProfile = ShortcutProfile::Disabled; state.toggle = StatusShortcut::F9; state.restore = StatusShortcut::F10;
+    state.settingsUnsaved = true; state.sessionNotifications = true; state.busy = true;
+    state.fileLogging = Diagnostics::FileState::Unavailable; state.missingFileRecords = true; state.truncatedRecords = true; state.fileError = true;
+    const auto maximum = PackTrayStatus(state);
+    Check(maximum && UnpackTrayStatus(*maximum) == state && *maximum <= static_cast<std::uint64_t>((std::numeric_limits<LRESULT>::max)()), "maximum fields preserve all bits in positive x64 reply");
+    for (unsigned backend = 0; backend < 2; ++backend) for (unsigned verification = 0; verification < 5; ++verification)
+        for (unsigned shortcut = 0; shortcut < 4; ++shortcut) {
+            state.backend = static_cast<StatusBackend>(backend); state.supportsLuma = backend == 0;
+            state.mode = backend == 0 ? RedMode::LumaRed : RedMode::StrictRed;
+            state.verification = static_cast<BackendVerification>(verification); state.shortcutProfile = static_cast<ShortcutProfile>(shortcut);
+            const auto word = PackTrayStatus(state);
+            Check(word && UnpackTrayStatus(*word) == state, "backend/verification/shortcut combinations round trip");
+        }
+    Check(fake.magReads == 0 && fake.gammaReads == 0 && fake.magWrites == 0 && fake.gammaWrites == 0, "protocol never accesses display APIs");
+}
+void StatusProtocolRejectsInvalid() {
+    const auto valid = *PackTrayStatus(TrayStatus{});
+    Check(!UnpackTrayStatus(0) && !UnpackTrayStatus(valid ^ (1ull << 48)), "reject missing and future protocol tags");
+    Check(!UnpackTrayStatus(valid | (3ull << 6)) && !UnpackTrayStatus(valid | (7ull << 8)), "reject reserved luma and verification values");
+    Check(!UnpackTrayStatus(valid | (255ull << 11)) && !UnpackTrayStatus(valid | (1ull << 20)), "reject invalid duration and unarmed countdown");
+    Check(!UnpackTrayStatus(valid | 1) && !UnpackTrayStatus(valid | (1ull << 19)), "reject active without recovery ownership and timer without limit");
+    TrayStatus state; state.backend = StatusBackend::Gamma;
+    Check(!PackTrayStatus(state) && !TrayStatusJson(state), "gamma cannot claim luma support/mode");
+    state.supportsLuma = false; state.mode = RedMode::StrictRed;
+    Check(PackTrayStatus(state).has_value(), "strict gamma accepted");
+    state.sessionMinutes = 1; state.timerArmed = true; state.remainingSeconds = 61;
+    Check(!PackTrayStatus(state), "countdown cannot exceed configured duration");
+    state.remainingSeconds = 0;
+    Check(PackTrayStatus(state).has_value(), "expired session can remain armed for restore retries");
+    state.backend = static_cast<StatusBackend>(2);
+    Check(!PackTrayStatus(state), "out-of-range enum cannot overlap packed fields");
+}
+void StatusJsonConservativeStates() {
+    TrayStatus state;
+    auto json = *TrayStatusJson(state);
+    Check(json.starts_with("{\n  \"protocol\":1,") && json.ends_with("}\n") && json.find("\"remaining_seconds\":null") != std::string::npos, "off response is complete JSON with null countdown");
+    state.backendActive = true; state.restorePending = true;
+    Check(std::string_view(TrayStatusToken(state)) == "on" && TrayStatusJson(state)->find("\"active\":true") != std::string::npos, "confirmed active state reports on");
+    state.verification = BackendVerification::Changed;
+    json = *TrayStatusJson(state);
+    Check(std::string_view(TrayStatusToken(state)) == "backend-changed" && json.find("\"active\":false") != std::string::npos &&
+        json.find("\"backend_active\":true") != std::string::npos && json.find("\"verification\":\"changed\"") != std::string::npos, "mismatch distinguishes last confirmed activation from healthy on");
+    state.verification = BackendVerification::Unavailable;
+    Check(std::string_view(TrayStatusToken(state)) == "verification-unavailable", "unavailable verification visible");
+    state.backendError = true;
+    Check(std::string_view(TrayStatusToken(state)) == "recovery-needed", "restoration failure has priority");
+    state.backendError = false; state.backendActive = false;
+    Check(std::string_view(TrayStatusToken(state)) == "recovery-needed", "partial activation with recovery data has priority");
+    state.busy = true;
+    Check(std::string_view(TrayStatusToken(state)) == "busy" && TrayStatusJson(state)->find("\"active\":false") != std::string::npos, "transient state is conservative");
+    state.sessionMinutes = 2; state.timerArmed = true; state.remainingSeconds = 119;
+    state.toggle = StatusShortcut::F9; state.restore = StatusShortcut::F10;
+    json = *TrayStatusJson(state);
+    Check(json.find("\"remaining_seconds\":119") != std::string::npos && json.find("Ctrl+Alt+F9") != std::string::npos && json.find("Ctrl+Alt+Shift+F10") != std::string::npos, "countdown and actual registrations are distinct fields");
+    Check(StatusShortcutKey(ShortcutBinding{3, 'R'}) == StatusShortcut::R && StatusShortcutKey(std::nullopt) == StatusShortcut::None, "actual binding mapping");
+}
+void StandardOutputOwnership() {
+    fake.stdoutChunk = 2;
+    Check(WriteStandardOutput("abcde\n") && fake.stdoutText == "abcde\n" && fake.stdoutWrites == 3 && fake.consoleAttaches == 0 && fake.consoleFrees == 0, "partial pipe writes finish without touching console ownership");
+    Reset(); fake.stdoutValid = false;
+    Check(WriteStandardOutput("parent\n") && fake.stdoutText == "parent\n" && fake.consoleAttaches == 1 && fake.consoleFrees == 1 && fake.stdoutLookups == 2, "only attached parent console is detached");
+    Reset(); fake.stdoutValid = false; fake.stdoutInvalidHandle = true;
+    Check(WriteStandardOutput("x") && fake.consoleAttaches == 1, "invalid inherited handle follows parent fallback");
+}
+void StandardOutputFailures() {
+    fake.stdoutValid = false; fake.consoleAttach = false;
+    Check(!WriteStandardOutput("x") && fake.stdoutWrites == 0 && fake.consoleFrees == 0, "failed attach never writes or detaches");
+    Reset(); fake.stdoutValid = false; fake.attachedOutputValid = false;
+    Check(!WriteStandardOutput("x") && fake.consoleFrees == 1 && fake.stdoutWrites == 0, "bad attached output still releases owned console");
+    Reset(); fake.stdoutWrite = false;
+    Check(!WriteStandardOutput("x") && fake.stdoutText.empty(), "write failure visible");
+    Reset(); fake.stdoutZeroWrite = true;
+    Check(!WriteStandardOutput("x") && fake.stdoutWrites == 1, "zero progress stops instead of looping");
+    Reset(); fake.stdoutOverWrite = true;
+    Check(!WriteStandardOutput("x"), "invalid byte count rejected");
+    Reset(); fake.stdoutValid = false; fake.stdoutWrite = false;
+    Check(!WriteStandardOutput("x") && fake.consoleFrees == 1, "write failure still detaches owned console");
+    Reset(); fake.stdoutValid = false; fake.consoleFree = false;
+    Check(!WriteStandardOutput("x") && fake.stdoutText == "x", "detach failure is not hidden");
+}
+void StatusQueryExistingInstanceOnly() {
+    TrayStatus state; state.backendActive = true; state.restorePending = true;
+    fake.statusReply = *PackTrayStatus(state);
+    Check(QueryRunningStatus() == 0 && fake.stdoutText == *TrayStatusJson(state), "successful reply formats the existing instance snapshot");
+    Check(fake.statusSends == 1 && fake.statusMessageId == WM_REDLIGHT_STATUS && fake.statusWparam == 1 && fake.statusLparam == 0 && fake.statusTimeout == 3000 && fake.statusFlags == (SMTO_ABORTIFHUNG | SMTO_BLOCK), "bounded pointer-free versioned request");
+    Check(fake.magInitializes == 0 && fake.dcRequests == 0 && fake.magReads == 0 && fake.gammaReads == 0 && fake.magWrites == 0 && fake.gammaWrites == 0 && fake.registryWrites == 0 && fake.hotkeyRegisters == 0, "query does not initialize/read/write displays or settings/shortcuts");
+    Reset(); fake.trayExists = false;
+    Check(QueryRunningStatus() == 3 && fake.statusSends == 0 && fake.stdoutText.find("not-running") != std::string::npos, "missing instance reported without starting one");
+}
+void StatusQueryFailures() {
+    fake.statusMessage = false;
+    Check(QueryRunningStatus() == 1 && fake.stdoutText.find("query-failed") != std::string::npos, "timeout returns failure without fallback startup");
+    Reset(); fake.statusReply = 1;
+    Check(QueryRunningStatus() == 1 && fake.stdoutText.find("invalid-response") != std::string::npos, "older/invalid protocol reply rejected");
+    Reset(); fake.statusReply = *PackTrayStatus(TrayStatus{}); fake.stdoutWrite = false;
+    Check(QueryRunningStatus() == 1, "output failure cannot be reported as successful query");
+    Reset(); fake.trayExists = false; fake.stdoutWrite = false;
+    Check(QueryRunningStatus() == 1, "missing instance still requires successful output");
+    Reset(); fake.statusReply = *PackTrayStatus(TrayStatus{});
+    {
+        TestMemory::FailNextAllocation fail;
+        Check(QueryRunningStatus() == 1 && fake.stdoutText.empty(), "response allocation failure is contained before any partial output");
+    }
+    Check(fake.magWrites == 0 && fake.gammaWrites == 0 && fake.magInitializes == 0, "query failures never change or initialize display state");
 }
 } // namespace
 
 DWORD GetLastError() { return fake.lastError; }
 void SetLastError(DWORD value) { fake.lastError = value; }
+HANDLE GetStdHandle(DWORD) {
+    ++fake.stdoutLookups;
+    const bool valid = fake.consoleAttaches ? fake.attachedOutputValid : fake.stdoutValid;
+    return valid ? &fake : (fake.stdoutInvalidHandle ? INVALID_HANDLE_VALUE : nullptr);
+}
+BOOL AttachConsole(DWORD) { ++fake.consoleAttaches; return fake.consoleAttach; }
+BOOL FreeConsole() { ++fake.consoleFrees; return fake.consoleFree; }
+BOOL WriteFile(HANDLE, const void* data, DWORD size, DWORD* written, void*) {
+    ++fake.stdoutWrites;
+    if (!fake.stdoutWrite) { *written = 0; return FALSE; }
+    if (fake.stdoutOverWrite) { *written = size + 1; return 1; }
+    *written = fake.stdoutZeroWrite ? 0 : (std::min)(size, fake.stdoutChunk);
+    fake.stdoutText.append(static_cast<const char*>(data), *written);
+    return 1;
+}
+HWND FindWindowA(const char*, const char*) { return fake.trayExists ? &fake : nullptr; }
+LRESULT SendMessageTimeoutA(HWND, unsigned message, WPARAM wparam, LPARAM lparam, unsigned flags, unsigned timeout, DWORD_PTR* reply) {
+    ++fake.statusSends; fake.statusMessageId = message; fake.statusWparam = wparam; fake.statusLparam = lparam;
+    fake.statusFlags = flags; fake.statusTimeout = timeout; *reply = fake.statusReply;
+    return fake.statusMessage;
+}
 HDC GetDC(HWND) { ++fake.dcRequests; return fake.dc ? &fake : nullptr; }
 int ReleaseDC(HWND, HDC) { ++fake.releases; return fake.release ? 1 : 0; }
 BOOL GetDeviceGammaRamp(HDC, void* ramp) {
@@ -903,6 +1052,10 @@ int main() {
         {"Read-only UI allocation failure", ReadOnlyUiFailureRetainsFilter}, {"Mutating UI exception recovery", MutatingUiFailureRestoresAfterUnwind},
         {"UI restore retry after failure", UiRecoveryFailureKeepsSnapshot}, {"Nested UI flag ownership", NestedUiFlagsAndFailureHandler},
         {"Complete reports under allocation failure", SupportReportAllocationFailuresNeverReturnPartial},
+        {"Status protocol round trip", StatusProtocolRoundTrip}, {"Status protocol validation", StatusProtocolRejectsInvalid},
+        {"Conservative status JSON", StatusJsonConservativeStates}, {"Standard output ownership", StandardOutputOwnership},
+        {"Standard output failures", StandardOutputFailures}, {"Existing-instance status query", StatusQueryExistingInstanceOnly},
+        {"Status query failures", StatusQueryFailures},
         {"Command line", Arguments}
     };
     int failed = 0;

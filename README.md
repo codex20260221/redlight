@@ -111,6 +111,20 @@ Use the Automatic override if an unavailable saved backend prevents startup. Gam
 
 The format uses a RedLightProfile section. Version 2 exports explicit mode/luma/backend/session_minutes/hotkeys fields; version 1 profiles are accepted with default shortcuts. The hotkeys tokens are default, f9, f10, or disabled. Blank lines, whole-line comments, whitespace around fields, and UTF-8 BOMs are accepted by the parser; duplicates, unknown fields, missing fields, unsupported versions, and invalid ranges are rejected. Profiles are data and contain no commands to execute.
 
+## Scriptable status
+
+`RedLight.exe --status` writes JSON for the existing tray instance. It never starts a tray instance, activates a filter, or reads the display backend. In PowerShell, use a pipeline so the GUI executable completes before reading its output and exit code:
+
+```powershell
+$json = & .\RedLight.exe --status | Out-String
+$result = $LASTEXITCODE
+if ($result -eq 0) { $json | ConvertFrom-Json }
+```
+
+Exit codes are `0` for a valid snapshot (including an off filter), `3` when no tray instance exists, and `1` for timeout, incompatible response, or output failure. A missing instance produces `status: "not-running"`; query failures produce `query-failed` or `invalid-response` when output is available. Responses use protocol 1. A request waits up to three seconds for the tray; it opens no dialogs and creates no console window. Redirected standard output is preserved; otherwise it uses an existing parent console if available.
+
+Snapshots report backend/mode/luma selection, configured session limit and remaining whole seconds, preferred/actual shortcuts, unsaved settings, session-notification registration, and logging health flags. `remaining_seconds` is null when the countdown is unarmed. `restore_pending` means restoration data is owned, including during a normal active session. `backend_active` is the last confirmed backend activation flag; `active` is true only when `status` is `on`, and becomes false for busy, recovery-needed, backend-changed, or verification-unavailable states. `verification` describes the last explicit check, which may be `not-checked`. A status query does not refresh verification or measure physical output. Full diagnostic counters and build identity remain available in the support report.
+
 ## Compatibility and limitations
 
 - Target: Windows 10/11 x64 desktop sessions. HDR, remote sessions, exclusive full-screen apps, protected content, and the secure desktop are not qualified for this candidate. RedLight is not a hardware blue-light guarantee.
@@ -138,7 +152,7 @@ Do not run software you do not trust. RedLight is provided as-is and without war
   * `RedLight.exe --reset-display`
 * With a running instance, reset mode asks that instance to restore its saved state. A busy or unresponsive instance is not bypassed.
 * Without a running instance, reset mode applies an identity Magnification matrix. This clears Magnification color effects, including those from other tools; it cannot recover a lost gamma-ramp snapshot after a crash.
-* Exit codes: `0` for success (including an already-running instance), `1` for startup/recovery failure, and `2` for invalid arguments. `--help` and `--version` display informational dialogs. Options are case-sensitive and exactly one option is accepted.
+* Exit codes: `0` for success (including an already-running instance), `1` for startup/recovery/query/output failure, `2` for invalid arguments, and `3` when `--status` finds no tray instance. `--help` and `--version` display informational dialogs. Options are case-sensitive and exactly one option is accepted.
 * Logs support Unicode Windows profile paths. Rotation runs at startup and before a write would push the current log past a 1 MiB target, retaining up to three archives. Long records are truncated with a marker. About/support reports show file-logging health, missing/truncated record counts, and the last file error. If rotation or storage fails, affected disk writes are skipped and debugger output continues; **Expert controls → Retry file logging** can retry after the underlying problem is fixed. Earlier missing-record counts remain visible after recovery. Rotation and size checks are best effort when other processes or filesystem restrictions interfere.
 * To remove RedLight, exit it, delete its folder, and optionally delete `%LOCALAPPDATA%\RedLight` and the `HKCU\Software\RedLight` registry key. No service or startup entry is installed.
 

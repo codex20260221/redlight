@@ -17,6 +17,8 @@
 #include "SessionLimitDialog.h"
 #include "HotkeyManager.h"
 #include "UiSafety.h"
+#include "TrayStatus.h"
+#include "StatusQuery.h"
 #include <cstdio>
 
 #include "Diagnostics.h"
@@ -104,11 +106,17 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
 
     const StartupOptions options = GetStartupOptions();
     const StartupAction action = options.action;
+    if (action == StartupAction::Status) {
+        const int result = QueryRunningStatus();
+        Diagnostics::Shutdown();
+        return result;
+    }
     if (action == StartupAction::Help || action == StartupAction::Version || action == StartupAction::Invalid) {
         MessageBoxA(NULL, action == StartupAction::Version ? "RedLight " REDLIGHT_VERSION :
             "RedLight " REDLIGHT_VERSION "\n\nUsage: RedLight.exe [option]\n\n"
             "--restore / --reset-display: restore display colors\n"
             "--help: show this help\n--version: show version\n"
+            "--status: report cached tray state as JSON without starting it\n"
             "--backend=auto|magnification|gamma: one-start backend override\n\n"
             "Without options, start in the tray with the filter off.\n"
             "Default shortcuts: Ctrl+Alt+R toggles; Ctrl+Alt+Shift+R restores.\n"
@@ -880,7 +888,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
     return GuardUiCall<LRESULT>([&] { return HandleWindowMessage(hwnd, uMsg, wParam, lParam); },
         [&](const char* error) -> LRESULT {
             Diagnostics::LogFormat("C++ failure in window message %u: %s", uMsg, error);
-            const bool mayChangeFilter = uMsg == WM_COMMAND ? CommandMayChangeFilter(LOWORD(wParam)) : uMsg != WM_TRAYICON;
+            if (uMsg == WM_REDLIGHT_STATUS) return 0; // Read-only automation never restores or opens an error dialog.
+            const bool mayChangeFilter = uMsg == WM_COMMAND ? CommandMayChangeFilter(LOWORD(wParam)) :
+                uMsg != WM_TRAYICON;
             if (mayChangeFilter) {
                 if (g_busy) g_pendingRestore = true;
                 else {
@@ -906,6 +916,35 @@ LRESULT HandleWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         return 0;
     }
     switch (uMsg) {
+    case WM_REDLIGHT_STATUS: {
+        if (wParam != REDLIGHT_STATUS_PROTOCOL || lParam != 0) return 0;
+        TrayStatus state;
+        state.backendActive = g_displayFilter->isActive();
+        state.restorePending = g_displayFilter->needsRestore();
+        state.backendError = g_displayFilter->lastError()[0] != '\0';
+        state.supportsLuma = g_displayFilter->supportsRedMode(RedMode::LumaRed);
+        state.backend = g_displayFilter == &g_magnificationFilter ? StatusBackend::Magnification : StatusBackend::Gamma;
+        state.mode = g_displayFilter->redMode();
+        state.luma = g_displayFilter->lumaProfile();
+        state.verification = g_verification;
+        state.sessionMinutes = g_sessionTimer.minutes();
+        state.timerArmed = g_sessionTimer.armed();
+        state.remainingSeconds = static_cast<unsigned>((g_sessionTimer.remainingMilliseconds(GetTickCount64()) + 999) / 1000);
+        state.shortcutProfile = g_preferences.shortcuts;
+        state.toggle = StatusShortcutKey(g_hotkeys.toggle());
+        state.restore = StatusShortcutKey(g_hotkeys.restore());
+        state.settingsUnsaved = g_preferencesUnsaved;
+        state.sessionNotifications = g_sessionNotifications;
+        state.busy = g_busy || g_preferencesApplying;
+        const auto logging = Diagnostics::GetStatus();
+        state.fileLogging = logging.file;
+        state.missingFileRecords = logging.droppedLines != 0;
+        state.truncatedRecords = logging.truncatedLines != 0;
+        state.fileError = logging.lastFileError != 0;
+        const auto reply = PackTrayStatus(state);
+        if (!reply) Diagnostics::Log("Cached status snapshot is inconsistent; refusing to report it as valid.");
+        return reply ? static_cast<LRESULT>(*reply) : 0;
+    }
     case WM_REDLIGHT_UI_ERROR: {
         if (g_uiErrorVisible) return 0;
         ScopedFlag visible(g_uiErrorVisible);

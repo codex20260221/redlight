@@ -3,7 +3,7 @@
 #include <span>
 #include <string_view>
 
-enum class StartupAction { Tray, Restore, Help, Version, Invalid };
+enum class StartupAction { Tray, Restore, Help, Version, Status, Invalid };
 struct StartupOptions {
     StartupAction action = StartupAction::Tray;
     std::optional<BackendPreference> backendOverride;
@@ -15,6 +15,7 @@ inline StartupOptions ParseStartupOptions(std::span<const std::wstring_view> arg
     if (arg == L"--restore" || arg == L"--reset-display") return {StartupAction::Restore, std::nullopt};
     if (arg == L"--help" || arg == L"-h" || arg == L"/?") return {StartupAction::Help, std::nullopt};
     if (arg == L"--version") return {StartupAction::Version, std::nullopt};
+    if (arg == L"--status") return {StartupAction::Status, std::nullopt};
     if (arg.starts_with(L"--backend=")) {
         if (const auto preference = ParseBackendPreference(arg.substr(10))) {
             return {StartupAction::Tray, preference};

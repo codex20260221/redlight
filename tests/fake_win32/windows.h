@@ -96,3 +96,16 @@ BOOL WriteFile(HANDLE, const void*, DWORD, DWORD*, void*);
 BOOL FlushFileBuffers(HANDLE);
 void GetLocalTime(SYSTEMTIME*);
 void OutputDebugStringA(const char*);
+
+constexpr DWORD STD_OUTPUT_HANDLE = static_cast<DWORD>(-11);
+constexpr DWORD ATTACH_PARENT_PROCESS = static_cast<DWORD>(-1);
+HANDLE GetStdHandle(DWORD);
+BOOL AttachConsole(DWORD);
+BOOL FreeConsole();
+using DWORD_PTR = std::uintptr_t;
+using WPARAM = std::uintptr_t;
+using LPARAM = std::intptr_t;
+using LRESULT = std::intptr_t;
+constexpr unsigned SMTO_BLOCK = 1, SMTO_ABORTIFHUNG = 2;
+HWND FindWindowA(const char*, const char*);
+LRESULT SendMessageTimeoutA(HWND, unsigned, WPARAM, LPARAM, unsigned, unsigned, DWORD_PTR*);
