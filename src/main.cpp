@@ -157,7 +157,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
         return result;
     }
     if (action == StartupAction::Help || action == StartupAction::Version || action == StartupAction::Invalid) {
-        MessageBoxA(NULL, action == StartupAction::Version ? "RedLight " REDLIGHT_VERSION :
+        const int shown = MessageBoxA(NULL, action == StartupAction::Version ? "RedLight " REDLIGHT_VERSION :
             "RedLight " REDLIGHT_VERSION "\n\nUsage: RedLight.exe [option]\n\n"
             "--restore / --reset-display: restore display colors\n"
             "--help: show this help\n--version: show version\n"
@@ -172,8 +172,9 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
             "Expert controls offers alternative shortcut profiles.",
             action == StartupAction::Invalid ? "RedLight - invalid command line" : "RedLight",
             MB_OK | (action == StartupAction::Invalid ? MB_ICONERROR : MB_ICONINFORMATION));
+        if (!shown) Diagnostics::LogFormat("MessageBox(startup information) failed (error %lu).", GetLastError());
         Diagnostics::Shutdown();
-        return action == StartupAction::Invalid ? 2 : 0;
+        return !shown ? 1 : (action == StartupAction::Invalid ? 2 : 0);
     }
     if (action == StartupAction::Restore) {
         const bool resetSucceeded = ResetDisplay();

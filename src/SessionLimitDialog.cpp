@@ -35,8 +35,9 @@ INT_PTR CALLBACK SessionDialogProc(HWND dialog, UINT message, WPARAM wParam, LPA
             const auto minutes = sourceLength >= 0 && sourceLength < static_cast<int>(std::size(text)) &&
                 length == static_cast<UINT>(sourceLength) ? ParseSessionMinutes(std::wstring_view(text, length)) : std::nullopt;
             if (!state || !minutes) {
-                MessageBoxW(dialog, L"Enter a whole number from 0 to 240 using digits 0-9. Zero means unlimited.",
-                    L"Auto-restore time limit", MB_OK | MB_ICONINFORMATION);
+                if (!MessageBoxW(dialog, L"Enter a whole number from 0 to 240 using digits 0-9. Zero means unlimited.",
+                    L"Auto-restore time limit", MB_OK | MB_ICONINFORMATION))
+                    Diagnostics::LogFormat("MessageBox(session validation) failed (error %lu).", GetLastError());
                 return TRUE;
             }
             state->minutes = *minutes;
@@ -57,8 +58,9 @@ std::optional<unsigned> ShowSessionLimitDialog(HWND owner, unsigned currentMinut
         SessionDialogProc, reinterpret_cast<LPARAM>(&state));
     if (result == -1) {
         Diagnostics::LogFormat("DialogBoxParam(session) failed (error %lu).", GetLastError());
-        MessageBoxW(owner, L"The custom time-limit dialog could not be opened. The previous limit is unchanged.",
-            L"RedLight", MB_OK | MB_ICONERROR);
+        if (!MessageBoxW(owner, L"The custom time-limit dialog could not be opened. The previous limit is unchanged.",
+            L"RedLight", MB_OK | MB_ICONERROR))
+            Diagnostics::LogFormat("MessageBox(session dialog failure) failed (error %lu).", GetLastError());
     }
     return result == IDOK ? std::optional<unsigned>(state.minutes) : std::nullopt;
 }
