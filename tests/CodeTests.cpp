@@ -58,13 +58,17 @@
 #include <vector>
 
 namespace {
-enum class Write { Apply, Fail, Ignore, FailAfterApply, LowByteLeak, BlackLift, WhiteLoss };
+enum class Write { Apply, Fail, Ignore, FailAfterApply, LowByteLeak, BlackLift, WhiteLoss, MatrixNonfinite, MatrixRounding };
 struct FakeMenuItem { UINT flags; UINT_PTR value; std::string label; };
 struct FakeMenuData { bool alive = true; std::vector<FakeMenuItem> items; };
 struct RegistryValue { DWORD type; std::vector<char> bytes; };
 struct Fake {
     bool magInit = true, magGet = true, magSet = true, magUninit = true;
     std::deque<Write> magWriteResults;
+    std::deque<bool> magReadResults;
+    std::optional<DWORD> magReadError;
+    std::optional<DWORD> magInitializeError, magUninitializeError;
+    std::optional<DWORD> magWriteError = ERROR_ACCESS_DENIED;
     bool dc = true, gammaGet = true, release = true;
     int magWrites = 0, gammaWrites = 0, releases = 0, uninitializes = 0;
     int magInitializes = 0, dcRequests = 0, magReads = 0, gammaReads = 0;
@@ -271,7 +275,7 @@ void MagWriteFailure() {
     fake.magWriteResults = {Write::Fail, Write::Apply};
     Check(!f.setRedMode(RedMode::StrictRed) && f.redMode() == oldMode, "failed mode write retains mode");
     fake.magSet = false;
-    Check(!f.disable() && f.isActive() && f.needsRestore(), "restore failure retains active state");
+    Check(!f.disable() && !f.isActive() && f.needsRestore(), "restore failure drops active confirmation and retains recovery");
     Check(!f.shutdown() && fake.uninitializes == 0, "shutdown preserves API and recovery data");
     fake.magSet = true;
     Check(f.disable() && f.shutdown(), "restoration and shutdown retry");
@@ -284,6 +288,182 @@ void MagUninitializeFailure() {
     fake.magUninit = true;
     Check(f.shutdown() && fake.uninitializes == 2, "uninit failure retryable");
     Check(f.shutdown() && fake.uninitializes == 2, "shutdown idempotent");
+}
+void MagnificationInitializationReadinessRegression() {
+    for (bool nonfinite : {false, true}) {
+        Reset(); MagnificationFilter filter;
+        fake.magGet = nonfinite; fake.magUninit = false;
+        if (nonfinite) fake.effect.transform[4][0] = (std::numeric_limits<float>::quiet_NaN)();
+        Check(!filter.initialize() && !filter.isActive() && !filter.needsRestore() && fake.magInitializes == 1 && fake.uninitializes == 1,
+            "failed/malformed initial capture plus failed cleanup retains API ownership without readiness or display ownership");
+        const auto reads = fake.magReads;
+        Check(!filter.initialize() && !filter.enable() && filter.inspectState().state == BackendVerification::Unavailable &&
+            fake.magInitializes == 1 && fake.uninitializes == 2 && fake.magReads == reads && fake.magWrites == 0,
+            "repeat initialize must retry incomplete cleanup and cannot return success from API ownership alone");
+        GammaRampFilter gamma;
+        Check(!InitializePreferredBackend(BackendPreference::Automatic, filter, gamma) && fake.dcRequests == 0,
+            "a retry with retained unready resources cannot falsely select Magnification or fall through to gamma");
+        fake.magUninit = true; fake.magGet = true; fake.effect.transform[4][0] = 0; fake.effect.transform[0][0] = 0.42f;
+        const auto original = fake.effect;
+        Check(filter.initialize() && fake.magInitializes == 2 && filter.enable() && filter.disable() && Same(fake.effect, original),
+            "successful cleanup is followed by a fresh initialization/capture and the new original matrix remains recoverable");
+    }
+}
+void MagnificationCleanupFailureInvalidatesReadiness() {
+    MagnificationFilter filter;
+    Check(filter.initialize() && filter.enable(), "prepare failed cleanup after confirmed restoration");
+    fake.magUninit = false;
+    Check(!filter.shutdown() && !filter.isActive() && !filter.needsRestore(), "restored output and unconfirmed API cleanup are distinct obligations");
+    const auto writes = fake.magWrites, reads = fake.magReads, initializes = fake.magInitializes;
+    Check(!filter.enable() && !filter.initialize() && filter.inspectState().state == BackendVerification::Unavailable &&
+        fake.magWrites == writes && fake.magReads == reads && fake.magInitializes == initializes,
+        "possibly partial API teardown cannot leave the backend ready or permit new color writes");
+    fake.magUninit = true; fake.effect.transform[1][1] = 0.37f; const auto latest = fake.effect;
+    Check(filter.initialize() && fake.magInitializes == initializes + 1 && filter.enable() && filter.disable() && Same(fake.effect, latest),
+        "later initialization finishes cleanup, reacquires the API, and captures current external state");
+}
+void MagnificationActivationAndLiveFailureMatrix() {
+    for (unsigned context = 0; context < 3; ++context)
+        for (const auto behavior : {Write::Fail, Write::FailAfterApply, Write::Ignore, Write::LowByteLeak, Write::BlackLift, Write::WhiteLoss, Write::MatrixNonfinite}) {
+            Reset(); MagnificationFilter filter; AppPreferences preferences;
+            fake.effect.transform[0][0] = 0.63f; const auto original = fake.effect;
+            Check(filter.initialize(), "initialize write failure matrix");
+            if (context != 0) Check(filter.enable(), "prepare confirmed live transform");
+            const auto confirmed = fake.effect;
+            fake.magWriteResults = {behavior, Write::Apply};
+            const bool changed = context == 0 ? filter.enable() : (context == 1 ? filter.setRedMode(RedMode::StrictRed) :
+                UpdateLumaPreference(filter, preferences, LumaProfile::EqualDetail) == LumaPreferenceResult::Applied);
+            Check(!changed && filter.redMode() == RedMode::LumaRed && filter.lumaProfile() == LumaProfile::Classic &&
+                preferences.luma == LumaProfile::Classic && filter.isActive() == (context != 0) && filter.needsRestore() == (context != 0) &&
+                Same(fake.effect, context == 0 ? original : confirmed) && filter.lastError()[0],
+                "failed/partial/ignored/leaking/black-lifting/white-losing/nonfinite writes never commit choices; confirmed rollback preserves the right prior state");
+            Check(filter.disable() && Same(fake.effect, original), "original matrix survives every activation/live failure and rollback");
+        }
+}
+void MagnificationUnconfirmedRollbackRegression() {
+    for (unsigned context = 0; context < 3; ++context) for (unsigned ambiguity = 0; ambiguity < 3; ++ambiguity) {
+        Reset(); MagnificationFilter filter; AppPreferences preferences;
+        fake.effect.transform[2][2] = 0.61f; const auto original = fake.effect;
+        Check(filter.initialize(), "initialize ambiguous rollback case");
+        if (context != 0) Check(filter.enable(), "prepare live rollback case");
+        if (ambiguity == 1) {
+            fake.magReadResults = context == 0 ? std::deque<bool>{true, false, false} : std::deque<bool>{false, false};
+            fake.magWriteResults = {Write::Apply, Write::Apply};
+        } else fake.magWriteResults = {Write::FailAfterApply, ambiguity == 0 ? Write::FailAfterApply : Write::Ignore};
+        const bool changed = context == 0 ? filter.enable() : (context == 1 ? filter.setRedMode(RedMode::StrictRed) :
+            UpdateLumaPreference(filter, preferences, LumaProfile::EqualDetail) == LumaPreferenceResult::Applied);
+        Check(!changed && !filter.isActive() && filter.needsRestore() && fake.uninitializes == 0 &&
+            filter.redMode() == RedMode::LumaRed && filter.lumaProfile() == LumaProfile::Classic && preferences.luma == LumaProfile::Classic,
+            "failed setters, failed reads, or mismatched rollback retain original recovery without active confirmation or preference commit");
+        const auto reads = fake.magReads, writes = fake.magWrites;
+        Check(!filter.enable() && !filter.setRedMode(RedMode::StrictRed) && !filter.setLumaProfile(LumaProfile::EqualDetail) &&
+            fake.magReads == reads && fake.magWrites == writes, "unconfirmed rollback blocks recapture and new live writes");
+        Check(filter.shutdown() && !filter.needsRestore() && Same(fake.effect, original), "shutdown retries the original snapshot before releasing APIs");
+    }
+}
+void MagnificationFailedRestorationIsRecoveryOnly() {
+    for (const auto behavior : {Write::Fail, Write::FailAfterApply, Write::Ignore, Write::WhiteLoss, Write::MatrixNonfinite, Write::Apply}) {
+        Reset(); MagnificationFilter filter;
+        fake.effect.transform[0][0] = 0.53f; const auto original = fake.effect;
+        Check(filter.initialize() && filter.enable(), "prepare restoration failure");
+        fake.magWriteResults = {behavior};
+        if (behavior == Write::Apply) fake.magReadResults = {false};
+        Check(!filter.disable() && !filter.isActive() && filter.needsRestore(), "failed/partial/ignored/mismatched/read-failed restoration drops red confirmation but retains the original snapshot");
+        const auto reads = fake.magReads, writes = fake.magWrites;
+        Check(!filter.enable() && !filter.setRedMode(RedMode::StrictRed) && !filter.setLumaProfile(LumaProfile::GreenDetail) &&
+            fake.magReads == reads && fake.magWrites == writes, "failed restoration cannot authorize recapture or live changes");
+        fake.magWriteResults = {Write::Ignore};
+        // A prior failed-after-apply setter can already have restored the matrix;
+        // a retry still needs both setter success and a confirming original read.
+        const bool alreadyOriginal = Same(fake.effect, original);
+        const bool cleaned = filter.shutdown();
+        Check(cleaned == alreadyOriginal && (cleaned || (filter.needsRestore() && fake.uninitializes == 0)),
+            "shutdown releases APIs only after original-matrix write/read confirmation, regardless of prior apparent output");
+        Check(filter.shutdown() && Same(fake.effect, original), "later retry completes original restoration without recapture");
+    }
+}
+void MagnificationMatrixVerificationPurposes() {
+    float expected[5][5] = {}, actual[5][5] = {};
+    actual[0][1] = (std::numeric_limits<float>::denorm_min)();
+    const auto red = BackendComparison::Matrix(actual, expected, BackendComparison::MatrixPurpose::RedOnly);
+    const auto original = BackendComparison::Matrix(actual, expected, BackendComparison::MatrixPurpose::OriginalRestoration);
+    Check(red.mismatches == 1 && red.unexpectedGreenBlue && original.mismatches == 0 && !original.unexpectedGreenBlue,
+        "strict red zeros and arbitrary-original finite tolerance are explicitly different comparison contracts");
+    expected[0][1] = actual[0][1] = 0.3f; expected[4][2] = actual[4][2] = -0.2f;
+    Check(BackendComparison::Matrix(actual, expected, BackendComparison::MatrixPurpose::OriginalRestoration).mismatches == 0,
+        "an arbitrary original matrix can legitimately contain cross-channel terms, offsets, and green/blue output");
+    actual[1][2] = (std::numeric_limits<float>::infinity)();
+    Check(BackendComparison::Matrix(actual, expected, BackendComparison::MatrixPurpose::OriginalRestoration).nonFiniteValues &&
+        BackendComparison::Matrix(actual, expected, BackendComparison::MatrixPurpose::OriginalRestoration).mismatches == 1,
+        "original restoration still rejects nonfinite read-back");
+}
+void MagnificationArbitraryOriginalRestorationRegression() {
+    MagnificationFilter filter;
+    fake.effect.transform[0][0] = 0.4f; fake.effect.transform[1][2] = 0.2f; fake.effect.transform[4][0] = 0.1f;
+    const auto original = fake.effect;
+    Check(filter.initialize() && filter.enable(), "capture arbitrary calibration and activate strict red-only output");
+    fake.magWriteResults = {Write::LowByteLeak}; // Tiny read-back variation at an original zero coefficient.
+    Check(filter.disable() && !filter.isActive() && !filter.needsRestore() &&
+        BackendComparison::Matrix(fake.effect.transform, original.transform, BackendComparison::MatrixPurpose::OriginalRestoration).mismatches == 0 &&
+        BackendComparison::Matrix(fake.effect.transform, original.transform, BackendComparison::MatrixPurpose::RedOnly).mismatches == 1,
+        "production restoration uses the arbitrary-original contract, including tolerated zero rounding and legitimate green/blue/cross-channel/offset terms");
+}
+void MagnificationExternalChangesNeverReplaceOwnedSnapshot() {
+    MagnificationFilter filter;
+    fake.effect.transform[0][0] = 0.41f; const auto original = fake.effect;
+    Check(filter.initialize() && filter.enable(), "capture original matrix before another tool changes output");
+    fake.effect.transform[1][1] = 0.7f; fake.effect.transform[4][2] = 0.1f;
+    Check(filter.inspectState().state == BackendVerification::Changed && filter.isActive() && filter.needsRestore(),
+        "explicit inspection detects a later external matrix but cannot prove continuing physical output or discard recovery ownership");
+    const auto reads = fake.magReads, writes = fake.magWrites;
+    Check(filter.initialize() && filter.enable() && fake.magReads == reads && fake.magWrites == writes,
+        "already-ready/active no-ops do not adopt another tool's matrix as a new restoration snapshot");
+    Check(filter.disable() && Same(fake.effect, original),
+        "restoration deliberately writes the saved original; it cannot merge or preserve another tool's changes made during ownership");
+}
+void MagnificationConfirmationToleranceNoopsAndAllocation() {
+    MagnificationFilter filter;
+    Check(filter.initialize() && fake.magReads == 1, "initial capture is separate from write confirmation");
+    const auto original = fake.effect;
+    fake.magWriteResults = {Write::MatrixRounding};
+    bool enabled = false, unused = false;
+    { TestMemory::FailNextAllocation fail; enabled = filter.enable(); unused = TestMemory::AllocationFailurePending(); }
+    Check(enabled && unused && filter.isActive() && fake.magReads == 3 && filter.statistics().verification.requests == 0,
+        "automatic write confirmation is allocation-free, retains nonzero tolerance, and is not an explicit verification request");
+    Check(filter.enable() && filter.setRedMode(RedMode::LumaRed) && fake.magReads == 3 && fake.magWrites == 1,
+        "active/current selections do not add reads or writes");
+    Check(filter.setRedMode(RedMode::StrictRed) && filter.setLumaProfile(LumaProfile::GreenDetail) && fake.magReads == 4 && fake.magWrites == 2,
+        "one live write confirms once and future Strict-mode preferences do not inspect output");
+    Check(filter.disable() && Same(fake.effect, original) && fake.magReads == 5 && filter.shutdown() && fake.magReads == 5,
+        "restoration confirms once and off shutdown does not overwrite or inspect external output");
+}
+void MagnificationNativeFailureErrorProvenance() {
+    for (unsigned stage = 0; stage < 7; ++stage) for (bool supplied : {false, true}) {
+        Reset(); MagnificationFilter filter;
+        if (stage >= 2) Check(filter.initialize(), "initialize native error case");
+        if (stage == 6) Check(filter.enable(), "prepare explicit verification read error");
+        fake.lastError = 0xbad; fake.diagnosticsClobbersError = true;
+        const std::optional<DWORD> error = supplied ? std::optional<DWORD>(4321) : std::nullopt;
+        bool failed = false;
+        switch (stage) {
+        case 0: fake.magInit = false; fake.magInitializeError = error; failed = !filter.initialize(); break;
+        case 1: fake.magGet = false; fake.magReadError = error; failed = !filter.initialize(); break;
+        case 2: fake.magReadResults = {false}; fake.magReadError = error; failed = !filter.enable(); break;
+        case 3: fake.magWriteResults = {Write::Fail, Write::Apply}; fake.magWriteError = error; failed = !filter.enable(); break;
+        case 4: fake.magReadResults = {true, false, true}; fake.magReadError = error; failed = !filter.enable(); break;
+        case 5: fake.magUninit = false; fake.magUninitializeError = error; failed = !filter.shutdown(); break;
+        default: {
+            fake.magGet = false; fake.magReadError = error;
+            const auto report = filter.inspectState();
+            failed = report.state == BackendVerification::Unavailable && report.errorCode == (supplied ? 4321u : 0u) && !report.readback;
+            break;
+        }
+        }
+        Check(failed && (stage == 6 || std::string_view(filter.lastError()).find(supplied ? "GetLastError=4321" : "no native error code") != std::string_view::npos),
+            "every native initialization/capture/set/read/cleanup/inspection failure excludes stale codes and captures supplied codes before logging");
+        fake.magInit = fake.magGet = fake.magUninit = true;
+        Check(filter.shutdown(), "clean up native error fixture");
+    }
 }
 void InvalidModes() {
     MagnificationFilter m;
@@ -921,7 +1101,7 @@ void PreferencesImportRecoveryGate() {
     const int writes = fake.registryWrites;
     fake.magSet = false;
     auto imported = SaveImportedPreferences(candidate, [&] { return filter.disable(); });
-    Check(imported == PreferenceImportResult::RestoreFailed && fake.registryWrites == writes && filter.isActive(), "failed restoration blocks persistence and retains recovery state");
+    Check(imported == PreferenceImportResult::RestoreFailed && fake.registryWrites == writes && !filter.isActive() && filter.needsRestore(), "failed restoration blocks persistence and retains recovery-only state");
     fake.magSet = true; fake.registryWrite = false;
     imported = SaveImportedPreferences(candidate, [&] { return filter.disable(); });
     Check(imported == PreferenceImportResult::SaveFailed && !filter.isActive() && LoadPreferences().preferences == original, "save failure leaves display restored and old preferences intact");
@@ -1134,7 +1314,7 @@ void UiRecoveryFailureKeepsSnapshot() {
     const long result = GuardUiCall<long>([]() -> long { throw 42; }, [&](const char*) {
         return filter.disable() ? 0L : -1L;
     });
-    Check(result == -1 && filter.isActive() && filter.needsRestore() && fake.magWrites == writes + 1,
+    Check(result == -1 && !filter.isActive() && filter.needsRestore() && fake.magWrites == writes + 1,
         "failed emergency restore stays visible and retains recovery state");
     fake.magSet = true;
     Check(filter.disable(), "later restore retry remains possible");
@@ -1539,9 +1719,9 @@ void MagnificationStatisticsAndSafeReset() {
         statistics.shutdown == TimedOperationCounts(1, 1), "counters include idempotent requests, mismatch/unavailable checks and nested recovery");
     const auto error = std::string(filter.lastError());
     const auto reads = fake.magReads, writes = fake.magWrites, uninitializes = fake.uninitializes;
-    Check(filter.resetStatistics() && filter.statistics() == BackendStatistics{} && filter.isActive() && filter.needsRestore() &&
+    Check(filter.resetStatistics() && filter.statistics() == BackendStatistics{} && !filter.isActive() && filter.needsRestore() &&
         error == filter.lastError() && fake.magReads == reads && fake.magWrites == writes && fake.uninitializes == uninitializes,
-        "counter reset preserves active state, recovery snapshot, last error, and all native operations");
+        "counter reset preserves recovery-only state, original snapshot, last error, and all native operations");
     fake.magSet = true; fake.magGet = true;
     Check(filter.disable() && fake.effect.transform[0][0] == 1 && fake.effect.transform[0][1] == 0 && filter.shutdown(), "original restore matrix remains intact after reset");
     Check(filter.statistics().restoration == TimedOperationCounts(1, 0) && filter.statistics().shutdown == TimedOperationCounts(1, 0), "counting resumes from reset");
@@ -1923,7 +2103,7 @@ void DetailedMatrixVerification() {
         std::abs(report.readback->maximumDifference - 0.125) < 0.000001 && report.readback->nonFiniteValues && report.readback->unexpectedGreenBlue,
         "all mismatches are counted; nonfinite inputs do not poison the finite maximum");
     Check(fake.magWrites == originalWrites && filter.isActive() && filter.needsRestore() && !filter.lastError()[0], "inspection never writes or changes backend ownership/error state");
-    fake.magGet = false; fake.lastError = 4321; fake.diagnosticsClobbersError = true;
+    fake.magGet = false; fake.magReadError = 4321; fake.diagnosticsClobbersError = true;
     report = filter.inspectState();
     Check(report.state == BackendVerification::Unavailable && !report.readback && report.errorCode == 4321, "read error survives diagnostic logging without stale numerical data");
     fake.magGet = true; fake.diagnosticsClobbersError = false;
@@ -1958,15 +2138,15 @@ void ComparisonToleranceAndFiniteRange() {
     float expected[5][5] = {}, actual[5][5] = {};
     expected[0][0] = actual[0][0] = 1;
     actual[0][0] = std::nextafter(1.0f, 2.0f);
-    auto matrix = BackendComparison::Matrix(actual, expected);
+    auto matrix = BackendComparison::Matrix(actual, expected, BackendComparison::MatrixPurpose::RedOnly);
     Check(matrix.mismatches == 0 && matrix.maximumDifference > 0, "nonzero matrix coefficients retain established float tolerance");
     actual[0][1] = (std::numeric_limits<float>::denorm_min)();
-    matrix = BackendComparison::Matrix(actual, expected);
+    matrix = BackendComparison::Matrix(actual, expected, BackendComparison::MatrixPurpose::RedOnly);
     Check(matrix.mismatches == 1 && matrix.unexpectedGreenBlue, "every nonzero expected-zero coefficient is a mismatch, including subnormal leakage");
     actual[0][1] = -0.0f;
     expected[0][0] = -(std::numeric_limits<float>::max)(); actual[0][0] = (std::numeric_limits<float>::max)();
     Check(BackendComparison::FiniteMatrix(actual) && BackendComparison::FiniteMatrix(expected), "finite snapshot validation does not reject large or signed-zero coefficients");
-    matrix = BackendComparison::Matrix(actual, expected);
+    matrix = BackendComparison::Matrix(actual, expected, BackendComparison::MatrixPurpose::RedOnly);
     Check(matrix.mismatches == 1 && std::isfinite(matrix.maximumDifference) && !matrix.nonFiniteValues && !matrix.unexpectedGreenBlue,
         "finite extreme values retain a finite double-precision maximum; signed zero stays zero");
     WORD gammaExpected[3][256] = {}, gammaActual[3][256] = {};
@@ -1994,11 +2174,11 @@ void DetailedVerificationReportFormatting() {
 }
 void MatrixComparisonLocationCoverage() {
     float expected[5][5] = {}, actual[5][5] = {};
-    auto details = BackendComparison::Matrix(actual, expected);
+    auto details = BackendComparison::Matrix(actual, expected, BackendComparison::MatrixPurpose::RedOnly);
     Check(details.mismatches == 0 && !details.firstMismatch && !details.maximumDifferenceAt, "identical finite matrices invent no value locations");
     for (unsigned row = 0; row < 5; ++row) for (unsigned column = 0; column < 5; ++column) {
         actual[row][column] = 0.25f;
-        details = BackendComparison::Matrix(actual, expected);
+        details = BackendComparison::Matrix(actual, expected, BackendComparison::MatrixPurpose::RedOnly);
         Check(details.mismatches == 1 && details.firstMismatch == BackendValueLocation{row, column} &&
             details.maximumDifferenceAt == BackendValueLocation{row, column} && details.maximumDifference == 0.25,
             "every matrix coefficient preserves its row/column in first and maximum diagnostics");
@@ -2008,21 +2188,21 @@ void MatrixComparisonLocationCoverage() {
 void MatrixComparisonLocationsToleranceNonfiniteAndTies() {
     float expected[5][5] = {}, actual[5][5] = {};
     expected[0][0] = 1; actual[0][0] = std::nextafter(1.0f, 2.0f);
-    auto details = BackendComparison::Matrix(actual, expected);
+    auto details = BackendComparison::Matrix(actual, expected, BackendComparison::MatrixPurpose::RedOnly);
     Check(!details.firstMismatch && details.maximumDifferenceAt == BackendValueLocation{0, 0} && details.mismatches == 0,
         "a tolerated finite coefficient difference has a maximum location without a mismatch location");
     actual[0][1] = (std::numeric_limits<float>::denorm_min)();
     actual[1][0] = actual[3][4] = 0.25f;
-    details = BackendComparison::Matrix(actual, expected);
+    details = BackendComparison::Matrix(actual, expected, BackendComparison::MatrixPurpose::RedOnly);
     Check(details.mismatches == 3 && details.firstMismatch == BackendValueLocation{0, 1} && details.maximumDifferenceAt == BackendValueLocation{1, 0},
         "expected-zero subnormal mismatch and first equal maximum are deterministic row-major locations");
     actual[0][0] = (std::numeric_limits<float>::quiet_NaN)();
-    details = BackendComparison::Matrix(actual, expected);
+    details = BackendComparison::Matrix(actual, expected, BackendComparison::MatrixPurpose::RedOnly);
     Check(details.mismatches == 4 && details.nonFiniteValues && details.firstMismatch == BackendValueLocation{0, 0} &&
         details.maximumDifferenceAt == BackendValueLocation{1, 0} && details.maximumDifference == 0.25,
         "a nonfinite first mismatch does not replace the finite maximum location/value");
     for (auto& row : actual) for (auto& value : row) value = (std::numeric_limits<float>::infinity)();
-    details = BackendComparison::Matrix(actual, expected);
+    details = BackendComparison::Matrix(actual, expected, BackendComparison::MatrixPurpose::RedOnly);
     Check(details.mismatches == 25 && details.firstMismatch == BackendValueLocation{0, 0} && !details.maximumDifferenceAt && details.maximumDifference == 0,
         "all nonfinite values record the first failure without inventing a finite-difference location");
 }
@@ -2926,8 +3106,8 @@ void RestorationHistoryRetainsBackendRecovery() {
         RecordRestorationRequest request(history, RestoreReason::Countdown, 1000);
         request.finish(filter.disable() ? RestoreOutcome::Restored : RestoreOutcome::Failed);
     }
-    Check(filter.isActive() && filter.needsRestore() && history.newest(0)->outcome == RestoreOutcome::Failed,
-        "recording a failed restore cannot clear the active backend or original recovery snapshot");
+    Check(!filter.isActive() && filter.needsRestore() && history.newest(0)->outcome == RestoreOutcome::Failed,
+        "recording a failed restore preserves recovery-only state and the original snapshot");
     fake.magSet = true;
     {
         RecordRestorationRequest request(history, RestoreReason::Manual, 6000);
@@ -3034,7 +3214,7 @@ void RestorationRequestTimingIncludesPostBackendWork() {
         fake.monotonicNow += 25; // Model control/UI work after the backend result is known.
     }
     Check(history.newest(0)->durationMilliseconds == 32 && history.newest(0)->outcome == RestoreOutcome::Failed &&
-        filter.statistics().restoration.timing.lastMilliseconds == 7 && filter.isActive() && filter.needsRestore(),
+        filter.statistics().restoration.timing.lastMilliseconds == 7 && !filter.isActive() && filter.needsRestore(),
         "request timing includes post-backend work while backend timing, failure state, and recovery ownership remain distinct");
     SupportReportState state; state.restorationHistory = history; state.reportTick = 1032;
     state.active = filter.isActive(); state.needsRestore = filter.needsRestore(); state.lastError = filter.lastError();
@@ -3775,9 +3955,9 @@ void MagnificationTimingIncludesRollbackAndReadback() {
     fake.magReadMilliseconds = 3; fake.magWriteMilliseconds = 7;
     Check(filter.initialize() && filter.statistics().initialization.timing == BackendOperationTiming{1, 3, 3, 3}, "initialization times supplied fake capture latency");
     fake.magWriteResults = {Write::FailAfterApply, Write::Apply};
-    Check(!filter.enable() && filter.statistics().activation.timing == BackendOperationTiming{1, 17, 17, 17} &&
-        filter.statistics().restoration.timing == BackendOperationTiming{1, 7, 7, 7}, "failed activation timing includes its separately timed rollback");
-    Check(filter.enable() && filter.statistics().activation.timing == BackendOperationTiming{2, 10, 17, 27} &&
+    Check(!filter.enable() && filter.statistics().activation.timing == BackendOperationTiming{1, 20, 20, 20} &&
+        filter.statistics().restoration.timing == BackendOperationTiming{1, 10, 10, 10}, "failed activation timing includes its separately timed rollback and confirmation read");
+    Check(filter.enable() && filter.statistics().activation.timing == BackendOperationTiming{2, 13, 20, 33} &&
         filter.inspectState().state == BackendVerification::Matches && filter.statistics().verification.timing == BackendOperationTiming{1, 3, 3, 3},
         "subsequent activation and explicit read-back accumulate independent category timing");
     Check(filter.disable(), "restore after fake Magnification timing");
@@ -3801,12 +3981,12 @@ void BackendTimingReportsAndResetAreReadOnly() {
     const auto clockReads = fake.backendClockReads;
     const auto reads = fake.magReads, writes = fake.magWrites;
     const auto report = BuildSupportReport(state);
-    Check(report.find("Activate: 1 / 0; timed 1, last 7 ms, peak 7 ms, inclusive total 7 ms") != std::string::npos &&
+    Check(report.find("Activate: 1 / 0; timed 1, last 9 ms, peak 9 ms, inclusive total 9 ms") != std::string::npos &&
         report.find("timing not recorded") != std::string::npos && report.find("overlaps across categories") != std::string::npos,
         "reports distinguish measured durations from absent samples and describe inclusive overlap");
     Check(filter.resetStatistics() && filter.statistics() == BackendStatistics{} && fake.backendClockReads == clockReads && fake.magReads == reads && fake.magWrites == writes &&
         filter.isActive() && filter.needsRestore(), "report/reset require no clock/native operation and preserve active ownership");
-    Check(filter.disable() && filter.statistics().restoration.timing == BackendOperationTiming{1, 5, 5, 5}, "timing resumes after reset without losing restoration data");
+    Check(filter.disable() && filter.statistics().restoration.timing == BackendOperationTiming{1, 7, 7, 7}, "timing resumes after reset with confirmation reads and without losing restoration data");
 }
 void ProfileSaveFileValidatedGuardedAndInactive() {
     const auto candidate = ComparisonCandidate(63);
@@ -4225,7 +4405,7 @@ void GammaEndpointVerificationIsReadOnlyAndReported() {
 void GammaEndpointDiagnosticsDoNotApplyToMatrices() {
     MAGCOLOREFFECT expected = fake.effect, actual = expected;
     actual.transform[0][0] = 0.5f;
-    const auto matrix = BackendComparison::Matrix(actual.transform, expected.transform);
+    const auto matrix = BackendComparison::Matrix(actual.transform, expected.transform, BackendComparison::MatrixPurpose::RedOnly);
     Check(matrix.mismatches == 1 && !matrix.gammaRamp && !matrix.redBlackEndpointMismatch && !matrix.redWhiteEndpointMismatch,
         "matrix comparison remains independent of gamma endpoint policy");
     SupportReportState state; state.readback = matrix;
@@ -4306,7 +4486,7 @@ void LoopShutdownFailureResumesControlsAndPreservesSnapshot() {
     bool checkedControlsAfterBusy = false;
     const auto failed = TryLoopShutdown(filter, 0, busy, [&] { checkedControlsAfterBusy = !busy; return true; });
     Check(failed == LoopShutdownDisposition::ResumeControls && !busy && checkedControlsAfterBusy && fake.shutdownWriteObservedBusy &&
-        filter.isActive() && filter.needsRestore() && fake.uninitializes == 0, "ordinary quit with live controls retains failed restoration and checks controls after guarded shutdown unwinds");
+        !filter.isActive() && filter.needsRestore() && fake.uninitializes == 0, "ordinary quit with live controls retains failed restoration and checks controls after guarded shutdown unwinds");
     fake.magSet = true;
     Check(TryLoopShutdown(filter, 0, busy, [] { return true; }) == LoopShutdownDisposition::ExitSuccess && !filter.needsRestore() &&
         !filter.isActive() && Same(fake.effect, original), "a later exit retry can restore the original snapshot and finish shutdown");
@@ -4352,6 +4532,21 @@ void LoopShutdownDefersOuterBusyOperation() {
         "quit cannot shut down a backend over an outer in-progress operation or clear its busy ownership");
     busy = false;
     Check(TryLoopShutdown(filter, 0, busy, [] { return true; }) == LoopShutdownDisposition::ExitSuccess, "shutdown retries after the outer scope releases");
+}
+void LoopQueueFailureRetainsLiveRecovery() {
+    for (bool busyInitially : {false, true}) {
+        Reset(); bool busy = busyInitially; MagnificationFilter filter;
+        fake.effect.transform[0][0] = 0.23f; const auto original = fake.effect;
+        Check(filter.initialize() && filter.enable(), "prepare static-owner-style queue error recovery");
+        fake.magSet = false;
+        const auto writes = fake.magWrites;
+        Check(TryLoopShutdown(filter, -1, busy, [] { return true; }) == LoopShutdownDisposition::ResumeControls &&
+            filter.needsRestore() && fake.uninitializes == 0 && busy == busyInitially && fake.magWrites == writes + (busyInitially ? 0 : 1),
+            "a queue error with live controls cannot discard a busy or failed-restoration backend owner");
+        busy = false; fake.magSet = true;
+        Check(TryLoopShutdown(filter, 0, busy, [] { return true; }) == LoopShutdownDisposition::ExitSuccess && Same(fake.effect, original),
+            "retained controls can later restore and finish shutdown with the original snapshot");
+    }
 }
 void LoopShutdownGammaCleanupRetryPreservesOwnership() {
     bool busy = false;
@@ -4816,7 +5011,7 @@ void TrayCommandFailedDeliveryPreservesBusyAndFailure() {
     fake.magWriteResults = {Write::Fail};
     bool restored = true;
     Check(DeliverTrayCommand(reinterpret_cast<HWND>(7), ID_TRAY_RESTORE, true, pending, [&] { restored = filter.disable(); }) == TrayCommandDelivery::RestoreRequested &&
-        !restored && filter.isActive() && filter.needsRestore(), "delivery outcome reports only a requested restore, retaining backend ownership after an actual restore failure");
+        !restored && !filter.isActive() && filter.needsRestore(), "delivery outcome reports only a requested restore, retaining backend ownership after an actual restore failure");
     Check(filter.disable(), "failed fallback restoration keeps the original snapshot for retry");
 }
 void TrayCommandFailedUnrelatedDeliveryPreservesSession() {
@@ -5074,12 +5269,14 @@ BOOL SetDeviceGammaRamp(HDC, void* ramp) {
     if (behavior == Write::WhiteLoss) fake.ramp[0][255] = 65534;
     return behavior == Write::Apply || behavior == Write::Ignore || behavior == Write::LowByteLeak || behavior == Write::BlackLift || behavior == Write::WhiteLoss;
 }
-BOOL MagInitialize() { ++fake.magInitializes; return fake.magInit; }
-BOOL MagUninitialize() { ++fake.uninitializes; return fake.magUninit; }
+BOOL MagInitialize() { ++fake.magInitializes; if (!fake.magInit && fake.magInitializeError) fake.lastError = *fake.magInitializeError; return fake.magInit; }
+BOOL MagUninitialize() { ++fake.uninitializes; if (!fake.magUninit && fake.magUninitializeError) fake.lastError = *fake.magUninitializeError; return fake.magUninit; }
 BOOL MagGetFullscreenColorEffect(MAGCOLOREFFECT* effect) {
     fake.monotonicNow += fake.magReadMilliseconds;
     ++fake.magReads;
-    if (!fake.magGet) return 0;
+    bool success = fake.magGet;
+    if (!fake.magReadResults.empty()) { success = fake.magReadResults.front(); fake.magReadResults.pop_front(); }
+    if (!success) { if (fake.magReadError) fake.lastError = *fake.magReadError; return 0; }
     *effect = fake.effect; return 1;
 }
 BOOL MagSetFullscreenColorEffect(MAGCOLOREFFECT* effect) {
@@ -5088,10 +5285,15 @@ BOOL MagSetFullscreenColorEffect(MAGCOLOREFFECT* effect) {
     if (fake.shutdownBusyFlag) fake.shutdownWriteObservedBusy = *fake.shutdownBusyFlag;
     auto result = fake.magSet ? Write::Apply : Write::Fail;
     if (!fake.magWriteResults.empty()) { result = fake.magWriteResults.front(); fake.magWriteResults.pop_front(); }
-    if (result == Write::Fail) { fake.lastError = ERROR_ACCESS_DENIED; return 0; }
+    if (result == Write::Fail) { if (fake.magWriteError) fake.lastError = *fake.magWriteError; return 0; }
     if (result == Write::Ignore) return 1;
     fake.effect = *effect;
-    if (result == Write::FailAfterApply) { fake.lastError = ERROR_ACCESS_DENIED; return 0; }
+    if (result == Write::LowByteLeak) fake.effect.transform[0][1] = (std::numeric_limits<float>::denorm_min)();
+    if (result == Write::BlackLift) fake.effect.transform[4][0] = (std::numeric_limits<float>::denorm_min)();
+    if (result == Write::WhiteLoss) fake.effect.transform[0][0] -= 0.01f;
+    if (result == Write::MatrixNonfinite) fake.effect.transform[0][0] = (std::numeric_limits<float>::quiet_NaN)();
+    if (result == Write::MatrixRounding) fake.effect.transform[0][0] = std::nextafter(fake.effect.transform[0][0], 2.0f);
+    if (result == Write::FailAfterApply) { if (fake.magWriteError) fake.lastError = *fake.magWriteError; return 0; }
     return 1;
 }
 int MultiByteToWideChar(unsigned, DWORD, const char* text, int length, wchar_t* output, int) {
@@ -5181,6 +5383,11 @@ int main() {
         {"Magnification recapture", MagCaptureEachActivation}, {"Magnification capture failure", MagCaptureFailure},
         {"Magnification initialization failures", MagInitializationFailures}, {"Magnification write failures", MagWriteFailure},
         {"Magnification shutdown retry", MagUninitializeFailure}, {"Unsupported modes", InvalidModes},
+        {"Magnification incomplete initialization readiness", MagnificationInitializationReadinessRegression}, {"Magnification cleanup invalidates readiness", MagnificationCleanupFailureInvalidatesReadiness},
+        {"Magnification activation/live failure matrix", MagnificationActivationAndLiveFailureMatrix}, {"Magnification unconfirmed rollback regression", MagnificationUnconfirmedRollbackRegression},
+        {"Magnification failed restoration recovery-only", MagnificationFailedRestorationIsRecoveryOnly}, {"Magnification explicit comparison purposes", MagnificationMatrixVerificationPurposes},
+        {"Magnification confirmation tolerance/noops/allocation", MagnificationConfirmationToleranceNoopsAndAllocation}, {"Magnification native error provenance", MagnificationNativeFailureErrorProvenance},
+        {"Magnification arbitrary original restoration", MagnificationArbitraryOriginalRestorationRegression}, {"Magnification external changes retain original", MagnificationExternalChangesNeverReplaceOwnedSnapshot},
         {"Gamma output and restoration", GammaOutputAndRestore}, {"Gamma silent rejection", GammaIgnoredWrite},
         {"Gamma low-byte leakage", GammaLowByteLeak}, {"Inactive shutdown", OffShutdownDoesNotWrite},
         {"Gamma partial-write recovery", GammaPartialFailureRecovery}, {"Gamma failed disable", GammaFailedDisable},
@@ -5328,6 +5535,7 @@ int main() {
         {"Command help without C++ allocation", CommandHelpNoCppAllocation}, {"Command help standalone arguments", CommandHelpStandaloneArgumentPolicy},
         {"Quit failure resumes controls/snapshot", LoopShutdownFailureResumesControlsAndPreservesSnapshot}, {"Quit cleanup-only failure/retry", LoopShutdownCleanupFailureKeepsOffControlsAvailable},
         {"Quit fatal/missing-control failure paths", LoopShutdownFatalAndMissingControlPathsStayFailures}, {"Quit respects outer busy ownership", LoopShutdownDefersOuterBusyOperation},
+        {"Queue error retains live recovery controls", LoopQueueFailureRetainsLiveRecovery},
         {"Quit gamma cleanup ownership retry", LoopShutdownGammaCleanupRetryPreservesOwnership},
         {"Restoration history clear preserves backend", RestorationHistoryClearPreservesActiveRecovery}, {"Restoration history clear blocks open scopes", RestorationHistoryClearGuardsUnfinishedScopes},
         {"Restoration history clear allocation/policy", RestorationHistoryClearNoAllocationAndReadOnlyPolicy}, {"Expert diagnostic menu layout/ownership", ExpertDiagnosticsMenuLayoutAndOwnership},

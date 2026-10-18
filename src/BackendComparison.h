@@ -3,6 +3,7 @@
 #include <cmath>
 
 namespace BackendComparison {
+enum class MatrixPurpose { RedOnly, OriginalRestoration };
 inline void NoteMismatch(BackendReadbackDetails& result, unsigned row, unsigned column) noexcept {
     ++result.mismatches;
     if (!result.firstMismatch) result.firstMismatch = BackendValueLocation{row, column};
@@ -11,12 +12,12 @@ inline bool FiniteMatrix(const float (&matrix)[5][5]) noexcept {
     for (const auto& row : matrix) for (const float value : row) if (!std::isfinite(value)) return false;
     return true;
 }
-inline BackendReadbackDetails Matrix(const float (&actual)[5][5], const float (&expected)[5][5]) noexcept {
+inline BackendReadbackDetails Matrix(const float (&actual)[5][5], const float (&expected)[5][5], MatrixPurpose purpose) noexcept {
     BackendReadbackDetails result;
     for (int row = 0; row < 5; ++row) for (int column = 0; column < 5; ++column) {
         ++result.values;
         const float found = actual[row][column], wanted = expected[row][column];
-        if ((column == 1 || column == 2) && wanted == 0 && found != 0) result.unexpectedGreenBlue = true;
+        if (purpose == MatrixPurpose::RedOnly && (column == 1 || column == 2) && wanted == 0 && found != 0) result.unexpectedGreenBlue = true;
         if (!std::isfinite(found) || !std::isfinite(wanted)) {
             result.nonFiniteValues = true;
             NoteMismatch(result, row, column);
@@ -27,8 +28,11 @@ inline BackendReadbackDetails Matrix(const float (&actual)[5][5], const float (&
             result.maximumDifference = difference;
             result.maximumDifferenceAt = BackendValueLocation{static_cast<unsigned>(row), static_cast<unsigned>(column)};
         }
-        // Preserve the original float tolerance; every expected zero must stay exactly zero.
-        if (wanted == 0 ? found != 0 : std::abs(found - wanted) > 0.000001f) NoteMismatch(result, row, column);
+        // Red-only safety requires every requested zero to remain exactly zero.
+        // An arbitrary original matrix uses finite coefficient tolerance, including
+        // its zero coefficients; normal green/blue output is expected on restore.
+        const bool mismatch = purpose == MatrixPurpose::RedOnly && wanted == 0 ? found != 0 : std::abs(found - wanted) > 0.000001f;
+        if (mismatch) NoteMismatch(result, row, column);
     }
     return result;
 }

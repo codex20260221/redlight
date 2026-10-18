@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DisplayFilter.h"
+#include "BackendComparison.h"
 
 #include <windows.h>
 #include <magnification.h>
@@ -31,10 +32,11 @@ public:
 
 private:
     void LogError(const char* action, DWORD error);
-    bool SetColorEffect(const MAGCOLOREFFECT& effect, const char* action);
+    bool SetColorEffect(const MAGCOLOREFFECT& effect, const char* action, BackendComparison::MatrixPurpose purpose);
     bool SetLiveColorEffect(const MAGCOLOREFFECT& effect, const char* action);
 
     bool initialized_;
+    bool runtimeInitialized_; // API ownership can remain after incomplete initialization.
     bool active_;
     bool restorePending_;
     RedMode redMode_;

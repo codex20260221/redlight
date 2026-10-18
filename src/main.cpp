@@ -85,7 +85,7 @@ DisplayContextCache g_displayContext;
 
 bool ApplyInactivePreferences(const AppPreferences& preferences);
 void SetBackendPreference(BackendPreference preference);
-bool RestoreFilter(RestoreReason reason, bool showError, bool notifyFailure = true);
+bool RestoreFilter(RestoreReason reason, bool showError, bool notifyFailure = true, bool updateTray = true);
 void StopSessionTimer();
 bool StartSessionTimer(bool restartOnly = false);
 void RestartCountdown();
@@ -288,18 +288,22 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
     MSG msg = {};
     for (;;) {
         int messageResult = 0;
-        while ((messageResult = GetMessageA(&msg, NULL, 0, 0)) > 0) {
+        for (;;) {
+            SetLastError(ERROR_SUCCESS);
+            messageResult = GetMessageA(&msg, NULL, 0, 0);
+            if (messageResult <= 0) break;
             TranslateMessage(&msg);
             DispatchMessageA(&msg);
         }
         if (messageResult == -1) {
-            Diagnostics::LogFormat("GetMessage failed (error %lu).", GetLastError());
-            ReportError("The Windows message loop failed. RedLight is attempting display restoration.");
+            const DWORD error = GetLastError();
+            if (error) Diagnostics::LogFormat("GetMessage failed (error %lu); attempting display restoration before exit.", error);
+            else Diagnostics::Log("GetMessage failed without a native error code; attempting display restoration before exit.");
         }
         if (!g_busy) g_verification = {};
         const auto disposition = TryLoopShutdown(*g_displayFilter, messageResult, g_busy, [] { return IsWindow(nid.hWnd) != FALSE; });
         if (disposition == LoopShutdownDisposition::ResumeControls) {
-            Diagnostics::Log("Quit interrupted by incomplete backend shutdown; retaining controls, instance guard, and recovery resources for retry.");
+            Diagnostics::Log("Loop exit interrupted by incomplete backend shutdown; retaining controls, instance guard, and recovery resources for retry.");
             if (g_pendingRestore) RestoreFilter(RestoreReason::DeferredRequest, false);
             if (!g_busy && !g_displayFilter->isActive() && !g_displayFilter->needsRestore()) StopSessionTimer();
             RefreshTrayIconTip();
@@ -423,6 +427,7 @@ bool ResetDisplay() {
     } resetGuard{owner};
     Diagnostics::Log("Reset mode: attempting Magnification API restore.");
 
+    SetLastError(ERROR_SUCCESS);
     if (!MagInitialize()) {
         Diagnostics::LogFormat("Reset mode: MagInitialize failed (GetLastError=%lu).", static_cast<unsigned long>(GetLastError()));
         Diagnostics::Log("Reset mode: gamma-ramp reset not available without a saved ramp.");
@@ -432,6 +437,7 @@ bool ResetDisplay() {
     Diagnostics::Log("Reset mode: MagInitialize succeeded.");
 
     MAGCOLOREFFECT identity = kIdentityEffect;
+    SetLastError(ERROR_SUCCESS);
     const BOOL colorEffectReset = MagSetFullscreenColorEffect(&identity);
     if (colorEffectReset) {
         Diagnostics::Log("Reset mode: MagSetFullscreenColorEffect(identity) succeeded.");
@@ -440,14 +446,16 @@ bool ResetDisplay() {
             static_cast<unsigned long>(GetLastError()));
     }
 
-    if (!MagUninitialize()) {
+    SetLastError(ERROR_SUCCESS);
+    const BOOL cleanupSucceeded = MagUninitialize();
+    if (!cleanupSucceeded) {
         Diagnostics::LogFormat("Reset mode: MagUninitialize failed (GetLastError=%lu).", static_cast<unsigned long>(GetLastError()));
     } else {
         Diagnostics::Log("Reset mode: MagUninitialize succeeded.");
     }
 
     Diagnostics::Log("Reset mode: gamma-ramp reset not available without a saved ramp.");
-    return colorEffectReset != FALSE;
+    return colorEffectReset != FALSE && cleanupSucceeded != FALSE;
 }
 
 bool RequestRunningInstanceRestore(bool* handled) {
@@ -468,6 +476,7 @@ bool RequestRunningInstanceRestore(bool* handled) {
     Diagnostics::LogFormat("Reset mode: found running tray window (hwnd=%p).", static_cast<void*>(trayWindow));
 
     DWORD_PTR restoreResult = FALSE;
+    SetLastError(ERROR_SUCCESS);
     const LRESULT messageResult = SendMessageTimeoutA(
         trayWindow,
         WM_REDLIGHT_RESTORE,
@@ -508,7 +517,7 @@ void ReportError(const char* message, bool modal) {
     }
 }
 
-bool RestoreFilter(RestoreReason reason, bool showError, bool notifyFailure) {
+bool RestoreFilter(RestoreReason reason, bool showError, bool notifyFailure, bool updateTray) {
     RecordRestorationRequest request(g_restorationHistory, reason, GetTickCount64(), []() noexcept -> std::uint64_t { return GetTickCount64(); });
     if (g_busy) { request.finish(RestoreOutcome::Deferred); g_pendingRestore = true; return false; }
     g_pendingRestore = false;
@@ -525,7 +534,7 @@ bool RestoreFilter(RestoreReason reason, bool showError, bool notifyFailure) {
         g_pendingRestore = false;
         StopSessionTimer();
     }
-    RefreshTrayIconTip();
+    if (updateTray) RefreshTrayIconTip();
     if (!restored && notifyFailure) {
         char message[768];
         sprintf_s(message, "Display restoration failed. RedLight has kept its recovery data.\n"
@@ -1407,12 +1416,15 @@ LRESULT HandleWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         }
         return 0;
     case WM_QUERYENDSESSION:
-        RestoreFilter(RestoreReason::Exit, false);
+        // Honor Windows session termination; no modal recovery prompt can safely
+        // guarantee extra time. A canceled session leaves controls/snapshots alive.
+        if (!RestoreFilter(RestoreReason::Exit, false, /*notifyFailure=*/false, /*updateTray=*/false))
+            Diagnostics::Log("Session-end query restoration incomplete; recovery retained, but Windows may terminate the process.");
         return TRUE;
     case WM_ENDSESSION:
         if (wParam) {
-            RestoreFilter(RestoreReason::Exit, false);
-            DestroyTrayWindow(hwnd);
+            if (RestoreFilter(RestoreReason::Exit, false, /*notifyFailure=*/false, /*updateTray=*/false)) DestroyTrayWindow(hwnd);
+            else Diagnostics::Log("Committed session-end restoration incomplete; retaining controls and snapshot until Windows terminates. Recovery is best effort.");
         }
         return 0;
     case WM_CLOSE:

@@ -36,6 +36,7 @@ MAGCOLOREFFECT ColorEffectForMode(RedMode mode, LumaProfile profile) {
 
 MagnificationFilter::MagnificationFilter()
     : initialized_(false),
+      runtimeInitialized_(false),
       active_(false),
       restorePending_(false),
       redMode_(RedMode::LumaRed),
@@ -44,7 +45,7 @@ MagnificationFilter::MagnificationFilter()
       lastError_{} {}
 
 MagnificationFilter::~MagnificationFilter() {
-    shutdown();
+    if (!shutdown()) Diagnostics::Log("MagnificationFilter destroyed with incomplete recovery/cleanup. The owner must retain the object for retry before destruction; process termination cannot preserve its snapshot.");
 }
 
 bool MagnificationFilter::initialize() {
@@ -53,14 +54,19 @@ bool MagnificationFilter::initialize() {
         return operation.success();
     }
 
+    // A failed initial capture may still own API resources after failed cleanup.
+    // Finish that cleanup before a fresh initialization; ownership is not readiness.
+    if (runtimeInitialized_ && !shutdown()) return false;
+    SetLastError(ERROR_SUCCESS);
     if (!MagInitialize()) {
         LogError("MagInitialize", GetLastError());
         Diagnostics::LogFormat("%s initialization failed.", kFilterName);
         return false;
     }
 
-    initialized_ = true;
+    runtimeInitialized_ = true;
     MAGCOLOREFFECT capturedEffect = {};
+    SetLastError(ERROR_SUCCESS);
     if (MagGetFullscreenColorEffect(&capturedEffect)) {
         if (!BackendComparison::FiniteMatrix(capturedEffect.transform)) {
             LogError("validate initial restore matrix (non-finite value)", ERROR_INVALID_DATA);
@@ -71,7 +77,7 @@ bool MagnificationFilter::initialize() {
     } else {
         LogError("MagGetFullscreenColorEffect", GetLastError());
         Diagnostics::Log("MagnificationFilter: refusing to enable without a saved restore matrix.");
-        shutdown();
+        if (!shutdown()) Diagnostics::Log("MagnificationFilter: initialization cleanup remains pending after failed matrix capture.");
         return false;
     }
 
@@ -99,6 +105,7 @@ bool MagnificationFilter::enable() {
 
     // Capture immediately before each activation, not just at application startup.
     MAGCOLOREFFECT currentEffect = {};
+    SetLastError(ERROR_SUCCESS);
     if (!MagGetFullscreenColorEffect(&currentEffect)) {
         LogError("capture before enable", GetLastError());
         return false;
@@ -113,7 +120,7 @@ bool MagnificationFilter::enable() {
     sprintf_s(action, sizeof(action), "MagSetFullscreenColorEffect(%s)", RedModeDisplayName(redMode_));
     // A failed write is unconfirmed, rather than proof that display state was unchanged.
     restorePending_ = true;
-    if (!SetColorEffect(ColorEffectForMode(redMode_, lumaProfile_), action)) {
+    if (!SetColorEffect(ColorEffectForMode(redMode_, lumaProfile_), action, BackendComparison::MatrixPurpose::RedOnly)) {
         char applyError[sizeof(lastError_)];
         std::memcpy(applyError, lastError_, sizeof(applyError));
         if (disable()) {
@@ -140,7 +147,12 @@ bool MagnificationFilter::disable() {
         return operation.success();
     }
 
-    if (!SetColorEffect(restoreEffect_, "MagSetFullscreenColorEffect(restore)")) {
+    // Any restoration attempt can change output even when its API reports failure.
+    // Drop red-output confirmation before the write and block live edits until retry.
+    active_ = false;
+    restorePending_ = true;
+    if (!SetColorEffect(restoreEffect_, "MagSetFullscreenColorEffect(restore)", BackendComparison::MatrixPurpose::OriginalRestoration)) {
+        Diagnostics::Log("MagnificationFilter: restoration unconfirmed; inactive recovery retains the original matrix and API resources.");
         return false;
     }
 
@@ -163,13 +175,15 @@ BackendVerificationReport MagnificationFilter::inspectState() const {
     if (!initialized_) return {BackendVerification::Unavailable, std::nullopt, ERROR_INVALID_HANDLE};
     if (!needsRestore()) { operation.success(); return {BackendVerification::Inactive}; }
     MAGCOLOREFFECT actual = {};
+    SetLastError(ERROR_SUCCESS);
     if (!MagGetFullscreenColorEffect(&actual)) {
         const auto error = static_cast<std::uint32_t>(GetLastError());
-        Diagnostics::LogFormat("Magnification verification read failed (error %lu).", static_cast<unsigned long>(error));
+        if (error) Diagnostics::LogFormat("Magnification verification read failed (error %lu).", static_cast<unsigned long>(error));
+        else Diagnostics::Log("Magnification verification read failed; no native error code was provided.");
         return {BackendVerification::Unavailable, std::nullopt, error};
     }
     const auto expected = ColorEffectForMode(redMode_, lumaProfile_);
-    const auto details = BackendComparison::Matrix(actual.transform, expected.transform);
+    const auto details = BackendComparison::Matrix(actual.transform, expected.transform, BackendComparison::MatrixPurpose::RedOnly);
     Diagnostics::LogFormat("Magnification verification: %u/%u mismatches, maximum finite coefficient difference %.9g, nonfinite=%s, unexpected G/B=%s; no filter reapplied.",
         details.mismatches, details.values, details.maximumDifference, details.nonFiniteValues ? "yes" : "no", details.unexpectedGreenBlue ? "yes" : "no");
     if (details.mismatches == 0) operation.success();
@@ -231,18 +245,21 @@ bool MagnificationFilter::supportsRedMode(RedMode mode) const {
 
 bool MagnificationFilter::shutdown() {
     RecordBackendOperation operation(statistics_.shutdown, BackendMonotonicMilliseconds);
-    if (!initialized_) {
+    if (!runtimeInitialized_) {
         return operation.success();
     }
     if (needsRestore() && !disable()) {
         Diagnostics::Log("MagnificationFilter: restore failed; retaining recovery state.");
         return false;
     }
+    initialized_ = false; // A failed teardown may be partial; retain ownership, not readiness.
+    SetLastError(ERROR_SUCCESS);
     if (!MagUninitialize()) {
         LogError("MagUninitialize", GetLastError());
+        Diagnostics::Log("MagnificationFilter: API cleanup unconfirmed; readiness invalidated and runtime ownership retained for retry.");
         return false;
     }
-    initialized_ = false;
+    runtimeInitialized_ = false;
     Diagnostics::LogFormat("%s shutdown completed.", kFilterName);
     return operation.success();
 }
@@ -252,6 +269,11 @@ const char* MagnificationFilter::name() const {
 }
 
 void MagnificationFilter::LogError(const char* action, DWORD error) {
+    if (error == ERROR_SUCCESS) {
+        std::snprintf(lastError_, sizeof(lastError_), "%s: %s failed (no native error code)\n", kFilterName, action);
+        Diagnostics::LogFormat("%s: %s failed (no native error code)", kFilterName, action);
+        return;
+    }
     std::snprintf(lastError_, sizeof(lastError_), "%s: %s failed (GetLastError=%lu)\n",
         kFilterName,
         action,
@@ -259,15 +281,35 @@ void MagnificationFilter::LogError(const char* action, DWORD error) {
     Diagnostics::LogFormat("%s: %s failed (GetLastError=%lu)", kFilterName, action, static_cast<unsigned long>(error));
 }
 
-bool MagnificationFilter::SetColorEffect(const MAGCOLOREFFECT& effect, const char* action) {
+bool MagnificationFilter::SetColorEffect(const MAGCOLOREFFECT& effect, const char* action, BackendComparison::MatrixPurpose purpose) {
     if (!initialized_) {
         LogError(action, ERROR_INVALID_HANDLE);
         return false;
     }
 
     MAGCOLOREFFECT mutableEffect = effect;
+    SetLastError(ERROR_SUCCESS);
     if (!MagSetFullscreenColorEffect(&mutableEffect)) {
         LogError(action, GetLastError());
+        return false;
+    }
+
+    // Confirm every successful write, including rollback and restoration. A
+    // setter return alone cannot confirm that the requested matrix is retained.
+    MAGCOLOREFFECT applied = {};
+    SetLastError(ERROR_SUCCESS);
+    if (!MagGetFullscreenColorEffect(&applied)) {
+        const DWORD error = GetLastError();
+        LogError("matrix read-back after write", error);
+        return false;
+    }
+    const auto comparison = BackendComparison::Matrix(applied.transform, effect.transform, purpose);
+    if (comparison.mismatches != 0) {
+        const auto first = comparison.firstMismatch.value_or(BackendValueLocation{});
+        Diagnostics::LogFormat("Magnification %s write confirmation mismatch: %u/%u coefficients, first row/column=%u/%u, maximum finite difference %.9g, nonfinite=%s, unexpected G/B=%s.",
+            purpose == BackendComparison::MatrixPurpose::RedOnly ? "red-only" : "original-restoration", comparison.mismatches, comparison.values, first.row, first.column, comparison.maximumDifference,
+            comparison.nonFiniteValues ? "yes" : "no", comparison.unexpectedGreenBlue ? "yes" : "no");
+        LogError("matrix read-back mismatch (unconfirmed transform)", ERROR_INVALID_DATA);
         return false;
     }
 
@@ -276,12 +318,12 @@ bool MagnificationFilter::SetColorEffect(const MAGCOLOREFFECT& effect, const cha
 }
 
 bool MagnificationFilter::SetLiveColorEffect(const MAGCOLOREFFECT& effect, const char* action) {
-    if (SetColorEffect(effect, action)) return true;
+    if (SetColorEffect(effect, action, BackendComparison::MatrixPurpose::RedOnly)) return true;
     char applyError[sizeof(lastError_)];
     std::memcpy(applyError, lastError_, sizeof(applyError));
     active_ = false;
     restorePending_ = true;
-    if (SetColorEffect(ColorEffectForMode(redMode_, lumaProfile_), "rollback confirmed red transform")) {
+    if (SetColorEffect(ColorEffectForMode(redMode_, lumaProfile_), "rollback confirmed red transform", BackendComparison::MatrixPurpose::RedOnly)) {
         active_ = true;
         restorePending_ = false;
         std::memcpy(lastError_, applyError, sizeof(lastError_));
