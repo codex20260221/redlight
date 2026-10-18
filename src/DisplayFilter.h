@@ -17,6 +17,25 @@ inline const char* RedModeDisplayName(RedMode mode) {
     return "Unknown";
 }
 
+enum class BackendVerification { NotChecked, Inactive, Matches, Changed, Unavailable };
+inline const char* BackendVerificationName(BackendVerification value) {
+    switch (value) {
+    case BackendVerification::NotChecked: return "Not checked since last filter operation";
+    case BackendVerification::Inactive: return "Inactive (no filter owned)";
+    case BackendVerification::Matches: return "Read-back matches requested transform";
+    case BackendVerification::Changed: return "Read-back differs from requested transform";
+    case BackendVerification::Unavailable: return "Read-back unavailable";
+    }
+    return "Unknown";
+}
+
+inline const char* FilterStatusDescription(bool active, bool needsRestore, bool hasError, BackendVerification verification) {
+    if (needsRestore && hasError) return "Recovery needed";
+    if (verification == BackendVerification::Changed) return "Backend changed";
+    if (verification == BackendVerification::Unavailable) return "Verification unavailable";
+    return active ? "ON" : "off";
+}
+
 class DisplayFilter {
 public:
     virtual ~DisplayFilter() = default;
@@ -28,6 +47,7 @@ public:
     // A failed/partial write can require recovery without a confirmed active filter.
     virtual bool needsRestore() const = 0;
     virtual const char* lastError() const = 0;
+    virtual BackendVerification verifyState() const = 0;
     virtual bool setRedMode(RedMode mode) = 0;
     virtual RedMode redMode() const = 0;
     virtual bool setLumaProfile(LumaProfile profile) = 0;

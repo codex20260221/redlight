@@ -30,6 +30,7 @@
 #define ID_TRAY_COPY_REPORT 207
 #define ID_TRAY_COPY_PROFILE 208
 #define ID_TRAY_IMPORT_PROFILE 209
+#define ID_TRAY_VERIFY_BACKEND 210
 #define ID_HOTKEY_TOGGLE 1
 #define ID_HOTKEY_RESTORE 2
 #define ID_TRAY_RETRY_TIMER 1
@@ -60,6 +61,7 @@ BackendPreference g_startupBackendPreference = BackendPreference::Automatic;
 bool g_backendOverride = false;
 AppPreferences g_preferences;
 bool g_preferencesUnsaved = false;
+BackendVerification g_verification = BackendVerification::NotChecked;
 
 }
 
@@ -93,6 +95,8 @@ void ShowAboutDialog(HWND parent);
 void CopySupportReport(HWND owner);
 void CopySettingsProfile(HWND owner);
 void ImportSettingsProfile(HWND owner);
+void VerifyBackendState(HWND owner);
+const char* FilterStatusText();
 void ConfirmClipboardCopy(const char* title, const char* message);
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
@@ -388,6 +392,7 @@ void ReportError(const char* message, bool modal) {
 bool RestoreFilter(bool showError, bool notifyFailure) {
     if (g_busy) { g_pendingRestore = true; return false; }
     g_pendingRestore = false;
+    g_verification = BackendVerification::NotChecked;
     g_busy = true;
     const bool restored = !g_displayFilter->needsRestore() || g_displayFilter->disable();
     g_busy = false;
@@ -428,8 +433,7 @@ void RefreshTrayIconTip() {
         sprintf_s(profile, " [%s]", LumaProfileName(g_displayFilter->lumaProfile()));
     }
     sprintf_s(tip, "RedLight %s - %s - %s%s%s",
-        g_displayFilter->needsRestore() && g_displayFilter->lastError()[0] ? "RECOVERY NEEDED" :
-        (g_displayFilter->isActive() ? "ON" : "off"),
+        FilterStatusText(),
         g_displayFilter->name(), RedModeDisplayName(g_displayFilter->redMode()), profile, remaining);
     UpdateTrayIconTip(tip);
 }
@@ -445,6 +449,7 @@ void ToggleRedlight() {
     } else {
         Diagnostics::LogFormat("Enable request: %s (%s)", g_displayFilter->name(), RedModeDisplayName(g_displayFilter->redMode()));
         g_busy = true;
+        g_verification = BackendVerification::NotChecked;
         const bool enabled = g_displayFilter->enable();
         char enableError[256] = {};
         if (!enabled) strcpy_s(enableError, g_displayFilter->lastError());
@@ -618,6 +623,7 @@ void SetLumaProfile(LumaProfile profile) {
     if (g_busy || !g_displayFilter->supportsRedMode(RedMode::LumaRed) ||
         !IsValidLumaProfile(static_cast<unsigned>(profile))) return;
     g_busy = true;
+    g_verification = BackendVerification::NotChecked;
     const bool applied = g_displayFilter->setLumaProfile(profile);
     char error[256] = {};
     if (!applied) strcpy_s(error, g_displayFilter->lastError());
@@ -652,6 +658,7 @@ void SetRedModeFromTray(RedMode mode) {
     }
 
     g_busy = true;
+    g_verification = BackendVerification::NotChecked;
     const bool changed = g_displayFilter->setRedMode(mode);
     char modeError[256] = {};
     if (!changed) strcpy_s(modeError, g_displayFilter->lastError());
@@ -676,6 +683,7 @@ void CopySupportReport(HWND owner) {
     state.nextStartupPolicy = BackendPreferenceName(g_backendPreference);
     state.commandLineOverride = g_backendOverride;
     state.preferencesUnsaved = g_preferencesUnsaved;
+    state.verification = g_verification;
     state.redMode = RedModeDisplayName(g_displayFilter->redMode());
     state.lumaProfile = g_displayFilter->supportsRedMode(RedMode::LumaRed) ?
         LumaProfileName(g_displayFilter->lumaProfile()) : "Unavailable on gamma";
@@ -756,6 +764,30 @@ void ImportSettingsProfile(HWND owner) {
     ConfirmClipboardCopy("RedLight settings imported", "Preferences saved. The filter remains off; backend preference applies on the next start.");
 }
 
+const char* FilterStatusText() {
+    return FilterStatusDescription(g_displayFilter->isActive(), g_displayFilter->needsRestore(),
+        g_displayFilter->lastError()[0] != 0, g_verification);
+}
+
+void VerifyBackendState(HWND owner) {
+    if (g_busy) return;
+    g_busy = true;
+    g_verification = g_displayFilter->verifyState();
+    g_busy = false;
+    if (g_pendingRestore) RestoreFilter(false);
+    RefreshTrayIconTip();
+    const char* message = BackendVerificationName(g_verification);
+    if (g_verification == BackendVerification::Matches) {
+        message = "Software read-back matches the requested red-only transform. Physical display output was not measured.";
+    } else if (g_verification == BackendVerification::Changed) {
+        message = "Read-back differs from the requested transform. Another color tool or display change may be involved.\n\n"
+            "This check did not reapply the filter. Use Restore display to restore the saved state, then re-enable when ready.";
+    } else if (g_verification == BackendVerification::Unavailable) {
+        message = "The backend state could not be read. See the diagnostics log and use Restore display if recovery is needed.";
+    }
+    MessageBoxA(owner, message, "RedLight backend state", MB_OK | MB_ICONINFORMATION);
+}
+
 void ShowAboutDialog(HWND parent) {
     char aboutText[1024];
     sprintf_s(aboutText, "RedLight " REDLIGHT_VERSION "\n\nBackend: %s\nStartup selection: %s%s\nNext start: %s\nMode: %s\nLuma detail: %s\nStatus: %s\nSettings: %s\n\n"
@@ -766,8 +798,7 @@ void ShowAboutDialog(HWND parent) {
         g_backendOverride ? " (command line)" : "", BackendPreferenceName(g_backendPreference),
         RedModeDisplayName(g_displayFilter->redMode()),
         g_displayFilter->supportsRedMode(RedMode::LumaRed) ? LumaProfileName(g_displayFilter->lumaProfile()) : "Unavailable on gamma",
-        g_displayFilter->needsRestore() && g_displayFilter->lastError()[0] ? "Recovery needed" :
-        (g_displayFilter->isActive() ? "ON" : "off"),
+        FilterStatusText(),
         g_preferencesUnsaved ? "Unsaved changes" : "Saved/default",
         g_toggleHotkey ? "Toggle filter" : "Unavailable (shortcut in use)",
         g_restoreHotkey ? "Restore display" : "Unavailable (shortcut in use)",
@@ -851,6 +882,7 @@ void ShowTrayMenu(HWND hwnd) {
         AppendMenuA(menu, lumaFlags, ID_TRAY_MODE_LUMA_RED, "&Luma Red") &&
         AppendMenuA(menu, MF_SEPARATOR, 0, NULL) &&
         AppendMenuA(menu, MF_STRING, ID_TRAY_LOGS, "Open &logs folder") &&
+        AppendMenuA(menu, MF_STRING, ID_TRAY_VERIFY_BACKEND, "&Verify backend state") &&
         AppendMenuA(menu, MF_STRING, ID_TRAY_COPY_REPORT, "Copy support &report") &&
         AppendMenuA(menu, MF_STRING, ID_TRAY_COPY_PROFILE, "Copy settings &profile") &&
         AppendMenuA(menu, MF_STRING, ID_TRAY_IMPORT_PROFILE, "&Import settings profile") &&
@@ -919,6 +951,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         case ID_TRAY_MODE_LUMA_RED: SetRedModeFromTray(RedMode::LumaRed); break;
         case ID_TRAY_ABOUT: ShowAboutDialog(hwnd); break;
         case ID_TRAY_COPY_REPORT: CopySupportReport(hwnd); break;
+        case ID_TRAY_VERIFY_BACKEND: VerifyBackendState(hwnd); break;
         case ID_TRAY_COPY_PROFILE: CopySettingsProfile(hwnd); break;
         case ID_TRAY_IMPORT_PROFILE: ImportSettingsProfile(hwnd); break;
         case ID_TRAY_EXIT:

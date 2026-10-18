@@ -121,6 +121,7 @@ This warning does not necessarily mean RedLight is malicious; it means Windows d
 Do not run software you do not trust. RedLight is provided as-is and without warranty.
 
 ## Troubleshooting
+* **Verify backend state** reads the active Magnification matrix or gamma ramp and compares it with the requested transform. It does not reapply, restore, or change modes. A mismatch or failed read is shown in the tray and support report until the next filter operation. Inactive checks do not inspect another tool's display state. Recovery data remains available. A matching read-back describes software state, not physical panel output.
 * **Copy support report** in the tray menu copies the version, backend/startup policy, red mode, luma detail preset, session limit/countdown, shortcut/session registration, and last backend error. Paste it into a support request or text editor. It includes no screenshot, account name, or filesystem path, and it reports backend call results rather than measuring the display. Clipboard access happens only when you choose this command; a busy clipboard is reported without clearing its existing contents.
 * Log file: `%LOCALAPPDATA%\RedLight\redlight.log`
 * Reset commands:

@@ -1,4 +1,5 @@
 #pragma once
+#include "DisplayFilter.h"
 #include <cstdint>
 #include <optional>
 #include <sstream>
@@ -7,6 +8,7 @@
 
 struct SupportReportState {
     std::string_view version, backend, startupPolicy, nextStartupPolicy, redMode, lumaProfile, lastError;
+    BackendVerification verification = BackendVerification::NotChecked;
     bool commandLineOverride = false;
     bool preferencesUnsaved = false;
     bool active = false, needsRestore = false;
@@ -21,7 +23,8 @@ inline std::string BuildSupportReport(const SupportReportState& state) {
         << (state.commandLineOverride ? " (command-line override)" : "")
         << "\r\nNext-start preference: " << state.nextStartupPolicy << "\r\nMode: " << state.redMode
         << "\r\nLuma detail: " << state.lumaProfile << "\r\nState: "
-        << (state.needsRestore && !state.lastError.empty() ? "Recovery needed" : (state.active ? "ON" : "off"))
+        << FilterStatusDescription(state.active, state.needsRestore, !state.lastError.empty(), state.verification)
+        << "\r\nBackend verification: " << BackendVerificationName(state.verification)
         << "\r\nSettings persistence: " << (state.preferencesUnsaved ? "unsaved changes" : "saved/default")
         << "\r\nRecovery data pending: " << (state.needsRestore ? "yes" : "no")
         << "\r\nToggle shortcut: " << (state.toggleHotkey ? "registered" : "unavailable")

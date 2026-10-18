@@ -27,7 +27,7 @@ struct Fake {
     bool magInit = true, magGet = true, magSet = true, magUninit = true;
     bool dc = true, gammaGet = true, release = true;
     int magWrites = 0, gammaWrites = 0, releases = 0, uninitializes = 0;
-    int magInitializes = 0, dcRequests = 0;
+    int magInitializes = 0, dcRequests = 0, magReads = 0, gammaReads = 0;
     MAGCOLOREFFECT effect = {};
     WORD ramp[3][256] = {};
     std::deque<Write> writes;
@@ -519,6 +519,54 @@ void PreferencesImportValidationGate() {
     const auto result = SaveImportedPreferences(candidate, [&] { restoreCalled = true; return true; });
     Check(result == PreferenceImportResult::Rejected && !restoreCalled && fake.registryWrites == 0, "invalid import never reaches display restoration or storage");
 }
+void MagnificationVerificationReadOnly() {
+    MagnificationFilter f;
+    Check(f.verifyState() == BackendVerification::Unavailable && fake.magReads == 0, "uninitialized verification has no API reads");
+    Check(f.initialize(), "initialize");
+    const int reads = fake.magReads;
+    Check(f.verifyState() == BackendVerification::Inactive && fake.magReads == reads, "inactive verification does not inspect another tool's display state");
+    Check(f.enable(), "enable");
+    const int writes = fake.magWrites;
+    Check(f.verifyState() == BackendVerification::Matches, "matrix read-back matches");
+    fake.effect.transform[1][1] = 0.000001f;
+    Check(f.verifyState() == BackendVerification::Changed && f.isActive() && f.needsRestore(), "any nonzero green output detected without discarding recovery state");
+    fake.magGet = false;
+    Check(f.verifyState() == BackendVerification::Unavailable && fake.magWrites == writes, "read failure never reapplies or restores matrix");
+    fake.magGet = true;
+}
+void MagnificationVerificationFiniteValues() {
+    MagnificationFilter f;
+    Check(f.initialize() && f.enable(), "enable");
+    fake.effect.transform[0][0] = (std::numeric_limits<float>::quiet_NaN)();
+    Check(f.verifyState() == BackendVerification::Changed, "NaN cannot pass a tolerance check");
+    fake.effect.transform[0][0] = (std::numeric_limits<float>::infinity)();
+    Check(f.verifyState() == BackendVerification::Changed, "infinite matrix value rejected");
+}
+void GammaVerificationReadOnly() {
+    GammaRampFilter f;
+    Check(f.initialize(), "initialize");
+    const int reads = fake.gammaReads;
+    Check(f.verifyState() == BackendVerification::Inactive && fake.gammaReads == reads, "inactive gamma check does not inspect display");
+    Check(f.enable(), "enable");
+    const int writes = fake.gammaWrites;
+    Check(f.verifyState() == BackendVerification::Matches, "gamma read-back matches");
+    fake.ramp[2][200] = 1;
+    Check(f.verifyState() == BackendVerification::Changed && f.isActive() && f.needsRestore(), "even low-byte blue leakage detected with recovery data retained");
+    fake.gammaGet = false;
+    Check(f.verifyState() == BackendVerification::Unavailable && fake.gammaWrites == writes, "gamma read failure writes nothing");
+    fake.gammaGet = true;
+}
+void VerificationStatusPriority() {
+    SupportReportState state;
+    state.active = true;
+    state.needsRestore = true;
+    state.verification = BackendVerification::Changed;
+    Check(BuildSupportReport(state).find("State: Backend changed") != std::string::npos, "different read-back cannot be presented as confirmed ON");
+    state.verification = BackendVerification::Unavailable;
+    Check(BuildSupportReport(state).find("State: Verification unavailable") != std::string::npos, "unavailable read-back is visible");
+    state.lastError = "restore failed";
+    Check(BuildSupportReport(state).find("State: Recovery needed") != std::string::npos, "failed restoration remains highest priority");
+}
 void Arguments() {
     using S = StartupAction;
     Check(ParseArguments({}) == S::Tray, "no arguments");
@@ -538,6 +586,7 @@ void SetLastError(DWORD value) { fake.lastError = value; }
 HDC GetDC(HWND) { ++fake.dcRequests; return fake.dc ? &fake : nullptr; }
 int ReleaseDC(HWND, HDC) { ++fake.releases; return fake.release ? 1 : 0; }
 BOOL GetDeviceGammaRamp(HDC, void* ramp) {
+    ++fake.gammaReads;
     if (!fake.gammaGet) return 0;
     std::memcpy(ramp, fake.ramp, sizeof(fake.ramp)); return 1;
 }
@@ -553,6 +602,7 @@ BOOL SetDeviceGammaRamp(HDC, void* ramp) {
 BOOL MagInitialize() { ++fake.magInitializes; return fake.magInit; }
 BOOL MagUninitialize() { ++fake.uninitializes; return fake.magUninit; }
 BOOL MagGetFullscreenColorEffect(MAGCOLOREFFECT* effect) {
+    ++fake.magReads;
     if (!fake.magGet) return 0;
     *effect = fake.effect; return 1;
 }
@@ -636,6 +686,8 @@ int main() {
         {"Preferences corruption", PreferencesStoreCorruption}, {"Invalid legacy preferences", PreferencesStoreInvalidLegacy},
         {"Clipboard profile read", ClipboardProfileRead}, {"Clipboard read bounds", ClipboardReadBoundsAndFailures},
         {"Preference import recovery gate", PreferencesImportRecoveryGate}, {"Preference import validation gate", PreferencesImportValidationGate},
+        {"Magnification read-only verification", MagnificationVerificationReadOnly}, {"Matrix verification nonfinite values", MagnificationVerificationFiniteValues},
+        {"Gamma read-only verification", GammaVerificationReadOnly}, {"Verification status priority", VerificationStatusPriority},
         {"Command line", Arguments}
     };
     int failed = 0;

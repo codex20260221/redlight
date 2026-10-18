@@ -122,6 +122,20 @@ bool GammaRampFilter::needsRestore() const { return active_ || restorePending_; 
 
 const char* GammaRampFilter::lastError() const { return lastError_; }
 
+BackendVerification GammaRampFilter::verifyState() const {
+    if (!initialized_) return BackendVerification::Unavailable;
+    if (!needsRestore()) return BackendVerification::Inactive;
+    WORD actual[3][256] = {};
+    if (!hdc_ || !GetDeviceGammaRamp(hdc_, actual)) {
+        Diagnostics::LogFormat("Gamma verification read failed (error %lu).", GetLastError());
+        return BackendVerification::Unavailable;
+    }
+    const bool matches = RampMatches(actual, redGammaRamp_, true);
+    Diagnostics::Log(matches ? "Gamma read-back matches requested ramp." :
+        "Gamma read-back differs from requested ramp; no filter was reapplied.");
+    return matches ? BackendVerification::Matches : BackendVerification::Changed;
+}
+
 bool GammaRampFilter::setRedMode(RedMode mode) {
     if (mode == RedMode::StrictRed) {
         return true;
@@ -189,17 +203,19 @@ bool GammaRampFilter::SetGammaRamp(WORD ramp[3][256], const char* action, bool r
         SetError("gamma read-back", GetLastError());
         return false;
     }
-    for (int channel = 0; channel < 3; ++channel) {
-        for (int i = 0; i < 256; ++i) {
-            // DAC precision varies; compare the significant byte.
-            if ((requireZeroGreenBlue && channel > 0 && applied[channel][i] != 0) ||
-                (applied[channel][i] >> 8) != (ramp[channel][i] >> 8)) {
-                SetError("gamma read-back mismatch (driver rejected ramp)", ERROR_INVALID_DATA);
-                return false;
-            }
-        }
+    if (!RampMatches(applied, ramp, requireZeroGreenBlue)) {
+        SetError("gamma read-back mismatch (driver rejected ramp)", ERROR_INVALID_DATA);
+        return false;
     }
     lastError_[0] = '\0';
+    return true;
+}
+
+bool GammaRampFilter::RampMatches(const WORD applied[3][256], const WORD expected[3][256], bool requireZeroGreenBlue) {
+    for (int channel = 0; channel < 3; ++channel) for (int i = 0; i < 256; ++i) {
+        if ((requireZeroGreenBlue && channel > 0 && applied[channel][i] != 0) ||
+            (applied[channel][i] >> 8) != (expected[channel][i] >> 8)) return false;
+    }
     return true;
 }
 

@@ -2,6 +2,7 @@
 #include "Diagnostics.h"
 
 #include <cstdio>
+#include <cmath>
 
 namespace {
 
@@ -127,6 +128,27 @@ bool MagnificationFilter::isActive() const {
 bool MagnificationFilter::needsRestore() const { return active_; }
 
 const char* MagnificationFilter::lastError() const { return lastError_; }
+
+BackendVerification MagnificationFilter::verifyState() const {
+    if (!initialized_) return BackendVerification::Unavailable;
+    if (!needsRestore()) return BackendVerification::Inactive;
+    MAGCOLOREFFECT actual = {};
+    if (!MagGetFullscreenColorEffect(&actual)) {
+        Diagnostics::LogFormat("Magnification verification read failed (error %lu).", GetLastError());
+        return BackendVerification::Unavailable;
+    }
+    const auto expected = ColorEffectForMode(redMode_, lumaProfile_);
+    for (int row = 0; row < 5; ++row) for (int column = 0; column < 5; ++column) {
+        const float found = actual.transform[row][column];
+        const float wanted = expected.transform[row][column];
+        if (!std::isfinite(found) || (wanted == 0 ? found != 0 : std::abs(found - wanted) > 0.000001f)) {
+            Diagnostics::Log("Magnification read-back differs from requested transform; no filter was reapplied.");
+            return BackendVerification::Changed;
+        }
+    }
+    Diagnostics::Log("Magnification read-back matches requested transform.");
+    return BackendVerification::Matches;
+}
 
 bool MagnificationFilter::setRedMode(RedMode mode) {
     if (!supportsRedMode(mode)) {
