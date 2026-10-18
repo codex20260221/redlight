@@ -1,6 +1,6 @@
 # Issue-driven development checkpoint — 2026-10-18
 
-The user resumed the issue-driven goal from clean local commit `693d204`. Brightness is committed as `7ced3fe`, optional startup as `b12065a`, the local issue form as `0e24d03`, transition design as `2992d5b`, and fade coordination as `d382181`. Fade integration is committed as `28ea461`. This checkpoint defines the optional daily schedule contract before an isolated policy prototype on `release/0.6.0-rc1`. Continue autonomously through the roadmap until externally interrupted; no unfinished implementation remains at this checkpoint.
+The user resumed the issue-driven goal from clean local commit `693d204`. Brightness is committed as `7ced3fe`, optional startup as `b12065a`, the local issue form as `0e24d03`, transition design as `2992d5b`, and fade coordination as `d382181`. Fade integration is committed as `28ea461`. Scheduling design is committed as `e9cd94c`. This checkpoint adds a supplied-time daily schedule prototype outside the application on `release/0.6.0-rc1`. Continue autonomously through the roadmap until externally interrupted; no unfinished implementation remains at this checkpoint.
 
 ## New issue-driven direction
 
@@ -58,14 +58,15 @@ The focused audit is committed as `4a1dd71`. The detailed state table, ownership
 | `2992d5b` | Initial issue #3 activation-only red fade-in contract defined before code |
 | `d382181` | Isolated fade progress/backend/cache coordination and checked independent timer periods |
 | `28ea461` | Integrated activation-only fade UI/preferences/profiles/timers, immediate restoration/cancellation, and migration/failure regressions |
-| This checkpoint | Daily scheduling contract, Windows time/message source review, and isolated-policy integration boundaries |
+| `e9cd94c` | Daily scheduling contract, Windows time/message source review, and isolated-policy integration boundaries |
+| This checkpoint | Isolated daily boundary/consumption policy and clock/calendar/manual-override regressions; no production scheduling |
 
 All commits are local. Each feature's evidence and unexecuted manual notes are recorded in [release validation](docs/release-validation.md#expert-feature-follow-up-validation).
 
 ## Verified checkpoint
 
 - Release and MSVC `/analyze` builds passed.
-- **446 isolated C++ scenarios passed** across two CTest targets: 423 core/fake-API and 23 fake-filesystem diagnostics scenarios. Brightness adds 15, startup 11, and fade coordination 9 and integration 10 scenarios. All-field preview/comparison coverage spans 256 subsets; all backend ownership and startup target assertions remain in force.
+- **456 isolated C++ scenarios passed** across two CTest targets: 433 core/fake-API/prototype and 23 fake-filesystem diagnostics scenarios. Brightness adds 15, startup 11, and fade coordination 9 and integration 10 scenarios; the isolated daily schedule prototype adds 10 more. All-field preview/comparison coverage spans 256 subsets; all backend ownership and startup target assertions remain in force.
 - `tools/Test-TrayIcons.ps1` verifies four deterministic original monochrome resources at seven sizes, distinct shapes, transparency, bounded file layout, and Strict/Luma endpoint contrast. The off-screen asset contact sheet was inspected without launching RedLight.
 - Both test executables passed the KERNEL32-only import gate before execution. RedLight itself was never executed.
 - Static release checks passed: seven reviewed Windows DLLs, x64 GUI executable, ASLR/DEP, version/prerelease metadata, embedded `asInvoker` manifest, and SHA-256.
@@ -92,7 +93,7 @@ cpack --config build/CPackConfig.cmake -C Release -B build/packages
 
 Start with `git status --short` and this handoff. The worktree should be clean. There is no unfinished fix, active build, or required implementation follow-up from this checkpoint. Manual/native qualification remains unauthorized unless the user changes that restriction.
 
-The [activation-only fade-in contract](docs/transition-design.md) is integrated. An optional async question offered activation-only (recommended) versus also fading later brightness edits; after a reasonable unanswered interval the agent stated activation-only. Incorporate later steering. Native message/timer/UI behavior remains compiled/static-only; isolated tests use real backend/control code against fake APIs. Issue #4 and its comment were re-read. The [daily contract](docs/scheduling-design.md) is defined; an optional startup/wake question was unanswered after a reasonable interval, so use future boundaries without catch-up unless later steering arrives. Next implement an isolated supplied-time boundary/consumption policy only, keeping it out of the application build/dispatch. Production integration needs checked time conversion/discontinuity handling, native timer and control/session readiness, explicit schedule consent, and a consistent full-preferences IPC design (the schema-5 scalar has only one free payload bit). The maintainer explicitly asks for more real-world backend testing; do not claim isolated tests meet that request. Research/prototypes can proceed without enabling automatic display activation or claiming hardware support.
+The [activation-only fade-in contract](docs/transition-design.md) is integrated. An optional async question offered activation-only (recommended) versus also fading later brightness edits; after a reasonable unanswered interval the agent stated activation-only. Incorporate later steering. Native message/timer/UI behavior remains compiled/static-only; isolated tests use real backend/control code against fake APIs. Issue #4 and its comment were re-read. The [daily contract](docs/scheduling-design.md) is defined; an optional startup/wake question was unanswered after a reasonable interval, so use future boundaries without catch-up unless later steering arrives. The supplied-time policy is implemented as `tests/Prototypes/DailySchedule.h`, included only from isolated tests. Its intents, Gregorian/UTC/local/tick validation, missed/busy suppression, manual rebase, consumed-date marks, and DST/date rollback behavior have 10 isolated scenarios. It performs no native calls and is not in the application build/dispatch. Next prepare the native scheduling integration plan or continue per-monitor research; do not simply connect intents to display writes. Production integration needs checked time conversion/discontinuity handling, native timer and control/session readiness, explicit schedule consent, and a consistent full-preferences IPC design (the schema-5 scalar has only one free payload bit). The maintainer explicitly asks for more real-world backend testing; do not claim isolated tests meet that request. Research/prototypes can proceed without enabling automatic display activation or claiming hardware support.
 
 Preserve these integration boundaries:
 

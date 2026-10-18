@@ -50,6 +50,7 @@
 #include "StartupRegistration.h"
 #include "FadeInControl.h"
 #include "TrayTooltip.h"
+#include "Prototypes/DailySchedule.h"
 #include "BuildMetadata.h"
 #include "VerificationCache.h"
 #include <map>
@@ -6126,6 +6127,179 @@ void TrayCommandFallbackExceptionRetainsRecoveryRequest() {
         RecoveryAfterUiFailure(false, pending, true) == UiFailureRecovery::Defer,
         "fallback exceptions propagate to the native callback guard with a retained request even for a tray notification");
 }
+SchedulePrototype::Sample ScheduleSample(unsigned year, unsigned month, unsigned day, unsigned minute, unsigned within, std::uint64_t tick, int offsetMinutes = 0) {
+    using namespace std::chrono;
+    const auto dates = (sys_days{std::chrono::year{static_cast<int>(year)}/month/day} - sys_days{std::chrono::year{1601}/January/1}).count();
+    const auto local = static_cast<std::int64_t>(dates) * 86400000 + minute * 60000ll + within;
+    return {year, month, day, minute, within, static_cast<std::uint64_t>(local - offsetMinutes * 60000ll), tick};
+}
+void ScheduleEveryMinuteAndConsumption() {
+    using namespace SchedulePrototype;
+    for (unsigned minute = 0; minute < 1440; ++minute) for (const bool allowed : {false, true}) {
+        DailySchedule policy;
+        Check(policy.configure({true, minute, (minute + 1) % 1440}), "all distinct minute pairs configure a daily schedule");
+        const auto before = ScheduleSample(2026, 10, minute ? 18 : 17, minute ? minute - 1 : 1439, 59900, 100);
+        const auto event = ScheduleSample(2026, 10, 18, minute, 0, 200);
+        Check(policy.observe(before, true) == Event::Rebased && policy.observe(event, allowed) == (allowed ? Event::Enable : Event::SkippedEnable),
+            "every minute boundary delivers exactly one eligible or skipped enable after a prior observation");
+        Check(policy.observe(event, true) == Event::None && policy.observe(ScheduleSample(2026, 10, 18, minute, 59000, 59200), true) == Event::None,
+            "a busy/skipped or delivered enable cannot replay later in the same minute");
+        const auto restore = ScheduleSample(2026, 10, minute == 1439 ? 19 : 18, (minute + 1) % 1440, 0, 60200);
+        Check(policy.observe(restore, false) == Event::Restore && policy.observe(restore, true) == Event::None,
+            "restore ignores enable eligibility and also consumes before delivery");
+    }
+}
+void ScheduleDailyAndCrossMidnight() {
+    using namespace SchedulePrototype;
+    for (const unsigned enable : {7u * 60, 18u * 60}) {
+        DailySchedule policy; const unsigned restore = enable == 420 ? 1080u : 420u;
+        Check(policy.configure({true, enable, restore}), "configure daylight and overnight trigger pairs");
+        unsigned enabled = 0, restored = 0;
+        for (unsigned day = 18; day <= 20; ++day) for (unsigned minute = 0; minute < 1440; ++minute) {
+            const auto tick = (static_cast<std::uint64_t>(day - 18) * 1440 + minute) * 60000;
+            const auto event = policy.observe(ScheduleSample(2026, 10, day, minute, 0, tick), true);
+            enabled += event == Event::Enable; restored += event == Event::Restore;
+            if (event == Event::Enable) Check(minute == enable, "enable depends only on the configured daily boundary");
+            if (event == Event::Restore) Check(minute == restore, "restoration never requires an active-window calculation");
+        }
+        Check(enabled == 3 && restored == 3, "normal and cross-midnight schedules emit one event of each type per date");
+    }
+}
+void ScheduleManualRebaseAndFutureOnlyStartup() {
+    using namespace SchedulePrototype;
+    DailySchedule policy; Check(policy.configure({true, 1080, 420}), "configure future-only startup");
+    Check(policy.observe(ScheduleSample(2026, 10, 18, 1080, 0, 0), true) == Event::Rebased &&
+        policy.observe(ScheduleSample(2026, 10, 18, 1080, 1000, 1000), true) == Event::None, "starting in the enable minute does not catch up");
+    Check(policy.rebase(ScheduleSample(2026, 10, 19, 1079, 59000, 100000)), "manual override before a future boundary rebases without consuming it");
+    Check(policy.observe(ScheduleSample(2026, 10, 19, 1080, 0, 101000), true) == Event::Enable, "a later eligible boundary ends the manual override");
+    Check(policy.rebase(ScheduleSample(2026, 10, 20, 1080, 100, 200000)) &&
+        policy.observe(ScheduleSample(2026, 10, 20, 1080, 1000, 200900), true) == Event::None, "manual restore after the boundary defeats a queued enable");
+    policy.invalidate();
+    Check(policy.observe(ScheduleSample(2026, 10, 21, 1080, 0, 300000), true) == Event::Rebased &&
+        policy.observe(ScheduleSample(2026, 10, 21, 1080, 1000, 301000), true) == Event::None, "wake/control recovery also skips its current interval");
+}
+void ScheduleMissedBoundariesAndClockDiscontinuities() {
+    using namespace SchedulePrototype;
+    for (unsigned discontinuity = 0; discontinuity < 5; ++discontinuity) {
+        DailySchedule policy; Check(policy.configure({true, 1080, 420}), "configure discontinuity policy");
+        const auto before = ScheduleSample(2026, 10, 18, 1079, 59000, 1000);
+        auto after = ScheduleSample(2026, 10, 18, 1080, 0, 2000);
+        if (discontinuity == 0) after.tickMilliseconds += 60000; // Long processing/suspend gap.
+        if (discontinuity == 1) after.utcMilliseconds -= 60000; // Changed UTC/local offset.
+        if (discontinuity == 2) after.tickMilliseconds = 1000; // UTC jumped a minute despite no elapsed tick.
+        if (discontinuity == 2) { after.minute = 1081; after.utcMilliseconds += 60000; }
+        if (discontinuity == 3) after = ScheduleSample(2026, 10, 19, 1080, 0, 2000); // Date jump.
+        Check(policy.observe(before, true) == Event::Rebased && policy.observe(after, true, discontinuity != 4) == Event::Rebased,
+            "gaps, offset/date/UTC jumps, and explicit time-zone notifications cannot activate");
+        Check(policy.observe(after, true) == Event::None, "rebasing cannot replay its current boundary on the next tick");
+    }
+    DailySchedule policy; Check(policy.configure({true, 1080, 420}), "configure missed-minute policy");
+    Check(policy.observe(ScheduleSample(2026, 10, 18, 1079, 0, 0), true) == Event::Rebased &&
+        policy.observe(ScheduleSample(2026, 10, 18, 1081, 0, 120000), true) == Event::Rebased,
+        "a completely missed trigger minute is skipped rather than backlogged");
+}
+void ScheduleCalendarValidationAndMidnight() {
+    using namespace SchedulePrototype;
+    for (const auto& dates : std::array<std::array<unsigned, 6>, 4>{{{2024, 2, 28, 2024, 2, 29}, {2024, 2, 29, 2024, 3, 1},
+        {2100, 2, 28, 2100, 3, 1}, {2026, 12, 31, 2027, 1, 1}}}) {
+        DailySchedule policy; Check(policy.configure({true, 0, 1}), "configure midnight event");
+        Check(policy.observe(ScheduleSample(dates[0], dates[1], dates[2], 1439, 59999, 100), true) == Event::Rebased &&
+            policy.observe(ScheduleSample(dates[3], dates[4], dates[5], 0, 0, 101), true) == Event::Enable,
+            "Gregorian leap/century/year transitions are continuous midnight boundaries");
+    }
+    const auto baseline = ScheduleSample(2026, 10, 18, 1079, 59000, 1000);
+    for (unsigned invalid = 0; invalid < 9; ++invalid) {
+        DailySchedule policy; Check(policy.configure({true, 1080, 420}) && policy.rebase(baseline), "prepare invalid sample");
+        auto bad = baseline;
+        if (invalid == 0) bad.year = 1600;
+        if (invalid == 1) bad.year = 30828;
+        if (invalid == 2) bad.month = 0;
+        if (invalid == 3) bad.month = 13;
+        if (invalid == 4) { bad.month = 2; bad.day = 29; }
+        if (invalid == 5) bad.day = 0;
+        if (invalid == 6) bad.minute = 1440;
+        if (invalid == 7) bad.millisecondsInMinute = 60000;
+        if (invalid == 8) bad.utcMilliseconds = (std::numeric_limits<std::uint64_t>::max)();
+        Check(policy.observe(bad, true) == Event::InvalidSample &&
+            policy.observe(ScheduleSample(2026, 10, 18, 1080, 0, 2000), true) == Event::Rebased,
+            "invalid calendar/time/overflow data invalidates continuity without installing a malformed observation");
+    }
+}
+void ScheduleDstSkipRepeatAndDateRollback() {
+    using namespace SchedulePrototype;
+    DailySchedule spring; Check(spring.configure({true, 150, 420}), "configure nonexistent spring minute");
+    Check(spring.observe(ScheduleSample(2026, 3, 8, 119, 59000, 1000, -300), true) == Event::Rebased &&
+        spring.observe(ScheduleSample(2026, 3, 8, 180, 0, 2000, -240), true) == Event::Rebased,
+        "a skipped spring-forward enable minute never activates");
+    DailySchedule fall; Check(fall.configure({true, 90, 120}), "configure repeated fall minute");
+    Check(fall.observe(ScheduleSample(2026, 11, 1, 89, 59000, 1000, -240), true) == Event::Rebased &&
+        fall.observe(ScheduleSample(2026, 11, 1, 90, 0, 2000, -240), true) == Event::Enable, "first local occurrence may activate");
+    Check(fall.rebase(ScheduleSample(2026, 11, 1, 89, 59000, 3601000, -300)) &&
+        fall.observe(ScheduleSample(2026, 11, 1, 90, 0, 3602000, -300), true) == Event::None, "the repeated hour cannot emit the same action twice");
+    Check(fall.observe({}, true) == Event::InvalidSample && fall.rebase(ScheduleSample(2026, 11, 1, 89, 59000, 3701000, -300)) &&
+        fall.observe(ScheduleSample(2026, 11, 1, 90, 0, 3702000, -300), true) == Event::None, "malformed samples also preserve consumed dates during a repeated hour");
+    Check(fall.rebase(ScheduleSample(2026, 10, 31, 89, 59000, 4001000, -240)) &&
+        fall.observe(ScheduleSample(2026, 10, 31, 90, 0, 4002000, -240), true) == Event::None, "date rollback does not erase the consumed-date high water mark");
+    Check(fall.configure({true, 90, 120}) && fall.rebase(ScheduleSample(2026, 10, 31, 89, 59000, 5001000, -240)) &&
+        fall.observe(ScheduleSample(2026, 10, 31, 90, 0, 5002000, -240), true) == Event::Enable, "only a deliberate new configuration lifetime clears consumption after clock correction");
+}
+void ScheduleInvalidConfigurationAndDisabledState() {
+    using namespace SchedulePrototype;
+    DailySchedule policy;
+    Check(policy.observe(ScheduleSample(2026, 10, 18, 1080, 0, 0), true) == Event::None &&
+        policy.configure({false, 0, 0}) && !policy.configure({true, 100, 100}) && !policy.configure({false, 1440, 0}),
+        "default disabled scheduling cannot emit and all invalid configurations are rejected");
+    Check(policy.configure({true, 1080, 420}) && policy.rebase(ScheduleSample(2026, 10, 18, 1079, 59000, 1000)) &&
+        !policy.configure({true, 0, 1440}) && policy.observe(ScheduleSample(2026, 10, 18, 1080, 0, 2000), true) == Event::Enable,
+        "a rejected edit leaves the prior policy and observation intact");
+    Check(policy.configure({false, 1080, 420}) && policy.observe(ScheduleSample(2026, 10, 19, 1080, 0, 86402000), true) == Event::None,
+        "logical disable prevents future events regardless of stale timer samples");
+}
+void ScheduleClockWrapDelayAndConversionConsistency() {
+    using namespace SchedulePrototype;
+    DailySchedule policy; Check(policy.configure({true, 1080, 420}), "configure wrapped monotonic observations");
+    const auto maximum = (std::numeric_limits<std::uint64_t>::max)();
+    Check(policy.observe(ScheduleSample(2026, 10, 18, 1079, 59500, maximum - 499), true) == Event::Rebased &&
+        policy.observe(ScheduleSample(2026, 10, 18, 1080, 500, 500), true) == Event::Enable, "monotonic unsigned wrap preserves an ordinary boundary");
+    Check(policy.configure({true, 1080, 420}) && policy.rebase(ScheduleSample(2026, 10, 19, 1079, 59000, 1000)) &&
+        policy.observe(ScheduleSample(2026, 10, 19, 1080, 59000, 61000), true) == Event::Enable, "ordinary delivery within the minute permits a bounded late trigger");
+    auto invalid = ScheduleSample(2026, 10, 20, 1079, 59000, 100000); ++invalid.utcMilliseconds;
+    Check(policy.observe(invalid, true) == Event::InvalidSample, "UTC/local sub-minute disagreement cannot become a trusted conversion");
+    invalid = ScheduleSample(2026, 10, 20, 1079, 59000, 100000); invalid.utcMilliseconds -= 2 * 86400000;
+    Check(policy.observe(invalid, true) == Event::InvalidSample, "a nonsensical supplied time-zone offset is rejected before signed arithmetic can overflow");
+}
+void SchedulePrototypeNoNativeCallsOrAllocation() {
+    using namespace SchedulePrototype;
+    MagnificationFilter filter; Check(filter.initialize() && filter.enable(), "retain an actual production fake display owner beside the isolated prototype");
+    const auto reads = fake.magReads, writes = fake.magWrites;
+    const auto clocks = fake.backendClockReads;
+    const auto registry = fake.registryWrites;
+    const auto timers = fake.countdownSets;
+    const auto effect = fake.effect; const auto stats = filter.statistics();
+    DailySchedule policy; bool enabled = false, noAllocation = false;
+    { TestMemory::FailNextAllocation failure;
+        enabled = policy.configure({true, 1080, 420}) && policy.rebase(ScheduleSample(2026, 10, 18, 1079, 59000, 1000)) &&
+            policy.observe(ScheduleSample(2026, 10, 18, 1080, 0, 2000), true) == Event::Enable;
+        policy.invalidate(); noAllocation = TestMemory::AllocationFailurePending(); }
+    Check(enabled && noAllocation && fake.magReads == reads && fake.magWrites == writes && fake.backendClockReads == clocks && fake.registryWrites == registry &&
+        fake.countdownSets == timers && filter.statistics() == stats && filter.needsRestore() && Same(effect, fake.effect),
+        "prototype intents allocate nothing and never call display/clock/storage/timer APIs or change recovery ownership");
+    Check(filter.disable(), "the display owner remains independently restorable");
+}
+void ScheduleCalendarAndTimingLimits() {
+    using namespace SchedulePrototype;
+    for (const unsigned year : {1601u, 30827u}) {
+        DailySchedule policy;
+        Check(policy.configure({true, 1439, 0}) && policy.rebase(ScheduleSample(year, 12, 31, 1438, 59000, 1000)) &&
+            policy.observe(ScheduleSample(year, 12, 31, 1439, 0, 2000), true) == Event::Enable, "Windows calendar endpoints stay within policy arithmetic bounds");
+    }
+    DailySchedule policy; Check(policy.configure({true, 1080, 420}), "configure exact clock-drift limits");
+    const auto before = ScheduleSample(2026, 10, 18, 1079, 59000, 1000);
+    Check(policy.rebase(before) && policy.observe(ScheduleSample(2026, 10, 18, 1080, 0, 4000), true) == Event::Enable,
+        "two-second wall-versus-elapsed tolerance is inclusive");
+    Check(policy.configure({true, 1080, 420}) && policy.rebase(before) &&
+        policy.observe(ScheduleSample(2026, 10, 18, 1080, 0, 4001), true) == Event::Rebased, "larger supplied-clock disagreement rebases without enabling");
+}
 void FadePolicyDurationsAndAllTargets() {
     RedFadeIn fade;
     Check(!fade.active() && !fade.due(0), "no implicit animation before confirmed enable");
@@ -7409,6 +7583,12 @@ std::optional<std::string> RecentLogText() noexcept {
 }
 int main() {
     const std::pair<const char*, void(*)()> tests[] = {
+        {"Schedule prototype every minute/consumption", ScheduleEveryMinuteAndConsumption}, {"Schedule prototype daily/cross-midnight", ScheduleDailyAndCrossMidnight},
+        {"Schedule prototype manual/startup future-only", ScheduleManualRebaseAndFutureOnlyStartup}, {"Schedule prototype missed/clock discontinuity", ScheduleMissedBoundariesAndClockDiscontinuities},
+        {"Schedule prototype calendar/midnight", ScheduleCalendarValidationAndMidnight}, {"Schedule prototype DST/date rollback", ScheduleDstSkipRepeatAndDateRollback},
+        {"Schedule prototype invalid/disabled configuration", ScheduleInvalidConfigurationAndDisabledState}, {"Schedule prototype clock wrap/delay/conversion", ScheduleClockWrapDelayAndConversionConsistency},
+        {"Schedule prototype allocation/native isolation", SchedulePrototypeNoNativeCallsOrAllocation},
+        {"Schedule prototype calendar/timing limits", ScheduleCalendarAndTimingLimits},
         {"Fade durations/all target progress", FadePolicyDurationsAndAllTargets}, {"Fade wrap/cancel/invalid confirmation", FadePolicyWrapCancellationAndValidation},
         {"Fade activation/confirmed progress", FadeActivationAndConfirmedProgress}, {"Fade busy/attention/queued restore", FadeBusyAttentionAndQueuedRestore},
         {"Fade expiry/Gamma isolation", FadeExpiryAndGammaPreferenceIsolation}, {"Fade step failures/original retention", FadeStepFailuresRetainOriginal},
