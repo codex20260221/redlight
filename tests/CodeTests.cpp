@@ -272,6 +272,47 @@ void BackendCommandLine() {
     Check(!ParseStartupOptions({}).backendOverride.has_value(), "missing override retains saved/default policy");
     Check(IsValidBackendPreference(0) && IsValidBackendPreference(2) && !IsValidBackendPreference(3), "validate persisted backend values");
 }
+void LumaPresetOutput() {
+    MagnificationFilter f;
+    Check(f.initialize() && f.enable(), "enable luma");
+    for (const auto profile : {LumaProfile::Classic, LumaProfile::GreenDetail, LumaProfile::EqualDetail}) {
+        Check(f.setLumaProfile(profile), "change active profile");
+        const auto& matrix = fake.effect.transform;
+        Check(std::abs(matrix[0][0] + matrix[1][0] + matrix[2][0] - 1.0f) < 0.000001f, "white remains pure full red");
+        for (int row = 0; row < 5; ++row) {
+            Check(matrix[row][1] == 0 && matrix[row][2] == 0, "presets never emit green or blue");
+        }
+        Check(matrix[4][0] == 0 && matrix[3][0] == 0, "black remains black independent of alpha");
+        Check(matrix[0][0] >= 0 && matrix[1][0] >= 0 && matrix[2][0] >= 0, "valid nonnegative red mapping");
+        Check(matrix[3][3] == 1 && matrix[4][4] == 1, "preserve alpha and homogeneous coordinate");
+    }
+    const auto equal = fake.effect;
+    Check(equal.transform[0][0] == equal.transform[1][0] && equal.transform[1][0] == equal.transform[2][0], "equal preset makes equally bright primaries equally visible");
+    Check(f.setLumaProfile(LumaProfile::GreenDetail) && fake.effect.transform[1][0] > equal.transform[1][0] &&
+        fake.effect.transform[2][0] < equal.transform[2][0], "green-detail preset favors green over blue");
+}
+void LumaPresetFailureAndRestore() {
+    MagnificationFilter f;
+    Check(f.initialize(), "initialize");
+    fake.effect.transform[0][0] = 0.43f;
+    const auto original = fake.effect;
+    Check(f.enable(), "enable");
+    fake.magSet = false;
+    Check(!f.setLumaProfile(LumaProfile::EqualDetail) && f.lumaProfile() == LumaProfile::Classic && f.isActive(), "failed preset write keeps confirmed preset and active state");
+    fake.magSet = true;
+    Check(f.setLumaProfile(LumaProfile::EqualDetail) && f.disable() && Same(fake.effect, original), "preset changes do not overwrite restoration snapshot");
+    Check(!f.setLumaProfile(static_cast<LumaProfile>(99)) && f.lumaProfile() == LumaProfile::EqualDetail, "invalid preset rejected without state change");
+}
+void LumaPresetInStrictModeAndGamma() {
+    MagnificationFilter f;
+    GammaRampFilter g;
+    Check(f.initialize() && f.setRedMode(RedMode::StrictRed) && f.enable(), "enable strict");
+    const auto strict = fake.effect;
+    const auto writes = fake.magWrites;
+    Check(f.setLumaProfile(LumaProfile::EqualDetail) && Same(fake.effect, strict) && fake.magWrites == writes, "preset preference never changes strict output");
+    Check(f.setRedMode(RedMode::LumaRed) && fake.effect.transform[2][0] > 0.33f, "next luma mode uses stored profile");
+    Check(!g.setLumaProfile(LumaProfile::EqualDetail) && g.redMode() == RedMode::StrictRed && fake.gammaWrites == 0, "gamma rejects cross-channel profile without display write");
+}
 void Arguments() {
     using S = StartupAction;
     Check(ParseArguments({}) == S::Tray, "no arguments");
@@ -331,6 +372,8 @@ int main() {
         {"Session timer retries", SessionTimerRetryAndCancellation}, {"Session timer clock", SessionTimerChangesAndClockWrap},
         {"Backend default selection", BackendSelectionPolicies}, {"Backend strict/fallback selection", BackendSelectionStrictAndFallback},
         {"Backend cleanup failure", BackendSelectionCleanupFailure}, {"Backend command line", BackendCommandLine},
+        {"Luma preset output", LumaPresetOutput}, {"Luma preset failure/restoration", LumaPresetFailureAndRestore},
+        {"Luma preset strict/gamma behavior", LumaPresetInStrictModeAndGamma},
         {"Command line", Arguments}
     };
     int failed = 0;

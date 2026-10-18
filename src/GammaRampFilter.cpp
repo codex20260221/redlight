@@ -135,6 +135,13 @@ RedMode GammaRampFilter::redMode() const {
     return RedMode::StrictRed;
 }
 
+bool GammaRampFilter::setLumaProfile(LumaProfile) {
+    SetError("luma profiles require cross-channel mixing", ERROR_INVALID_PARAMETER);
+    return false;
+}
+
+LumaProfile GammaRampFilter::lumaProfile() const { return LumaProfile::Classic; }
+
 bool GammaRampFilter::supportsRedMode(RedMode mode) const {
     return mode == RedMode::StrictRed;
 }

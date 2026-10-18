@@ -28,6 +28,7 @@
 #define ID_SESSION_TIMER 2
 #define ID_SESSION_LIMIT_BASE 1000
 #define ID_BACKEND_PREFERENCE_BASE 1300
+#define ID_LUMA_PROFILE_BASE 1400
 
 namespace {
 
@@ -69,6 +70,8 @@ void ScheduleTrayRecovery();
 void ShowTrayMenu(HWND hwnd);
 void SaveRedMode(RedMode mode);
 void LoadRedMode();
+void LoadLumaProfile();
+void SetLumaProfile(LumaProfile profile);
 void LogSystemInfo();
 bool ResetDisplay();
 bool RequestRunningInstanceRestore(bool* handled);
@@ -148,6 +151,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
 
     Diagnostics::LogFormat("Monitor count: %d", GetSystemMetrics(SM_CMONITORS));
     LoadRedMode();
+    LoadLumaProfile();
     DWORD sessionMinutes = 0;
     DWORD sessionSize = sizeof(sessionMinutes);
     const LSTATUS sessionLoad = RegGetValueW(HKEY_CURRENT_USER, L"Software\\RedLight", L"SessionLimitMinutes",
@@ -410,10 +414,14 @@ void RefreshTrayIconTip() {
         sprintf_s(remaining, " - %llu:%02llu left",
             static_cast<unsigned long long>(seconds / 60), static_cast<unsigned long long>(seconds % 60));
     }
-    sprintf_s(tip, "RedLight %s - %s - %s%s",
+    char profile[48] = {};
+    if (g_displayFilter->redMode() == RedMode::LumaRed) {
+        sprintf_s(profile, " [%s]", LumaProfileName(g_displayFilter->lumaProfile()));
+    }
+    sprintf_s(tip, "RedLight %s - %s - %s%s%s",
         g_displayFilter->needsRestore() && g_displayFilter->lastError()[0] ? "RECOVERY NEEDED" :
         (g_displayFilter->isActive() ? "ON" : "off"),
-        g_displayFilter->name(), RedModeDisplayName(g_displayFilter->redMode()), remaining);
+        g_displayFilter->name(), RedModeDisplayName(g_displayFilter->redMode()), profile, remaining);
     UpdateTrayIconTip(tip);
 }
 
@@ -620,6 +628,43 @@ void LoadRedMode() {
     }
 }
 
+void LoadLumaProfile() {
+    if (!g_displayFilter->supportsRedMode(RedMode::LumaRed)) return;
+    DWORD value = 0;
+    DWORD size = sizeof(value);
+    const LSTATUS result = RegGetValueW(HKEY_CURRENT_USER, L"Software\\RedLight", L"LumaProfile",
+        RRF_RT_REG_DWORD, NULL, &value, &size);
+    if (result == ERROR_FILE_NOT_FOUND) return;
+    if (result != ERROR_SUCCESS || !IsValidLumaProfile(value)) {
+        Diagnostics::LogFormat("Invalid/unavailable luma profile (error %ld); using Classic.", result);
+        return;
+    }
+    if (!g_displayFilter->setLumaProfile(static_cast<LumaProfile>(value))) Diagnostics::Log(g_displayFilter->lastError());
+}
+
+void SetLumaProfile(LumaProfile profile) {
+    if (g_busy || !g_displayFilter->supportsRedMode(RedMode::LumaRed) ||
+        !IsValidLumaProfile(static_cast<unsigned>(profile))) return;
+    g_busy = true;
+    const bool applied = g_displayFilter->setLumaProfile(profile);
+    char error[256] = {};
+    if (!applied) strcpy_s(error, g_displayFilter->lastError());
+    g_busy = false;
+    if (g_pendingRestore) RestoreFilter(false);
+    if (!applied) {
+        ReportError(error);
+        return;
+    }
+    const DWORD value = static_cast<DWORD>(profile);
+    const LSTATUS saved = RegSetKeyValueW(HKEY_CURRENT_USER, L"Software\\RedLight", L"LumaProfile",
+        REG_DWORD, &value, sizeof(value));
+    if (saved != ERROR_SUCCESS) {
+        Diagnostics::LogFormat("Saving luma profile failed (error %ld).", saved);
+        ReportError("The luma profile was applied but could not be saved for the next start.");
+    }
+    RefreshTrayIconTip();
+}
+
 void SetRedModeFromTray(RedMode mode) {
     if (g_busy || (g_displayFilter->needsRestore() && !g_displayFilter->isActive())) return;
     Diagnostics::LogFormat("Red mode request: %s -> %s (%s)",
@@ -638,11 +683,13 @@ void SetRedModeFromTray(RedMode mode) {
 
     g_busy = true;
     const bool changed = g_displayFilter->setRedMode(mode);
+    char modeError[256] = {};
+    if (!changed) strcpy_s(modeError, g_displayFilter->lastError());
     g_busy = false;
     if (g_pendingRestore) RestoreFilter(false);
     if (!changed) {
         Diagnostics::LogFormat("Red mode change to %s failed.", RedModeDisplayName(mode));
-        ReportError(g_displayFilter->lastError());
+        ReportError(modeError);
     } else {
         Diagnostics::LogFormat("Red mode change to %s succeeded.", RedModeDisplayName(g_displayFilter->redMode()));
         SaveRedMode(g_displayFilter->redMode());
@@ -653,13 +700,14 @@ void SetRedModeFromTray(RedMode mode) {
 
 void ShowAboutDialog(HWND parent) {
     char aboutText[1024];
-    sprintf_s(aboutText, "RedLight " REDLIGHT_VERSION "\n\nBackend: %s\nStartup selection: %s%s\nNext start: %s\nMode: %s\nStatus: %s\n\n"
+    sprintf_s(aboutText, "RedLight " REDLIGHT_VERSION "\n\nBackend: %s\nStartup selection: %s%s\nNext start: %s\nMode: %s\nLuma detail: %s\nStatus: %s\n\n"
         "Ctrl+Alt+R: %s\nCtrl+Alt+Shift+R: %s\nSession recovery: %s\n\n"
         "Logs: %%LOCALAPPDATA%%\\RedLight\nUnsigned release candidate\n"
         "github.com/michaelmawhinney/redlight",
         g_displayFilter->name(), BackendPreferenceName(g_startupBackendPreference),
         g_backendOverride ? " (command line)" : "", BackendPreferenceName(g_backendPreference),
         RedModeDisplayName(g_displayFilter->redMode()),
+        g_displayFilter->supportsRedMode(RedMode::LumaRed) ? LumaProfileName(g_displayFilter->lumaProfile()) : "Unavailable on gamma",
         g_displayFilter->needsRestore() && g_displayFilter->lastError()[0] ? "Recovery needed" :
         (g_displayFilter->isActive() ? "ON" : "off"),
         g_toggleHotkey ? "Toggle filter" : "Unavailable (shortcut in use)",
@@ -719,6 +767,20 @@ void ShowTrayMenu(HWND hwnd) {
         ReportError("Could not build the backend preference menu.");
         return;
     }
+    HMENU lumaMenu = CreatePopupMenu();
+    bool lumaBuilt = lumaMenu != NULL;
+    for (const auto profile : {LumaProfile::Classic, LumaProfile::GreenDetail, LumaProfile::EqualDetail}) {
+        lumaBuilt = lumaBuilt && AppendMenuA(lumaMenu,
+            MF_STRING | (g_displayFilter->lumaProfile() == profile ? MF_CHECKED : MF_UNCHECKED),
+            ID_LUMA_PROFILE_BASE + static_cast<unsigned>(profile), LumaProfileName(profile));
+    }
+    const UINT lumaMenuFlags = MF_POPUP | (g_displayFilter->supportsRedMode(RedMode::LumaRed) ? MF_ENABLED : MF_GRAYED);
+    if (!lumaBuilt || !AppendMenuA(menu, lumaMenuFlags, reinterpret_cast<UINT_PTR>(lumaMenu), "Luma color detail")) {
+        if (lumaMenu && !DestroyMenu(lumaMenu)) Diagnostics::Log("DestroyMenu(luma) failed.");
+        if (!DestroyMenu(menu)) Diagnostics::Log("DestroyMenu failed after luma menu failure.");
+        ReportError("Could not build the luma detail menu.");
+        return;
+    }
     const UINT strictFlags = MF_STRING | (g_displayFilter->redMode() == RedMode::StrictRed ? MF_CHECKED : MF_UNCHECKED);
     const UINT lumaFlags = MF_STRING | (g_displayFilter->redMode() == RedMode::LumaRed ? MF_CHECKED : MF_UNCHECKED)
         | (g_displayFilter->supportsRedMode(RedMode::LumaRed) ? MF_ENABLED : MF_GRAYED);
@@ -775,6 +837,10 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         else if (wParam == ID_HOTKEY_RESTORE) RestoreFilter(true);
         return 0;
     case WM_COMMAND:
+        if (LOWORD(wParam) >= ID_LUMA_PROFILE_BASE && LOWORD(wParam) <= ID_LUMA_PROFILE_BASE + 2) {
+            SetLumaProfile(static_cast<LumaProfile>(LOWORD(wParam) - ID_LUMA_PROFILE_BASE));
+            return 0;
+        }
         if (LOWORD(wParam) >= ID_BACKEND_PREFERENCE_BASE && LOWORD(wParam) <= ID_BACKEND_PREFERENCE_BASE + 2) {
             SetBackendPreference(static_cast<BackendPreference>(LOWORD(wParam) - ID_BACKEND_PREFERENCE_BASE));
             return 0;

@@ -15,33 +15,18 @@ constexpr MAGCOLOREFFECT kIdentityEffect = {{
     {0.0f, 0.0f, 0.0f, 0.0f, 1.0f},
 }};
 
-constexpr MAGCOLOREFFECT kStrictRedEffect = {{
-    {1.0f, 0.0f, 0.0f, 0.0f, 0.0f},
-    {0.0f, 0.0f, 0.0f, 0.0f, 0.0f},
-    {0.0f, 0.0f, 0.0f, 0.0f, 0.0f},
-    {0.0f, 0.0f, 0.0f, 1.0f, 0.0f},
-    {0.0f, 0.0f, 0.0f, 0.0f, 1.0f},
-}};
-
-constexpr MAGCOLOREFFECT kLumaRedEffect = {{
-    // MAGCOLOREFFECT uses input-channel rows and output-channel columns.
-    // Put luma weights in the red output column so green and blue never emit.
-    {0.299f, 0.0f, 0.0f, 0.0f, 0.0f},
-    {0.587f, 0.0f, 0.0f, 0.0f, 0.0f},
-    {0.114f, 0.0f, 0.0f, 0.0f, 0.0f},
-    {0.0f, 0.0f, 0.0f, 1.0f, 0.0f},
-    {0.0f, 0.0f, 0.0f, 0.0f, 1.0f},
-}};
-
-const MAGCOLOREFFECT& ColorEffectForMode(RedMode mode) {
-    switch (mode) {
-    case RedMode::StrictRed:
-        return kStrictRedEffect;
-    case RedMode::LumaRed:
-        return kLumaRedEffect;
+MAGCOLOREFFECT ColorEffectForMode(RedMode mode, LumaProfile profile) {
+    MAGCOLOREFFECT effect = {};
+    effect.transform[3][3] = 1.0f;
+    effect.transform[4][4] = 1.0f;
+    if (mode == RedMode::StrictRed) {
+        effect.transform[0][0] = 1.0f;
+    } else {
+        const auto weights = LumaProfileWeights(profile);
+        // Input-channel rows, red output column. No green/blue output or black offset.
+        for (int i = 0; i < 3; ++i) effect.transform[i][0] = weights[i];
     }
-
-    return kStrictRedEffect;
+    return effect;
 }
 
 }  // namespace
@@ -50,6 +35,7 @@ MagnificationFilter::MagnificationFilter()
     : initialized_(false),
       active_(false),
       redMode_(RedMode::LumaRed),
+      lumaProfile_(LumaProfile::Classic),
       restoreEffect_(kIdentityEffect),
       lastError_{} {}
 
@@ -106,7 +92,7 @@ bool MagnificationFilter::enable() {
 
     char action[128];
     sprintf_s(action, sizeof(action), "MagSetFullscreenColorEffect(%s)", RedModeDisplayName(redMode_));
-    if (!SetColorEffect(ColorEffectForMode(redMode_), action)) {
+    if (!SetColorEffect(ColorEffectForMode(redMode_, lumaProfile_), action)) {
         return false;
     }
 
@@ -154,7 +140,7 @@ bool MagnificationFilter::setRedMode(RedMode mode) {
     if (active_) {
         char action[128];
         sprintf_s(action, sizeof(action), "MagSetFullscreenColorEffect(%s)", RedModeDisplayName(mode));
-        if (!SetColorEffect(ColorEffectForMode(mode), action)) {
+        if (!SetColorEffect(ColorEffectForMode(mode, lumaProfile_), action)) {
             return false;
         }
     }
@@ -167,6 +153,21 @@ bool MagnificationFilter::setRedMode(RedMode mode) {
 RedMode MagnificationFilter::redMode() const {
     return redMode_;
 }
+
+bool MagnificationFilter::setLumaProfile(LumaProfile profile) {
+    if (!IsValidLumaProfile(static_cast<unsigned>(profile))) {
+        LogError("unsupported luma profile", ERROR_INVALID_PARAMETER);
+        return false;
+    }
+    if (profile == lumaProfile_) return true;
+    if (active_ && redMode_ == RedMode::LumaRed &&
+        !SetColorEffect(ColorEffectForMode(redMode_, profile), "change luma profile")) return false;
+    lumaProfile_ = profile;
+    Diagnostics::LogFormat("MagnificationFilter luma profile: %s.", LumaProfileName(profile));
+    return true;
+}
+
+LumaProfile MagnificationFilter::lumaProfile() const { return lumaProfile_; }
 
 bool MagnificationFilter::supportsRedMode(RedMode mode) const {
     return mode == RedMode::StrictRed || mode == RedMode::LumaRed;

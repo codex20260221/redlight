@@ -18,6 +18,8 @@ public:
     const char* lastError() const override;
     bool setRedMode(RedMode mode) override;
     RedMode redMode() const override;
+    bool setLumaProfile(LumaProfile profile) override;
+    LumaProfile lumaProfile() const override;
     bool supportsRedMode(RedMode mode) const override;
     bool shutdown() override;
     const char* name() const override;
@@ -29,6 +31,7 @@ private:
     bool initialized_;
     bool active_;
     RedMode redMode_;
+    LumaProfile lumaProfile_;
     MAGCOLOREFFECT restoreEffect_;
     char lastError_[256];
 };

@@ -29,6 +29,18 @@ Luma Red is the default mode when the Magnification API backend is active. It co
 
 Luma Red keeps the display red-only while making blue, green, and cyan UI elements visible as shades of red. It requires the Windows Magnification API backend because gamma ramps do not support cross-channel color mixing. If RedLight falls back to the gamma-ramp backend, RedLight starts in Strict Red and only Strict Red is available.
 
+### Luma color detail
+
+The **Luma color detail** menu offers three red-only mappings on Magnification:
+
+| Preset | Red input weight | Green input weight | Blue input weight | Use |
+| --- | --- | --- | --- | --- |
+| Classic (default) | 0.299 | 0.587 | 0.114 | Original Luma Red appearance |
+| Green detail | 0.2126 | 0.7152 | 0.0722 | Emphasize green content using BT.709-style weights |
+| Equal color detail | 1/3 | 1/3 | 1/3 | Make equally bright red, green, and blue inputs equally visible |
+
+Every preset keeps black black, maps white to pure red, preserves alpha, and produces no green/blue output. The choice is saved and can be changed while filtering. In Strict Red, it only selects the preset for a later switch to Luma Red. Gamma fallback does not support these cross-channel mappings; it retains the saved choice for a future Magnification session. Failed application keeps the previously confirmed preset and the original restoration snapshot.
+
 ## Screenshots
 
 ### Desktop example
