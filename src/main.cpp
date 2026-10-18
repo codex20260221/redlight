@@ -22,6 +22,7 @@
 #include "SavedSettings.h"
 #include "CommandHelp.h"
 #include "LoopShutdown.h"
+#include "StatusClipboard.h"
 #include "CommandIds.h"
 #include "TrayMenu.h"
 #include "SessionLimitDialog.h"
@@ -109,6 +110,8 @@ bool InitializeTrayIcon(HINSTANCE hInstance);
 void SetRedModeFromTray(RedMode mode);
 void ShowAboutDialog(HWND parent);
 void CopySupportReport(HWND owner);
+TrayStatus CaptureCachedTrayStatus();
+void CopyStatusJson(HWND owner);
 void CopySettingsProfile(HWND owner);
 void ImportSettingsProfile(HWND owner);
 void ConfirmPreferences(HWND owner, const AppPreferences& candidate, const char* title);
@@ -873,6 +876,42 @@ void SetRedModeFromTray(RedMode mode) {
     RefreshTrayIconTip();
 }
 
+TrayStatus CaptureCachedTrayStatus() {
+    TrayStatus state;
+    state.backendActive = g_displayFilter->isActive();
+    state.restorePending = g_displayFilter->needsRestore();
+    state.backendError = g_displayFilter->lastError()[0] != '\0';
+    state.supportsLuma = g_displayFilter->supportsRedMode(RedMode::LumaRed);
+    state.backend = g_displayFilter == &g_magnificationFilter ? StatusBackend::Magnification : StatusBackend::Gamma;
+    state.mode = g_displayFilter->redMode();
+    state.luma = g_preferences.luma;
+    state.verification = g_verification.result().state;
+    state.sessionMinutes = g_sessionTimer.minutes();
+    state.timerArmed = g_sessionTimer.armed();
+    state.remainingSeconds = static_cast<unsigned>((g_sessionTimer.remainingMilliseconds(GetTickCount64()) + 999) / 1000);
+    state.shortcutProfile = g_preferences.shortcuts;
+    state.toggle = StatusShortcutKey(g_hotkeys.toggle());
+    state.restore = StatusShortcutKey(g_hotkeys.restore());
+    state.settingsUnsaved = g_preferencesUnsaved;
+    state.sessionNotifications = g_sessionNotifications.isRegistered();
+    state.busy = g_busy || g_preferencesApplying || g_pendingRestore;
+    const auto logging = Diagnostics::GetStatus();
+    state.fileLogging = logging.file;
+    state.missingFileRecords = logging.droppedLines != 0;
+    state.truncatedRecords = logging.truncatedLines != 0;
+    state.fileError = logging.lastFileError != 0;
+    return state;
+}
+
+void CopyStatusJson(HWND owner) {
+    if (!CopyTrayStatusJsonToClipboard(owner, CaptureCachedTrayStatus())) {
+        ReportError("The cached status JSON could not be copied. Check the log or retry when the clipboard is available.");
+        return;
+    }
+    Diagnostics::Log("Cached tray status JSON copied at user request; no backend state refreshed.");
+    ShowTrayInfo("RedLight status JSON copied", "Paste this cached snapshot into a script or text editor.");
+}
+
 void CopySupportReport(HWND owner) {
     SupportReportState state;
     state.version = REDLIGHT_VERSION;
@@ -1167,30 +1206,7 @@ LRESULT HandleWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
     switch (uMsg) {
     case WM_REDLIGHT_STATUS: {
         if (wParam != REDLIGHT_STATUS_PROTOCOL || lParam != 0) return 0;
-        TrayStatus state;
-        state.backendActive = g_displayFilter->isActive();
-        state.restorePending = g_displayFilter->needsRestore();
-        state.backendError = g_displayFilter->lastError()[0] != '\0';
-        state.supportsLuma = g_displayFilter->supportsRedMode(RedMode::LumaRed);
-        state.backend = g_displayFilter == &g_magnificationFilter ? StatusBackend::Magnification : StatusBackend::Gamma;
-        state.mode = g_displayFilter->redMode();
-        state.luma = g_preferences.luma;
-        state.verification = g_verification.result().state;
-        state.sessionMinutes = g_sessionTimer.minutes();
-        state.timerArmed = g_sessionTimer.armed();
-        state.remainingSeconds = static_cast<unsigned>((g_sessionTimer.remainingMilliseconds(GetTickCount64()) + 999) / 1000);
-        state.shortcutProfile = g_preferences.shortcuts;
-        state.toggle = StatusShortcutKey(g_hotkeys.toggle());
-        state.restore = StatusShortcutKey(g_hotkeys.restore());
-        state.settingsUnsaved = g_preferencesUnsaved;
-        state.sessionNotifications = g_sessionNotifications.isRegistered();
-        state.busy = g_busy || g_preferencesApplying || g_pendingRestore;
-        const auto logging = Diagnostics::GetStatus();
-        state.fileLogging = logging.file;
-        state.missingFileRecords = logging.droppedLines != 0;
-        state.truncatedRecords = logging.truncatedLines != 0;
-        state.fileError = logging.lastFileError != 0;
-        const auto reply = PackTrayStatus(state);
+        const auto reply = PackTrayStatus(CaptureCachedTrayStatus());
         if (!reply) Diagnostics::Log("Cached status snapshot is inconsistent; refusing to report it as valid.");
         return reply ? static_cast<LRESULT>(*reply) : 0;
     }
@@ -1261,6 +1277,7 @@ LRESULT HandleWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         case ID_TRAY_MODE_LUMA_RED: SetRedModeFromTray(RedMode::LumaRed); break;
         case ID_TRAY_ABOUT: ShowAboutDialog(hwnd); break;
         case ID_TRAY_COPY_REPORT: CopySupportReport(hwnd); break;
+        case ID_TRAY_COPY_STATUS_JSON: CopyStatusJson(hwnd); break;
         case ID_TRAY_SAVE_PREFERENCES: SaveCurrentPreferences(); break;
         case ID_TRAY_RETRY_SESSION: RetrySessionRecovery(); break;
         case ID_TRAY_RETRY_SHORTCUTS: RetrySelectedShortcuts(); break;

@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Added Copy status JSON under Expert diagnostics, sharing the cached snapshot factory with IPC status and checked Unicode clipboard export; invalid/preparation failures occur before clipboard mutation, and export preserves backend/recovery state without fresh read-back.
 - Added guarded Clear restoration history and in-progress request-scope reporting, with allocation-free reset that preserves display recovery/counters/settings and refuses unfinished nested scopes; production menu ownership and state flags now have isolated fake-menu failure coverage at every creation/append boundary.
 - Added noninteractive `--help-text` standard output sharing a bounded, versioned UTF-8 help body with the native help dialog, with checked termination, partial-output failures, allocation-free C++ preparation, and unchanged native help/version behavior.
 - Added read-only `--settings` JSON for persisted/default preferences and storage source, sharing canonical profile tokens, supporting older/legacy records without migration, and refusing corrupt/unreadable storage instead of reporting successful fallback defaults.

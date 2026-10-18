@@ -197,6 +197,8 @@ Exit codes are `0` for a completed save, `6` when an instance guard already exis
 
 ## Scriptable status
 
+**Expert controls → Diagnostics → Copy status JSON** copies the running tray's cached status as Unicode clipboard text, using the same protocol/field format as `--status`. It includes conservative busy/recovery/verification states, actual shortcuts, timer state, and logging-health flags. It captures cached choices without refreshing backend read-back, reapplying filtering, or querying another instance. Use Copy support report for the fuller counters, history, context, and numerical diagnostics. Inconsistent snapshots or preparation failures are rejected before the clipboard is opened; clipboard access/transfer failures are reported.
+
 `RedLight.exe --status` writes JSON for the existing tray instance. It never starts a tray instance, activates a filter, or reads the display backend. In PowerShell, use a pipeline so the GUI executable completes before reading its output and exit code:
 
 ```powershell

@@ -68,6 +68,7 @@ HMENU BuildTrayMenu(const TrayMenuState& state) {
         !shortcuts.add(ID_SHORTCUT_PROFILE_BASE + 3, "D&isabled", Checked(state.shortcutProfile == ShortcutProfile::Disabled))) return NULL;
     if (!diagnostics.add(ID_TRAY_VERIFY_BACKEND, "&Verify backend state") ||
         !diagnostics.add(ID_TRAY_COPY_REPORT, "&Copy support report") ||
+        !diagnostics.add(ID_TRAY_COPY_STATUS_JSON, "Copy status &JSON") ||
         !diagnostics.add(ID_TRAY_RETRY_LOGGING, "&Retry file logging") ||
         !diagnostics.add(ID_TRAY_RETRY_SESSION, "Retry session rec&overy") ||
         !diagnostics.add(ID_TRAY_RETRY_SHORTCUTS, "Retry selected s&hortcuts") ||

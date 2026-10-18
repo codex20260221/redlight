@@ -27,6 +27,7 @@
 #include "CommandHelp.h"
 #include "LoopShutdown.h"
 #include "TrayMenu.h"
+#include "StatusClipboard.h"
 #include <memory>
 #include "InstanceName.h"
 #include "JsonString.h"
@@ -3305,7 +3306,7 @@ void ExpertDiagnosticsMenuLayoutAndOwnership() {
     const auto diagnostics = FakeMenuChild(expert, "Dia&gnostics");
     Check(expert && diagnostics && FakeMenuCommand(expert, ID_TRAY_SAVE_PREFERENCES) && FakeMenuCommand(expert, ID_TRAY_IMPORT_PROFILE),
         "expert choices and preference transfer remain distinct from the diagnostic submenu");
-    for (const auto id : {ID_TRAY_VERIFY_BACKEND, ID_TRAY_COPY_REPORT, ID_TRAY_RETRY_LOGGING, ID_TRAY_RETRY_SESSION,
+    for (const auto id : {ID_TRAY_VERIFY_BACKEND, ID_TRAY_COPY_REPORT, ID_TRAY_COPY_STATUS_JSON, ID_TRAY_RETRY_LOGGING, ID_TRAY_RETRY_SESSION,
         ID_TRAY_RETRY_SHORTCUTS, ID_TRAY_RESET_BACKEND_COUNTS, ID_TRAY_CLEAR_RESTORATION_HISTORY})
         Check(FakeMenuCommand(diagnostics, id) && !FakeMenuCommand(expert, id), "all diagnostic/retry/bookkeeping actions are grouped exactly once");
     for (const auto& menu : fake.menus) Check(UniqueMenuAccelerators(*menu), "assigned keyboard accelerators remain unique within each submenu");
@@ -3357,6 +3358,61 @@ void ExpertMenuAppendFailureCleanupAtEveryBoundary() {
         Check(!root && AliveFakeMenus() == 0 && fake.invalidMenuDestroys == 0 && fake.menuDestroys == fake.menus.size(),
             "failure at each item/submenu append preserves ownership until success and releases all handles without double destruction");
     }
+}
+void StatusClipboardMatchesCachedJson() {
+    TrayStatus snapshot;
+    snapshot.backendActive = true; snapshot.restorePending = true; snapshot.mode = RedMode::LumaRed; snapshot.luma = LumaProfile::GreenDetail;
+    snapshot.verification = BackendVerification::Matches; snapshot.sessionMinutes = 1; snapshot.timerArmed = true; snapshot.remainingSeconds = 37;
+    snapshot.shortcutProfile = ShortcutProfile::F9; snapshot.toggle = StatusShortcut::F9; snapshot.restore = StatusShortcut::F9; snapshot.settingsUnsaved = true;
+    const auto expected = TrayStatusJson(snapshot);
+    Check(expected && CopyTrayStatusJsonToClipboard(nullptr, snapshot) && std::wstring_view(fake.clipMemory.data()) == std::wstring(expected->begin(), expected->end()),
+        "status clipboard export transfers exactly the same protocol JSON as cached script status");
+    Check(fake.clipOpens == 1 && fake.clipEmpties == 1 && fake.clipSets == 1 && fake.clipCloses == 1 && fake.clipFrees == 0 &&
+        fake.magReads == 0 && fake.gammaReads == 0 && fake.metricReads == 0 && fake.statusSends == 0 && fake.registryReads == 0,
+        "successful UTF-16 clipboard ownership transfer makes no backend/context/tray-query/preferences call");
+}
+void StatusClipboardRejectsInconsistentSnapshotBeforeMutation() {
+    fake.clipMemory = {L'k', L'e', L'e', L'p', 0};
+    TrayStatus invalid; invalid.backendActive = true; invalid.restorePending = false;
+    Check(!CopyTrayStatusJsonToClipboard(nullptr, invalid) && fake.clipAllocations == 0 && fake.clipOpens == 0 && fake.clipEmpties == 0 &&
+        std::wstring_view(fake.clipMemory.data()) == L"keep", "inconsistent cached state is rejected before allocation/open/empty can affect existing clipboard data");
+}
+void StatusClipboardPropagatesNativeFailures() {
+    for (unsigned failure = 0; failure < 3; ++failure) {
+        Reset();
+        if (failure == 0) fake.clipOpen = false;
+        else if (failure == 1) fake.clipSet = false;
+        else fake.clipClose = false;
+        Check(!CopyTrayStatusJsonToClipboard(nullptr, {}), "busy clipboard, transfer, and close errors cannot report a successful status copy");
+        Check(fake.clipFrees == (failure == 2 ? 0 : 1) && fake.magWrites == 0 && fake.gammaWrites == 0 && fake.registryWrites == 0,
+            "failure cleanup frees only app-owned memory and makes no display or settings mutation");
+        if (failure == 0) Check(fake.clipEmpties == 0, "clipboard-open failure cannot clear existing clipboard data");
+    }
+}
+void StatusClipboardPreparationAllocationFailure() {
+    fake.clipMemory = {L'k', L'e', L'e', L'p', 0};
+    {
+        TestMemory::FailNextAllocation fail;
+        Check(!CopyTrayStatusJsonToClipboard(nullptr, {}) && fake.clipOpens == 0 && fake.clipAllocations == 0 && fake.clipEmpties == 0,
+            "JSON preparation allocation failure is contained before any clipboard mutation");
+    }
+    Check(std::wstring_view(fake.clipMemory.data()) == L"keep" && !CommandMayChangeFilter(ID_TRAY_COPY_STATUS_JSON),
+        "allocation failure preserves existing clipboard content and read-only display-failure policy");
+}
+void StatusClipboardRetainsPendingGammaRecovery() {
+    GammaRampFilter filter;
+    Check(filter.initialize(), "initialize partial gamma recovery status export");
+    fake.writes = {Write::FailAfterApply, Write::Fail};
+    Check(!filter.enable() && !filter.isActive() && filter.needsRestore() && fake.mutexOwned, "prepare inactive recovery ownership");
+    TrayStatus snapshot; snapshot.backend = StatusBackend::Gamma; snapshot.supportsLuma = false; snapshot.mode = RedMode::StrictRed;
+    snapshot.restorePending = true; snapshot.backendError = true; snapshot.luma = LumaProfile::EqualDetail; snapshot.verification = BackendVerification::Unavailable;
+    const auto reads = fake.gammaReads, writes = fake.gammaWrites, releases = fake.mutexReleases;
+    const auto statistics = filter.statistics();
+    Check(CopyTrayStatusJsonToClipboard(nullptr, snapshot) && std::wstring_view(fake.clipMemory.data()).find(L"\"status\":\"recovery-needed\"") != std::wstring_view::npos &&
+        std::wstring_view(fake.clipMemory.data()).find(L"\"active\":false") != std::wstring_view::npos && !filter.isActive() && filter.needsRestore() &&
+        fake.mutexOwned && fake.gammaReads == reads && fake.gammaWrites == writes && fake.mutexReleases == releases && filter.statistics() == statistics,
+        "conservative JSON export preserves pending snapshot/ownership/error state and performs no recovery/backend call");
+    Check(filter.disable(), "original gamma calibration remains recoverable after status export");
 }
 } // namespace
 
@@ -3774,6 +3830,9 @@ int main() {
         {"Restoration history clear allocation/policy", RestorationHistoryClearNoAllocationAndReadOnlyPolicy}, {"Expert diagnostic menu layout/ownership", ExpertDiagnosticsMenuLayoutAndOwnership},
         {"Expert diagnostic menu state flags", ExpertDiagnosticsMenuStateFlags}, {"Expert menu create failure cleanup matrix", ExpertMenuCreationFailureCleanupAtEveryBoundary},
         {"Expert menu append failure cleanup matrix", ExpertMenuAppendFailureCleanupAtEveryBoundary},
+        {"Status clipboard matches cached JSON", StatusClipboardMatchesCachedJson}, {"Status clipboard rejects inconsistent snapshots", StatusClipboardRejectsInconsistentSnapshotBeforeMutation},
+        {"Status clipboard native failure propagation", StatusClipboardPropagatesNativeFailures}, {"Status clipboard allocation preparation failure", StatusClipboardPreparationAllocationFailure},
+        {"Status clipboard retains pending gamma recovery", StatusClipboardRetainsPendingGammaRecovery},
         {"Command line", Arguments}
     };
     int failed = 0;
