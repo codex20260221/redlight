@@ -6,13 +6,16 @@ std::optional<DisplayContextSnapshot> CaptureDisplayContext() noexcept {
     const int monitors = GetSystemMetrics(SM_CMONITORS);
     const int width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
     const int height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    const int left = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    const int top = GetSystemMetrics(SM_YVIRTUALSCREEN);
     const bool remote = GetSystemMetrics(SM_REMOTESESSION) != 0;
     if (monitors <= 0 || width <= 0 || height <= 0) {
         // GetSystemMetrics supplies no extended GetLastError information.
         Diagnostics::LogFormat("Display context unavailable: monitors=%d, virtual width=%d, height=%d.", monitors, width, height);
         return std::nullopt;
     }
-    return DisplayContextSnapshot{static_cast<unsigned>(monitors), static_cast<unsigned>(width), static_cast<unsigned>(height), remote};
+    // Zero and negative origins are valid. Preserve signed desktop coordinates.
+    return DisplayContextSnapshot{static_cast<unsigned>(monitors), static_cast<unsigned>(width), static_cast<unsigned>(height), remote, left, top};
 }
 
 bool RefreshDisplayContextCache(DisplayContextCache& cache, DisplayContextReason reason) noexcept {

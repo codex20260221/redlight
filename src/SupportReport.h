@@ -138,6 +138,8 @@ inline std::string BuildSupportReport(const SupportReportState& state) {
     if (state.displayContext.snapshot()) {
         const auto& context = *state.displayContext.snapshot();
         report << "\r\nVisible monitors: " << context.monitors << "\r\nVirtual desktop metrics: " << context.virtualWidth << " x " << context.virtualHeight << " pixels"
+            << "\r\nVirtual desktop origin (left/top): " << context.virtualLeft << ", " << context.virtualTop << " pixels"
+            << "\r\nVirtual desktop right/bottom (exclusive): " << context.virtualRight() << ", " << context.virtualBottom() << " pixels"
             << "\r\nRemote-session metric: " << (context.remoteSessionIndicated ? "set" : "not set")
             << "\r\nContext captured after: " << DisplayContextReasonName(state.displayContext.captureReason())
             << "\r\nContext age: " << state.displayContext.ageSeconds(state.reportTick).value_or(0) << " seconds";

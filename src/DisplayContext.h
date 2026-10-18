@@ -5,6 +5,9 @@
 struct DisplayContextSnapshot {
     unsigned monitors, virtualWidth, virtualHeight;
     bool remoteSessionIndicated;
+    std::int32_t virtualLeft = 0, virtualTop = 0;
+    std::int64_t virtualRight() const noexcept { return static_cast<std::int64_t>(virtualLeft) + virtualWidth; }
+    std::int64_t virtualBottom() const noexcept { return static_cast<std::int64_t>(virtualTop) + virtualHeight; }
     bool operator==(const DisplayContextSnapshot&) const = default;
 };
 enum class DisplayContextReason { Startup, DisplayChange, PowerTransition, SessionTransition, ExplorerRestart, ExplicitVerification, ManualRefresh };

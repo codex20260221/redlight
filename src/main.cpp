@@ -322,8 +322,9 @@ void CloseInstanceMutex(HANDLE handle) {
 void RefreshDisplayContext(DisplayContextReason reason) {
     const bool refreshed = RefreshDisplayContextCache(g_displayContext, reason);
     const auto& snapshot = g_displayContext.snapshot();
-    if (refreshed && snapshot) Diagnostics::LogFormat("Display context (%s): %u monitors, virtual %u x %u pixels, remote-session flag=%s.",
+    if (refreshed && snapshot) Diagnostics::LogFormat("Display context (%s): %u monitors, virtual %u x %u pixels at signed origin (%ld, %ld), remote-session flag=%s.",
         DisplayContextReasonName(reason), snapshot->monitors, snapshot->virtualWidth, snapshot->virtualHeight,
+        static_cast<long>(snapshot->virtualLeft), static_cast<long>(snapshot->virtualTop),
         snapshot->remoteSessionIndicated ? "set" : "not set");
     else Diagnostics::LogFormat("Display context refresh (%s) unavailable; prior successful data retained.", DisplayContextReasonName(reason));
 }
