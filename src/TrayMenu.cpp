@@ -66,7 +66,8 @@ HMENU BuildTrayMenu(const TrayMenuState& state) {
         !expert.add(ID_TRAY_RETRY_LOGGING, "&Retry file logging") ||
         !expert.add(0, NULL, MF_SEPARATOR) ||
         !expert.add(ID_TRAY_COPY_PROFILE, "&Export settings profile to clipboard") ||
-        !expert.add(ID_TRAY_IMPORT_PROFILE, "&Import settings profile from clipboard")) return NULL;
+        !expert.add(ID_TRAY_IMPORT_PROFILE, "&Import settings profile from clipboard") ||
+        !expert.add(0, NULL, MF_SEPARATOR) || !expert.add(ID_TRAY_RESET_PREFERENCES, "Reset preferences to &defaults...")) return NULL;
     char toggleLabel[128], restoreLabel[128];
     const char* absent = state.shortcutProfile == ShortcutProfile::Disabled ? "Disabled" : "Unavailable";
     sprintf_s(toggleLabel, state.needsRestore ? "Turn o&ff\t%s" : "Turn &on\t%s",

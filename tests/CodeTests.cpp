@@ -637,6 +637,16 @@ void ShortcutStartupPartialAndSchemaMigration() {
     current.replace(current.find("hotkeys=default"), 15, "hotkeys=unexpected");
     Check(!ParsePreferences(current).preferences, "invalid shortcut token rejected");
 }
+void DefaultPreferencesRestoreActiveGamma() {
+    GammaRampFilter filter;
+    Check(filter.initialize() && filter.enable(), "active gamma fallback");
+    const AppPreferences before{RedMode::StrictRed, LumaProfile::EqualDetail, BackendPreference::Gamma, 57, ShortcutProfile::F9};
+    Check(SavePreferences(before), "seed expert settings");
+    const auto reset = SaveImportedPreferences(AppPreferences{}, [&] { return filter.disable(); });
+    Check(reset == PreferenceImportResult::Saved && !filter.isActive() && !filter.needsRestore(), "default reset restores active filter and leaves it off");
+    Check(LoadPreferences().preferences == AppPreferences{}, "default reset replaces complete configuration including shortcut/timer choices");
+    Check(fake.gammaWrites == 2, "reset never enables a filter after restoration");
+}
 void Arguments() {
     using S = StartupAction;
     Check(ParseArguments({}) == S::Tray, "no arguments");
@@ -776,6 +786,7 @@ int main() {
         {"Custom session-limit input", CustomSessionLimitParsing},
         {"Shortcut registration and stale messages", ShortcutRegistrationAndStaleMessages}, {"Shortcut rollback", ShortcutRegistrationRollback},
         {"Shortcut partial rollback/retry", ShortcutPartialRollbackAndRetry}, {"Shortcut startup and schema migration", ShortcutStartupPartialAndSchemaMigration},
+        {"Default preference restoration", DefaultPreferencesRestoreActiveGamma},
         {"Command line", Arguments}
     };
     int failed = 0;

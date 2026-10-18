@@ -45,6 +45,7 @@ BackendPreference g_startupBackendPreference = BackendPreference::Automatic;
 bool g_backendOverride = false;
 AppPreferences g_preferences;
 bool g_preferencesUnsaved = false;
+bool g_preferencesApplying = false;
 BackendVerification g_verification = BackendVerification::NotChecked;
 
 }
@@ -80,9 +81,10 @@ void ShowAboutDialog(HWND parent);
 void CopySupportReport(HWND owner);
 void CopySettingsProfile(HWND owner);
 void ImportSettingsProfile(HWND owner);
+void ConfirmPreferences(HWND owner, const AppPreferences& candidate, const char* title);
 void VerifyBackendState(HWND owner);
 const char* FilterStatusText();
-void ConfirmClipboardCopy(const char* title, const char* message);
+void ShowTrayInfo(const char* title, const char* message);
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
 int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPSTR lpCmdLine, _In_ int nShowCmd) {
@@ -425,7 +427,7 @@ void RefreshTrayIconTip() {
 }
 
 void ToggleRedlight() {
-    if (g_busy) return;
+    if (g_busy || g_preferencesApplying) return;
     if (!g_trayAdded && !g_displayFilter->needsRestore()) {
         ReportError("RedLight is waiting for its tray controls to return. The filter will stay off.");
         return;
@@ -479,7 +481,7 @@ bool StartSessionTimer() {
 }
 
 void SetSessionLimit(unsigned minutes) {
-    if (g_busy || minutes > SessionTimer::maxMinutes) return;
+    if (g_busy || g_preferencesApplying || minutes > SessionTimer::maxMinutes) return;
     const bool active = g_displayFilter->isActive();
     const unsigned previous = g_sessionTimer.minutes();
     StopSessionTimer();
@@ -576,7 +578,7 @@ bool InitializeTrayIcon(HINSTANCE hInstance) {
 }
 
 void SetShortcutProfile(ShortcutProfile profile) {
-    if (g_busy || !IsValidShortcutProfile(static_cast<unsigned>(profile))) return;
+    if (g_busy || g_preferencesApplying || !IsValidShortcutProfile(static_cast<unsigned>(profile))) return;
     g_busy = true;
     const bool changed = g_hotkeys.change(profile);
     g_busy = false;
@@ -601,7 +603,7 @@ bool ApplyInactivePreferences(const AppPreferences& preferences) {
 }
 
 void SetBackendPreference(BackendPreference preference) {
-    if (!IsValidBackendPreference(static_cast<unsigned>(preference))) return;
+    if (g_busy || g_preferencesApplying || !IsValidBackendPreference(static_cast<unsigned>(preference))) return;
     auto candidate = g_preferences;
     candidate.backend = preference;
     if (!SavePreferences(candidate)) {
@@ -621,7 +623,7 @@ void SaveRedMode(RedMode mode) {
 }
 
 void SetLumaProfile(LumaProfile profile) {
-    if (g_busy || !g_displayFilter->supportsRedMode(RedMode::LumaRed) ||
+    if (g_busy || g_preferencesApplying || !g_displayFilter->supportsRedMode(RedMode::LumaRed) ||
         !IsValidLumaProfile(static_cast<unsigned>(profile))) return;
     g_busy = true;
     g_verification = BackendVerification::NotChecked;
@@ -643,7 +645,7 @@ void SetLumaProfile(LumaProfile profile) {
 }
 
 void SetRedModeFromTray(RedMode mode) {
-    if (g_busy || (g_displayFilter->needsRestore() && !g_displayFilter->isActive())) return;
+    if (g_busy || g_preferencesApplying || (g_displayFilter->needsRestore() && !g_displayFilter->isActive())) return;
     Diagnostics::LogFormat("Red mode request: %s -> %s (%s)",
         RedModeDisplayName(g_displayFilter->redMode()),
         RedModeDisplayName(mode),
@@ -709,16 +711,16 @@ void CopySupportReport(HWND owner) {
         return;
     }
     Diagnostics::Log("Support report copied to clipboard at user request.");
-    ConfirmClipboardCopy("RedLight support report copied", "Paste the report into a support request or save it in a text editor.");
+    ShowTrayInfo("RedLight support report copied", "Paste the report into a support request or save it in a text editor.");
 }
 
-void ConfirmClipboardCopy(const char* title, const char* message) {
+void ShowTrayInfo(const char* title, const char* message) {
     NOTIFYICONDATAA notification = nid;
     notification.uFlags = NIF_INFO;
     strncpy_s(notification.szInfoTitle, title, _TRUNCATE);
     strncpy_s(notification.szInfo, message, _TRUNCATE);
     notification.dwInfoFlags = NIIF_INFO;
-    if (!Shell_NotifyIconA(NIM_MODIFY, &notification)) Diagnostics::Log("Clipboard confirmation notification failed.");
+    if (!Shell_NotifyIconA(NIM_MODIFY, &notification)) Diagnostics::Log("Tray confirmation notification failed.");
 }
 
 void CopySettingsProfile(HWND owner) {
@@ -728,11 +730,11 @@ void CopySettingsProfile(HWND owner) {
         return;
     }
     Diagnostics::Log("Settings profile copied to clipboard at user request.");
-    ConfirmClipboardCopy("RedLight settings profile copied", "Paste into a text file to keep or share your red-only filter preferences.");
+    ShowTrayInfo("RedLight settings profile copied", "Paste into a text file to keep or share your red-only filter preferences.");
 }
 
 void ImportSettingsProfile(HWND owner) {
-    if (g_busy) return;
+    if (g_busy || g_preferencesApplying) return;
     const auto text = ReadUtf8TextFromClipboard(owner);
     if (!text) {
         ReportError("A settings profile could not be read from the clipboard. Copy a RedLight profile as text, then retry.");
@@ -745,20 +747,28 @@ void ImportSettingsProfile(HWND owner) {
         ReportError(error);
         return;
     }
-    const auto candidate = *parsed.preferences;
+    ConfirmPreferences(owner, *parsed.preferences, "Import RedLight settings");
+}
+
+void ConfirmPreferences(HWND owner, const AppPreferences& candidate, const char* title) {
+    if (g_busy || g_preferencesApplying || !ValidPreferences(candidate)) return;
     char preview[768];
-    sprintf_s(preview, "Import these preferences?\n\nMode: %s\nLuma detail: %s\nBackend on next start: %s\n"
+    sprintf_s(preview, "Apply these preferences?\n\nMode: %s\nLuma detail: %s\nBackend on next start: %s\n"
         "Session limit: %u minutes (0 = unlimited)\nShortcut profile: %s\n\n"
         "The display will be restored and stay off. Backend selection applies on the next start.\n"
         "Luma preferences are retained for Magnification when the current backend is gamma.",
         RedModeDisplayName(candidate.mode), LumaProfileName(candidate.luma), BackendPreferenceName(candidate.backend), candidate.sessionMinutes, ShortcutProfileName(candidate.shortcuts));
-    if (MessageBoxA(owner, preview, "Import RedLight settings", MB_YESNO | MB_DEFBUTTON2 | MB_ICONQUESTION) != IDYES) return;
+    if (MessageBoxA(owner, preview, title, MB_YESNO | MB_DEFBUTTON2 | MB_ICONQUESTION) != IDYES) return;
     // Recheck after the modal preview: native callbacks may have run while it was open.
-    if (g_busy) return;
+    if (g_busy || g_preferencesApplying) return;
+    struct Transaction {
+        Transaction() { g_preferencesApplying = true; }
+        ~Transaction() { g_preferencesApplying = false; }
+    } transaction;
     const auto saved = SaveImportedPreferences(candidate, [] { return RestoreFilter(true); });
     if (saved == PreferenceImportResult::Rejected || saved == PreferenceImportResult::RestoreFailed) return;
     if (saved == PreferenceImportResult::SaveFailed) {
-        ReportError("The imported settings could not be saved. Your previous preferences remain selected; the display is off.");
+        ReportError("The preferences could not be saved. Your previous preferences remain selected; the display is off.");
         return;
     }
     g_preferences = candidate;
@@ -767,12 +777,12 @@ void ImportSettingsProfile(HWND owner) {
     const bool modeApplied = ApplyInactivePreferences(candidate);
     const bool shortcutsApplied = g_hotkeys.change(candidate.shortcuts);
     if (!modeApplied || !shortcutsApplied) {
-        ReportError("The profile was saved, but some preferences could not be applied in this session. Restart RedLight to use them.");
+        ReportError("The preferences were saved, but some choices could not be applied in this session. Restart RedLight to use them.");
         return;
     }
-    Diagnostics::Log("Settings profile imported after validation and explicit preview confirmation; display remains off.");
+    Diagnostics::LogFormat("%s applied after preview confirmation and restoration; display remains off.", title);
     RefreshTrayIconTip();
-    ConfirmClipboardCopy("RedLight settings imported", "Preferences saved. The filter remains off; backend preference applies on the next start.");
+    ShowTrayInfo("RedLight preferences saved", "The filter remains off; backend preference applies on the next start.");
 }
 
 const char* FilterStatusText() {
@@ -905,7 +915,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         switch (LOWORD(wParam)) {
         case ID_TRAY_TOGGLE: ToggleRedlight(); break;
         case ID_TRAY_CUSTOM_SESSION:
-            if (!g_busy) {
+            if (!g_busy && !g_preferencesApplying) {
                 if (const auto minutes = ShowSessionLimitDialog(hwnd, g_sessionTimer.minutes())) SetSessionLimit(*minutes);
             }
             break;
@@ -916,12 +926,13 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         case ID_TRAY_COPY_REPORT: CopySupportReport(hwnd); break;
         case ID_TRAY_RETRY_LOGGING:
             if (Diagnostics::RetryFileLogging()) {
-                ConfirmClipboardCopy("RedLight file logging available", "File logging recovered. Earlier missing-record counts remain in the support report.");
+                ShowTrayInfo("RedLight file logging available", "File logging recovered. Earlier missing-record counts remain in the support report.");
             } else ReportError("File logging is still unavailable or degraded. About and support reports show the last file error. Debugger output remains available.");
             break;
         case ID_TRAY_VERIFY_BACKEND: VerifyBackendState(hwnd); break;
         case ID_TRAY_COPY_PROFILE: CopySettingsProfile(hwnd); break;
         case ID_TRAY_IMPORT_PROFILE: ImportSettingsProfile(hwnd); break;
+        case ID_TRAY_RESET_PREFERENCES: ConfirmPreferences(hwnd, AppPreferences{}, "Reset RedLight preferences to defaults"); break;
         case ID_TRAY_EXIT:
             if (!PostMessageA(hwnd, WM_CLOSE, 0, 0)) ReportError("The exit request could not be queued. Please retry.");
             break;
