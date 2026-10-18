@@ -1,5 +1,6 @@
 #include "ProfileValidation.h"
 #include "ProfileComparison.h"
+#include "PreferencesJson.h"
 #include "ProfileSave.h"
 #include "Preferences.h"
 #include "JsonString.h"
@@ -98,17 +99,17 @@ int WriteResult(std::string_view text, int exitCode) noexcept {
 int WriteValidatedProfile(const PreferencesParseResult& parsed) noexcept {
     const auto defaults = DefaultsForProfileSchema(parsed.inputSchema);
     if (!parsed.preferences || !defaults) return 1;
-    const auto& value = *parsed.preferences;
+    char preferences[PreferencesJsonBufferSize];
+    const auto value = FormatPreferencesJson(*parsed.preferences, preferences);
+    if (!value) return 1;
     const char* defaulted = defaults->shortcuts ? "\"hotkeys\",\"expiry_warning\"" :
         (defaults->expiryWarning ? "\"expiry_warning\"" : "");
     char output[1024];
     const int length = std::snprintf(output, sizeof(output),
         "{\"protocol\":1,\"status\":\"valid-profile\",\"valid\":true,\"input_schema\":%u,\"profile_schema\":%u,"
-        "\"schema_upgrade_required\":%s,\"defaulted_fields\":[%s],\"preferences\":{"
-        "\"mode\":\"%s\",\"luma\":\"%s\",\"backend\":\"%s\",\"session_minutes\":%u,\"hotkeys\":\"%s\",\"expiry_warning\":\"%s\"}}\n",
+        "\"schema_upgrade_required\":%s,\"defaulted_fields\":[%s],\"preferences\":%.*s}\n",
         parsed.inputSchema, PreferencesProfileVersion, parsed.inputSchema < PreferencesProfileVersion ? "true" : "false", defaulted,
-        PreferenceModeToken(value.mode), PreferenceLumaToken(value.luma), PreferenceBackendToken(value.backend), value.sessionMinutes,
-        ShortcutProfileToken(value.shortcuts), ExpiryWarningToken(value.expiryWarning));
+        static_cast<int>(value->size()), value->data());
     if (length < 0 || static_cast<std::size_t>(length) >= sizeof(output)) {
         Diagnostics::Log("Offline profile inspection could not fit its checked JSON buffer; no output was written.");
         return 1;

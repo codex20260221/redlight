@@ -9,6 +9,7 @@
 #include "SupportReport.h"
 #include "Preferences.h"
 #include "PreferencesStore.h"
+#include "PreferencesClipboard.h"
 #include "PreferencesImport.h"
 #include "PreferencePreview.h"
 #include "HotkeyManager.h"
@@ -637,6 +638,114 @@ void SupportReportDiagnosticRetentionSnapshot() {
         fake.backendClockReads == clocks && fake.registryReads == 0 && fake.clipOpens == 0 && filter.isActive() && fake.mutexOwned,
         "formatting retention snapshots performs no native backend/clock/settings/clipboard operation and preserves active ownership");
     Check(filter.disable(), "original calibration remains available after cached count reporting");
+}
+void SharedPreferencesJsonCanonicalAndBounds() {
+    char text[PreferencesJsonBufferSize];
+    Check(FormatPreferencesJson({}, text) ==
+        "{\"mode\":\"luma\",\"luma\":\"classic\",\"backend\":\"auto\",\"session_minutes\":0,\"hotkeys\":\"default\",\"expiry_warning\":\"off\"}",
+        "shared preference JSON preserves the established six canonical keys and scalar types");
+    const AppPreferences largest{RedMode::StrictRed, LumaProfile::EqualDetail, BackendPreference::Magnification, 240, ShortcutProfile::Disabled, ExpiryWarning::FiveMinutes};
+    const auto value = FormatPreferencesJson(largest, text);
+    Check(value && value->size() < sizeof(text) && value->find("\"session_minutes\":240") != std::string_view::npos &&
+        value->find("\"backend\":\"magnification\"") != std::string_view::npos, "maximum supported choices fit the shared object buffer");
+    const auto length = value->size();
+    Check(FormatPreferencesJson(largest, std::span<char>(text, length + 1))->size() == length && text[length] == '\0' &&
+        !FormatPreferencesJson(largest, std::span<char>(text, length)) && !FormatPreferencesJson({}, {}),
+        "shared JSON requires a complete object and terminator and never returns truncated output");
+    auto invalid = largest; invalid.sessionMinutes = 241;
+    Check(!FormatPreferencesJson(invalid, text), "invalid values cannot enter a shared preference object");
+}
+void CurrentPreferencesJsonScopeAndClipboard() {
+    Check(SavePreferences({}), "seed different saved choices for current-session isolation");
+    CurrentPreferencesSnapshot snapshot{{RedMode::StrictRed, LumaProfile::EqualDetail, BackendPreference::Gamma, 240,
+        ShortcutProfile::Disabled, ExpiryWarning::FiveMinutes}, true, true, PreferenceSource::VersionedRecord, true};
+    char output[CurrentPreferencesJsonBufferSize];
+    const auto text = FormatCurrentPreferencesJson(snapshot, output);
+    Check(text && text->find("\"status\":\"current-preferences\",\"source\":\"current-session\",\"profile_schema\":3") != std::string_view::npos &&
+        text->find("\"settings_unsaved\":true,\"busy\":true") != std::string_view::npos &&
+        text->find("\"startup_source\":\"versioned-record\",\"startup_load_warning\":true") != std::string_view::npos &&
+        text->find("\"mode\":\"strict\"") != std::string_view::npos && text->find("\"session_minutes\":240") != std::string_view::npos,
+        "current-session JSON distinguishes live preferences, known save/busy flags, and historical startup context");
+    const std::wstring expected(text->begin(), text->end());
+    const auto registryWrites = fake.registryWrites;
+    Check(CopyCurrentPreferencesJsonToClipboard(nullptr, snapshot) && std::wstring_view(fake.clipMemory.data()) == expected &&
+        fake.registryReads == 0 && fake.registryWrites == registryWrites && fake.clipFrees == 0,
+        "Unicode clipboard transfer matches the complete cached JSON without reading or changing saved choices");
+    const auto length = text->size();
+    Check(FormatCurrentPreferencesJson(snapshot, std::span<char>(output, length + 1))->size() == length && output[length] == '\0' &&
+        !FormatCurrentPreferencesJson(snapshot, std::span<char>(output, length)) && !FormatCurrentPreferencesJson(snapshot, {}),
+        "current-session envelope uses exact checked bounds too");
+}
+void CurrentPreferencesJsonInvalidSnapshotBeforeMutation() {
+    for (unsigned field = 0; field < 7; ++field) {
+        Reset();
+        fake.clipMemory = {L'k', L'e', L'e', L'p', 0};
+        CurrentPreferencesSnapshot snapshot;
+        switch (field) {
+        case 0: snapshot.preferences.mode = static_cast<RedMode>(99); break;
+        case 1: snapshot.preferences.luma = static_cast<LumaProfile>(99); break;
+        case 2: snapshot.preferences.backend = static_cast<BackendPreference>(99); break;
+        case 3: snapshot.preferences.sessionMinutes = 241; break;
+        case 4: snapshot.preferences.shortcuts = static_cast<ShortcutProfile>(99); break;
+        case 5: snapshot.preferences.expiryWarning = static_cast<ExpiryWarning>(99); break;
+        default: snapshot.startupSource = static_cast<PreferenceSource>(99); break;
+        }
+        Check(!CopyCurrentPreferencesJsonToClipboard(nullptr, snapshot) && fake.clipAllocations == 0 && fake.clipOpens == 0 && fake.clipEmpties == 0 &&
+            std::wstring_view(fake.clipMemory.data()) == L"keep", "invalid preferences or source metadata fail before any clipboard preparation/mutation");
+    }
+    Check(!CommandMayChangeFilter(ID_TRAY_COPY_PREFERENCES_JSON), "current preference inspection has read-only callback failure policy");
+}
+void CurrentPreferencesJsonAllocationBehavior() {
+    char output[CurrentPreferencesJsonBufferSize];
+    bool formatted = false, unused = false;
+    {
+        TestMemory::FailNextAllocation fail;
+        formatted = FormatCurrentPreferencesJson({}, output).has_value();
+        unused = TestMemory::AllocationFailurePending();
+    }
+    Check(formatted && unused, "complete current preference JSON formatting allocates no C++ heap storage");
+    fake.clipMemory = {L'k', L'e', L'e', L'p', 0};
+    bool copied = true, consumed = false;
+    {
+        TestMemory::FailNextAllocation fail;
+        copied = CopyCurrentPreferencesJsonToClipboard(nullptr, {});
+        consumed = !TestMemory::AllocationFailurePending();
+    }
+    Check(!copied && consumed && fake.clipOpens == 0 && fake.clipEmpties == 0 && std::wstring_view(fake.clipMemory.data()) == L"keep",
+        "a fake clipboard preparation allocation exception is contained while existing data remains intact");
+}
+void CurrentPreferencesJsonNativeFailureOwnership() {
+    for (unsigned failure = 0; failure < 5; ++failure) {
+        Reset();
+        if (failure == 0) fake.clipAllocate = false;
+        else if (failure == 1) fake.clipOpen = false;
+        else if (failure == 2) fake.clipEmpty = false;
+        else if (failure == 3) fake.clipSet = false;
+        else fake.clipClose = false;
+        Check(!CopyCurrentPreferencesJsonToClipboard(nullptr, {}) && fake.clipFrees == (failure == 0 || failure == 4 ? 0 : 1) &&
+            fake.magWrites == 0 && fake.gammaWrites == 0 && fake.registryWrites == 0,
+            "allocation/open/empty/transfer/close failures propagate and free only app-owned blocks without state writes");
+        if (failure <= 1) Check(fake.clipEmpties == 0, "failed preparation or busy access does not empty the clipboard");
+    }
+}
+void CurrentPreferencesJsonPreservesGammaRecovery() {
+    GammaRampFilter filter;
+    Check(filter.initialize(), "prepare gamma recovery");
+    fake.writes = {Write::FailAfterApply, Write::Fail};
+    Check(!filter.enable() && filter.needsRestore() && SavePreferences({}), "retain failed rollback and stored defaults");
+    const auto reads = fake.gammaReads, writes = fake.gammaWrites, releases = fake.mutexReleases, registryWrites = fake.registryWrites;
+    const auto clocks = fake.backendClockReads;
+    const auto statistics = filter.statistics();
+    const auto error = std::string(filter.lastError());
+    const CurrentPreferencesSnapshot snapshot{{RedMode::LumaRed, LumaProfile::GreenDetail, BackendPreference::Magnification, 17,
+        ShortcutProfile::F9, ExpiryWarning::OneMinute}, true, true, PreferenceSource::Defaults, true};
+    Check(CopyCurrentPreferencesJsonToClipboard(nullptr, snapshot) && std::wstring_view(fake.clipMemory.data()).find(L"\"mode\":\"luma\"") != std::wstring_view::npos &&
+        std::wstring_view(fake.clipMemory.data()).find(L"\"backend\":\"magnification\"") != std::wstring_view::npos &&
+        filter.redMode() == RedMode::StrictRed && !filter.isActive() && filter.needsRestore() && fake.mutexOwned && error == filter.lastError() &&
+        fake.gammaReads == reads && fake.gammaWrites == writes && fake.mutexReleases == releases && fake.registryReads == 0 && fake.registryWrites == registryWrites &&
+        fake.backendClockReads == clocks && filter.statistics() == statistics,
+        "exported preferred choices stay distinct from effective gamma while snapshot/calibration/error/ownership/counters remain untouched");
+    Check(filter.disable(), "original calibration remains recoverable after current preference export");
 }
 void ClipboardAllocationAndOpenFailures() {
     fake.clipAllocate = false;
@@ -3768,7 +3877,8 @@ void ExpertDiagnosticsMenuLayoutAndOwnership() {
     Check(root && FakeMenuCommand(root, ID_TRAY_RESTORE) && FakeMenuCommand(root, ID_TRAY_TOGGLE), "primary display/recovery actions remain directly available");
     const auto expert = FakeMenuChild(root, "&Expert controls");
     const auto diagnostics = FakeMenuChild(expert, "Dia&gnostics");
-    Check(expert && diagnostics && FakeMenuCommand(expert, ID_TRAY_SAVE_PREFERENCES) && FakeMenuCommand(expert, ID_TRAY_IMPORT_PROFILE),
+    Check(expert && diagnostics && FakeMenuCommand(expert, ID_TRAY_SAVE_PREFERENCES) && FakeMenuCommand(expert, ID_TRAY_IMPORT_PROFILE) &&
+        FakeMenuCommand(expert, ID_TRAY_COPY_PREFERENCES_JSON) && !FakeMenuCommand(diagnostics, ID_TRAY_COPY_PREFERENCES_JSON),
         "expert choices and preference transfer remain distinct from the diagnostic submenu");
     for (const auto id : {ID_TRAY_VERIFY_BACKEND, ID_TRAY_COPY_REPORT, ID_TRAY_COPY_STATUS_JSON, ID_TRAY_COPY_RECENT_DIAGNOSTICS, ID_TRAY_CLEAR_RECENT_DIAGNOSTICS, ID_TRAY_REFRESH_DISPLAY_CONTEXT, ID_TRAY_RETRY_LOGGING, ID_TRAY_RETRY_SESSION,
         ID_TRAY_RETRY_SHORTCUTS, ID_TRAY_RESET_BACKEND_COUNTS, ID_TRAY_CLEAR_RESTORATION_HISTORY})
@@ -4519,6 +4629,9 @@ int main() {
         {"Luma preset output", LumaPresetOutput}, {"Luma preset failure/restoration", LumaPresetFailureAndRestore},
         {"Luma preset strict/gamma behavior", LumaPresetInStrictModeAndGamma},
         {"Support report states", SupportReportStates}, {"Support report diagnostic retention snapshot", SupportReportDiagnosticRetentionSnapshot},
+        {"Shared preference JSON canonical/bounds", SharedPreferencesJsonCanonicalAndBounds}, {"Current preference JSON scope/clipboard", CurrentPreferencesJsonScopeAndClipboard},
+        {"Current preference JSON invalid snapshot", CurrentPreferencesJsonInvalidSnapshotBeforeMutation}, {"Current preference JSON allocation behavior", CurrentPreferencesJsonAllocationBehavior},
+        {"Current preference JSON native failure ownership", CurrentPreferencesJsonNativeFailureOwnership}, {"Current preference JSON retains gamma recovery", CurrentPreferencesJsonPreservesGammaRecovery},
         {"Clipboard allocation/open failures", ClipboardAllocationAndOpenFailures},
         {"Clipboard ownership transfer", ClipboardTransferOwnership}, {"Clipboard conversion failure", ClipboardConversionFailure},
         {"Preference profile round trip", PreferenceProfileRoundTrip}, {"Preference profile validation", PreferenceProfileStrictValidation},

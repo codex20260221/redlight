@@ -31,6 +31,7 @@ inline bool CommandMayChangeFilter(unsigned command, bool supportsLuma = true) n
     case ID_TRAY_REFRESH_DISPLAY_CONTEXT:
     case ID_TRAY_COPY_RECENT_DIAGNOSTICS:
     case ID_TRAY_CLEAR_RECENT_DIAGNOSTICS:
+    case ID_TRAY_COPY_PREFERENCES_JSON:
         return false;
     default:
         return true;

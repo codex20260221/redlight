@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Added Expert Copy current preferences JSON with in-memory choices, unsaved/busy state and historical startup-load context, sharing a bounded canonical preference formatter with saved/offline JSON and preserving clipboard ownership/backend state without storage reads or preference writes.
 - Show input/canonical schema and exact older-version default choices in clipboard-import confirmations, share schema-default policy with parsing/offline validation, pin historical defaults, and reject inconsistent provenance before confirmation or mutation.
 - Added static portable-release DLL policy checks alongside the KERNEL32-only code-test gate, sharing strict dependency/import-table agreement, covering delayed/nonstandard-name imports, and adding synthetic parser/policy code tests to local tooling and CI without executing inspected binaries.
 - Added cached retained/capacity/overwritten diagnostic-memory counts to support reports through an allocation-free, separately locked snapshot, distinguishing empty/unreported history and keeping memory rollover independent of missing-file-record health.

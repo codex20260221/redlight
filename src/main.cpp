@@ -37,6 +37,7 @@
 #include "LumaPreference.h"
 #include "RecentDiagnosticsClipboard.h"
 #include "TrayCommand.h"
+#include "PreferencesClipboard.h"
 #include "StandardOutput.h"
 #include <cstdio>
 #include <optional>
@@ -1342,6 +1343,16 @@ LRESULT HandleWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             break;
         case ID_TRAY_VERIFY_BACKEND: VerifyBackendState(hwnd); break;
         case ID_TRAY_COPY_PROFILE: CopySettingsProfile(hwnd); break;
+        case ID_TRAY_COPY_PREFERENCES_JSON: {
+            const CurrentPreferencesSnapshot snapshot{g_preferences, g_preferencesUnsaved, g_busy || g_preferencesApplying || g_pendingRestore,
+                g_startupPreferenceSource, g_startupPreferenceWarning};
+            if (!CopyCurrentPreferencesJsonToClipboard(hwnd, snapshot)) ReportError("The current preference JSON could not be copied. Please retry.");
+            else {
+                Diagnostics::Log("Current in-memory preference JSON copied at user request.");
+                ShowTrayInfo("RedLight preference JSON copied", "Paste for inspection or scripts. Use the settings profile text for importing.");
+            }
+            break;
+        }
         case ID_TRAY_IMPORT_PROFILE: ImportSettingsProfile(hwnd); break;
         case ID_TRAY_RESET_PREFERENCES: ConfirmPreferences(hwnd, AppPreferences{}, "Reset RedLight preferences to defaults"); break;
         case ID_TRAY_EXIT:

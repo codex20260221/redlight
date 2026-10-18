@@ -2,6 +2,7 @@
 #include "PreferencesStore.h"
 #include "StandardOutput.h"
 #include "Diagnostics.h"
+#include "PreferencesJson.h"
 #include <cstdio>
 
 namespace {
@@ -18,13 +19,13 @@ int QuerySavedSettings() noexcept {
             Diagnostics::Log("Saved-settings query refused unreadable or invalid storage.");
             return WriteSettingsResult("{\"protocol\":1,\"status\":\"settings-error\",\"preferences\":null}\n", 1);
         }
-        const auto& value = loaded.preferences;
+        char preferences[PreferencesJsonBufferSize];
+        const auto value = FormatPreferencesJson(loaded.preferences, preferences);
+        if (!value) { Diagnostics::Log("Saved-settings preferences could not be formatted completely."); return 1; }
         char output[512];
         const int length = std::snprintf(output, sizeof(output),
-            "{\"protocol\":1,\"status\":\"saved-settings\",\"source\":\"%s\",\"profile_schema\":%u,\"preferences\":{"
-            "\"mode\":\"%s\",\"luma\":\"%s\",\"backend\":\"%s\",\"session_minutes\":%u,\"hotkeys\":\"%s\",\"expiry_warning\":\"%s\"}}\n",
-            PreferenceSourceToken(loaded.source), PreferencesProfileVersion, PreferenceModeToken(value.mode), PreferenceLumaToken(value.luma),
-            PreferenceBackendToken(value.backend), value.sessionMinutes, ShortcutProfileToken(value.shortcuts), ExpiryWarningToken(value.expiryWarning));
+            "{\"protocol\":1,\"status\":\"saved-settings\",\"source\":\"%s\",\"profile_schema\":%u,\"preferences\":%.*s}\n",
+            PreferenceSourceToken(loaded.source), PreferencesProfileVersion, static_cast<int>(value->size()), value->data());
         if (length < 0 || static_cast<std::size_t>(length) >= sizeof(output)) {
             Diagnostics::Log("Saved-settings result could not fit its checked output buffer; no output was written.");
             return 1;
