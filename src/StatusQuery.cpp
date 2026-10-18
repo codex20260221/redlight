@@ -12,9 +12,12 @@ int QueryRunningStatus() noexcept {
             return WriteStandardOutput("{\"protocol\":1,\"status\":\"not-running\",\"active\":false}\n") ? 3 : 1;
         }
         DWORD_PTR reply = 0;
+        SetLastError(ERROR_SUCCESS); // The API can fail without setting an error.
         if (!SendMessageTimeoutA(tray, WM_REDLIGHT_STATUS, REDLIGHT_STATUS_PROTOCOL, 0,
             SMTO_ABORTIFHUNG | SMTO_BLOCK, 3000, &reply)) {
-            Diagnostics::LogFormat("Status query failed or timed out (error %lu).", GetLastError());
+            const DWORD error = GetLastError();
+            if (error) Diagnostics::LogFormat("Status query failed or timed out (error %lu).", error);
+            else Diagnostics::Log("Status query failed or timed out; no native error code was provided.");
             WriteStandardOutput("{\"protocol\":1,\"status\":\"query-failed\",\"active\":false}\n");
             return 1;
         }

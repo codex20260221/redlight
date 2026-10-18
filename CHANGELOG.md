@@ -80,6 +80,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Support Unicode diagnostics paths and report log-write failures to the debugger.
 
 ### Fixed
+- Avoid stale Win32 error codes in both read-only tray-query diagnostics by clearing last-error before bounded sends, distinguishing generic failures, and capturing native errors before logging without changing JSON or exit contracts.
 - Require the PE executable-image flag and reject DLL-marked release artifacts, with static negative metadata fixtures that preserve the source binary and never execute inspected images.
 - Keep cached diagnostic file paths in bounded trivially destructible storage for late backend cleanup logging, validate every complete filename before cache mutation, preserve original paths through failed-close recovery, and report oversized cache inputs without truncation.
 - Correct custom time-limit deadline guidance for unchanged values, add Minutes/Apply/Cancel access keys and room for the explanation, and refocus/select invalid input with checked focus diagnostics for easier keyboard correction.

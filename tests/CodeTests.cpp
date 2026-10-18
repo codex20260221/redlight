@@ -50,6 +50,7 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <cstdarg>
 #include <cstring>
 #include <deque>
 #include <stdexcept>
@@ -98,6 +99,8 @@ struct Fake {
     int consoleAttaches = 0, consoleFrees = 0, stdoutLookups = 0, stdoutWrites = 0;
     std::string stdoutText;
     bool trayExists = true, statusMessage = true;
+    std::optional<DWORD> statusSendError;
+    DWORD statusErrorBeforeSend = 0;
     std::uint64_t statusReply = 0;
     unsigned statusSends = 0, statusMessageId = 0, statusFlags = 0, statusTimeout = 0;
     WPARAM statusWparam = 0;
@@ -130,6 +133,8 @@ struct Fake {
     unsigned stdoutWhileProfileOpen = 0;
     DWORD stdoutErrorMode = 0;
     bool diagnosticsClobbersError = false;
+    bool captureDiagnosticText = false;
+    std::array<char, 512> diagnosticText{};
     bool recentDiagnosticsAvailable = true;
     std::string recentDiagnosticsText;
     bool commandPost = true;
@@ -1306,6 +1311,38 @@ void CurrentPreferencesPacketRoundTrip() {
     for (unsigned minutes = 0; minutes <= 240; ++minutes) {
         CurrentPreferencesSnapshot value; value.preferences.sessionMinutes = minutes;
         Check(UnpackCurrentPreferences(*PackCurrentPreferences(value)) == value, "every supported whole-minute value survives packet encoding");
+    }
+}
+void QueryFailureWithoutNativeError() {
+    for (bool current : {false, true}) {
+        Reset(); fake.lastError = 0xbad; fake.statusMessage = false; fake.captureDiagnosticText = true;
+        fake.statusReply = current ? *PackCurrentPreferences({}) : *PackTrayStatus({});
+        Check((current ? QueryRunningPreferences() : QueryRunningStatus()) == 1 && fake.statusErrorBeforeSend == ERROR_SUCCESS &&
+            std::string_view(fake.diagnosticText.data()).find("no native error code was provided") != std::string_view::npos &&
+            fake.stdoutText.find("\"status\":\"query-failed\"") != std::string::npos,
+            "a failed send that supplies no error cannot inherit a stale code or accept an otherwise valid reply");
+        Check(fake.magInitializes == 0 && fake.dcRequests == 0 && fake.registryReads == 0 && fake.instanceCreates == 0,
+            "generic query failure remains read-only without instance/storage/backend fallback");
+    }
+}
+void QueryFailurePreservesNativeError() {
+    for (bool current : {false, true}) for (DWORD error : {5ul, 1460ul, 1400ul}) {
+        Reset(); fake.lastError = 0xbad; fake.statusMessage = false; fake.statusSendError = error;
+        fake.captureDiagnosticText = true; fake.diagnosticsClobbersError = true;
+        char expected[64]; std::snprintf(expected, sizeof(expected), "(error %lu)", error);
+        Check((current ? QueryRunningPreferences() : QueryRunningStatus()) == 1 && fake.statusErrorBeforeSend == ERROR_SUCCESS &&
+            std::string_view(fake.diagnosticText.data()).find(expected) != std::string_view::npos && fake.lastError == ERROR_DISK_FULL &&
+            fake.stdoutText.find("\"status\":\"query-failed\"") != std::string::npos,
+            "native send error is captured before logging changes thread last-error and cannot change the JSON contract");
+    }
+}
+void QuerySuccessIgnoresLastError() {
+    for (bool current : {false, true}) {
+        Reset(); fake.statusSendError = ERROR_ACCESS_DENIED; fake.captureDiagnosticText = true;
+        fake.statusReply = current ? *PackCurrentPreferences({}) : *PackTrayStatus({});
+        Check((current ? QueryRunningPreferences() : QueryRunningStatus()) == 0 && fake.statusErrorBeforeSend == ERROR_SUCCESS &&
+            fake.diagnosticText[0] == '\0' && fake.stdoutText.find(current ? "\"status\":\"current-preferences\"" : "\"status\":\"off\"") != std::string::npos,
+            "a successful send accepts its validated reply even if native last-error is nonzero");
     }
 }
 void CurrentPreferencesPacketRejectsInvalidFields() {
@@ -4623,6 +4660,8 @@ HWND FindWindowA(const char*, const char*) { return fake.trayExists ? &fake : nu
 LRESULT SendMessageTimeoutA(HWND, unsigned message, WPARAM wparam, LPARAM lparam, unsigned flags, unsigned timeout, DWORD_PTR* reply) {
     ++fake.statusSends; fake.statusMessageId = message; fake.statusWparam = wparam; fake.statusLparam = lparam;
     fake.statusFlags = flags; fake.statusTimeout = timeout; *reply = fake.statusReply;
+    fake.statusErrorBeforeSend = fake.lastError;
+    if (fake.statusSendError) fake.lastError = *fake.statusSendError;
     return fake.statusMessage;
 }
 HDC GetDC(HWND) { ++fake.dcRequests; return fake.dc ? &fake : nullptr; }
@@ -4731,8 +4770,17 @@ BOOL UnregisterHotKey(HWND, int id) {
     return 1;
 }
 namespace Diagnostics {
-void Log(const char*) noexcept {}
-void LogFormat(const char*, ...) noexcept { if (fake.diagnosticsClobbersError) fake.lastError = ERROR_DISK_FULL; }
+void Log(const char* message) noexcept {
+    if (fake.captureDiagnosticText) std::snprintf(fake.diagnosticText.data(), fake.diagnosticText.size(), "%s", message);
+}
+void LogFormat(const char* format, ...) noexcept {
+    if (fake.captureDiagnosticText) {
+        va_list arguments; va_start(arguments, format);
+        std::vsnprintf(fake.diagnosticText.data(), fake.diagnosticText.size(), format, arguments);
+        va_end(arguments);
+    }
+    if (fake.diagnosticsClobbersError) fake.lastError = ERROR_DISK_FULL;
+}
 std::optional<std::string> RecentLogText() noexcept {
     try { return fake.recentDiagnosticsAvailable ? std::optional<std::string>(fake.recentDiagnosticsText) : std::nullopt; }
     catch (...) { return std::nullopt; }
@@ -4785,6 +4833,8 @@ int main() {
         {"Conservative status JSON", StatusJsonConservativeStates}, {"Standard output ownership", StandardOutputOwnership},
         {"Standard output failures", StandardOutputFailures}, {"Existing-instance status query", StatusQueryExistingInstanceOnly},
         {"Status query failures", StatusQueryFailures},
+        {"Query failure without native error", QueryFailureWithoutNativeError}, {"Query failure preserves native error", QueryFailurePreservesNativeError},
+        {"Query success ignores last-error", QuerySuccessIgnoresLastError},
         {"Current preferences packet round-trip", CurrentPreferencesPacketRoundTrip}, {"Current preferences invalid packet fields", CurrentPreferencesPacketRejectsInvalidFields},
         {"Current preferences packet family/schema/reserved", CurrentPreferencesPacketFamilySchemaAndReservedBits}, {"Current preferences query existing/missing", CurrentPreferencesQueryExistingAndMissing},
         {"Current preferences query/output failures", CurrentPreferencesQueryFailuresAndOutput}, {"Current preferences query allocation/read-only policy", CurrentPreferencesQueryNoAllocationAndReadOnlyPolicy},

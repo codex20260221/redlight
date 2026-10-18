@@ -17,10 +17,12 @@ int QueryRunningPreferences() noexcept {
         const HWND tray = FindWindowA("RedLight.TrayWindow", "RedLight");
         if (!tray) return WritePreferenceQuery("{\"protocol\":1,\"status\":\"not-running\",\"preferences\":null}\n", 3);
         DWORD_PTR reply = 0;
+        SetLastError(ERROR_SUCCESS); // The API can fail without setting an error.
         if (!SendMessageTimeoutA(tray, WM_REDLIGHT_PREFERENCES, REDLIGHT_PREFERENCES_PROTOCOL, 0,
             SMTO_ABORTIFHUNG | SMTO_BLOCK, 3000, &reply)) {
             const DWORD error = GetLastError();
-            Diagnostics::LogFormat("Current preference query failed or timed out (error %lu).", error);
+            if (error) Diagnostics::LogFormat("Current preference query failed or timed out (error %lu).", error);
+            else Diagnostics::Log("Current preference query failed or timed out; no native error code was provided.");
             return WritePreferenceQuery("{\"protocol\":1,\"status\":\"query-failed\",\"preferences\":null}\n", 1);
         }
         const auto snapshot = UnpackCurrentPreferences(static_cast<std::uint64_t>(reply));
