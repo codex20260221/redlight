@@ -24,6 +24,7 @@
 #include "ProfileComparison.h"
 #include "ProfileSave.h"
 #include "SavedSettings.h"
+#include "CommandHelp.h"
 #include "InstanceName.h"
 #include "JsonString.h"
 #include "BackendComparison.h"
@@ -3074,6 +3075,69 @@ void GammaEndpointDiagnosticsDoNotApplyToMatrices() {
     Check(BuildSupportReport(state).find("Red black endpoint mismatch:") == std::string::npos,
         "matrix reports do not display irrelevant gamma endpoint fields");
 }
+void CommandHelpCompleteOutputAndIsolation() {
+    fake.stdoutChunk = 11;
+    Check(WriteCommandLineHelp("0.6.0-rc.1") == 0 && fake.stdoutText.starts_with("RedLight 0.6.0-rc.1\n\nUsage: RedLight.exe [option]\n") &&
+        fake.stdoutText.ends_with("See README for JSON fields, exit codes, and PowerShell examples.\n"),
+        "text help writes the complete native-help body with version and a final newline through partial writes");
+    for (const auto option : {"--restore", "--reset-display", "--help-text", "--version", "--build-info", "--settings", "--status", "--validate-profile=<file>",
+        "--normalize-profile=<file>", "--compare-profile=<file>", "--save-profile=<file>", "--export-profile", "--backend=auto|magnification|gamma"})
+        Check(fake.stdoutText.find(option) != std::string::npos, "shared text/native help includes every public action");
+    Check(fake.registryReads == 0 && fake.registryWrites == 0 && fake.instanceCreates == 0 && fake.metricReads == 0 && fake.profileOpens == 0 &&
+        fake.magInitializes == 0 && fake.dcRequests == 0 && fake.statusSends == 0 && fake.clipOpens == 0 && fake.hotkeyRegisters == 0,
+        "help output does no settings, instance, metrics, profile file, backend, tray-query, clipboard, or shortcut work");
+}
+void CommandHelpBoundsAndNativeTermination() {
+    char output[CommandHelpBufferSize];
+    const auto text = FormatCommandLineHelp("0.6.0-rc.1", output);
+    Check(text.has_value(), "prepare full shared help");
+    const auto length = text->size();
+    const auto exact = FormatCommandLineHelp("0.6.0-rc.1", std::span<char>(output, length + 1));
+    Check(exact && exact->size() == length && output[length] == '\0', "exact fit includes the native-dialog NUL terminator");
+    Check(!FormatCommandLineHelp("0.6.0-rc.1", std::span<char>(output, length)) && !FormatCommandLineHelp("0.6.0-rc.1", {}),
+        "incomplete/absent buffers cannot be returned as complete text help");
+}
+void CommandHelpRejectsMalformedVersionBeforeOutput() {
+    for (const auto& invalid : {std::string{}, std::string(129, 'v'), std::string("v\0x", 3), std::string("v\nextra"), std::string("v\x7f"), std::string("\xff")}) {
+        Reset();
+        Check(WriteCommandLineHelp(invalid) == 1 && fake.stdoutLookups == 0 && fake.stdoutText.empty(),
+            "empty/oversized/control/NUL/invalid-UTF8 version fields are rejected before output");
+    }
+    Reset();
+    Check(WriteCommandLineHelp("nightly-\xc3\xa9") == 0 && fake.stdoutText.starts_with("RedLight nightly-\xc3\xa9\n"), "valid Unicode build labels remain UTF-8");
+}
+void CommandHelpOutputFailures() {
+    fake.stdoutChunk = 5; fake.stdoutFailOnCall = 2;
+    Check(WriteCommandLineHelp("v") == 1 && fake.stdoutText.size() == 5, "interrupted help output is a failure with only its written prefix");
+    Reset(); fake.stdoutZeroWrite = true;
+    Check(WriteCommandLineHelp("v") == 1 && fake.stdoutText.empty(), "zero-progress help writes cannot loop or report success");
+    Reset(); fake.stdoutValid = false; fake.consoleAttach = false;
+    Check(WriteCommandLineHelp("v") == 1 && fake.stdoutText.empty(), "no output/parent console fails without falling back to a dialog");
+}
+void CommandHelpNoCppAllocation() {
+    fake.stdoutText.reserve(CommandHelpBufferSize);
+    int result = 1; bool allocationUnused = false;
+    {
+        TestMemory::FailNextAllocation fail;
+        result = WriteCommandLineHelp("0.6.0-rc.1");
+        allocationUnused = TestMemory::AllocationFailurePending();
+    }
+    Check(result == 0 && allocationUnused && fake.stdoutText.ends_with("examples.\n"), "complete help preparation/output requires no C++ heap allocation");
+}
+void CommandHelpStandaloneArgumentPolicy() {
+    const std::wstring_view args[] = {L"--help-text"};
+    const auto options = ParseStartupOptions(args);
+    Check(options.action == StartupAction::HelpText && options.errorOutput == StartupErrorOutput::LogOnly && !options.backendOverride && options.profilePath.empty(),
+        "plain-text help is an explicit standalone noninteractive action");
+    const std::wstring_view malformed[] = {L"--help-text=extra"}, combined[] = {L"--help-text", L"--backend=gamma"}, json[] = {L"--help-text", L"--status"};
+    Check(ParseStartupOptions(malformed).action == StartupAction::Invalid && ParseStartupOptions(malformed).errorOutput == StartupErrorOutput::LogOnly &&
+        ParseStartupOptions(combined).action == StartupAction::Invalid && ParseStartupOptions(combined).errorOutput == StartupErrorOutput::LogOnly &&
+        ParseStartupOptions(json).action == StartupAction::Invalid && ParseStartupOptions(json).errorOutput == StartupErrorOutput::Json,
+        "invalid text-help requests remain noninteractive and preserve shared JSON error precedence");
+    fake.argumentsCount = 2; fake.arguments[1] = const_cast<LPWSTR>(L"--help-text");
+    Check(GetStartupOptions().action == StartupAction::HelpText && !fake.argumentsOutstanding && fake.argumentFrees == 1,
+        "native text-help argv ownership is released");
+}
 } // namespace
 
 DWORD GetLastError() { return fake.lastError; }
@@ -3449,6 +3513,9 @@ int main() {
         {"Gamma strict endpoints/restoration tolerance", GammaStrictEndpointsAndRestorationTolerance}, {"Gamma endpoint activation refusal/rollback", GammaEndpointActivationRefusalRollsBack},
         {"Gamma endpoint failed rollback ownership", GammaEndpointFailedRollbackRetainsOriginalOwnership}, {"Gamma endpoint read-only verification/report", GammaEndpointVerificationIsReadOnlyAndReported},
         {"Gamma endpoint/matrix diagnostic separation", GammaEndpointDiagnosticsDoNotApplyToMatrices},
+        {"Shared command help output/isolation", CommandHelpCompleteOutputAndIsolation}, {"Command help buffer bounds/termination", CommandHelpBoundsAndNativeTermination},
+        {"Command help malformed version rejection", CommandHelpRejectsMalformedVersionBeforeOutput}, {"Command help output failure", CommandHelpOutputFailures},
+        {"Command help without C++ allocation", CommandHelpNoCppAllocation}, {"Command help standalone arguments", CommandHelpStandaloneArgumentPolicy},
         {"Command line", Arguments}
     };
     int failed = 0;

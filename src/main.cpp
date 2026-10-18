@@ -20,6 +20,7 @@
 #include "InstanceName.h"
 #include "DisplayContext.h"
 #include "SavedSettings.h"
+#include "CommandHelp.h"
 #include "CommandIds.h"
 #include "TrayMenu.h"
 #include "SessionLimitDialog.h"
@@ -154,6 +155,11 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
         Diagnostics::Shutdown();
         return result;
     }
+    if (action == StartupAction::HelpText) {
+        const int result = WriteCommandLineHelp(REDLIGHT_VERSION);
+        Diagnostics::Shutdown();
+        return result;
+    }
     if (action == StartupAction::ValidateProfile) {
         const int result = ValidateSettingsProfileFile(options.profilePath.c_str());
         Diagnostics::Shutdown();
@@ -180,22 +186,18 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
         return result;
     }
     if (action == StartupAction::Help || action == StartupAction::Version || action == StartupAction::Invalid) {
-        const int shown = MessageBoxA(NULL, action == StartupAction::Version ? "RedLight " REDLIGHT_VERSION :
-            "RedLight " REDLIGHT_VERSION "\n\nUsage: RedLight.exe [option]\n\n"
-            "--restore / --reset-display: restore display colors\n"
-            "--help: show this help\n--version: show version\n"
-            "--build-info: report this binary's build metadata as JSON\n"
-            "--settings: report saved/default preferences as JSON\n"
-            "--status: report cached tray state as JSON without starting it\n"
-            "--validate-profile=<file>: validate a settings file offline (JSON)\n"
-            "--normalize-profile=<file>: write a canonical current-format profile\n"
-            "--compare-profile=<file>: compare with saved preferences (JSON)\n"
-            "--save-profile=<file>: explicitly save for next start (JSON)\n"
-            "--export-profile: write saved/default preferences as profile text\n"
-            "--backend=auto|magnification|gamma: one-start backend override\n\n"
-            "Without options, start in the tray with the filter off.\n"
-            "Default shortcuts: Ctrl+Alt+R toggles; Ctrl+Alt+Shift+R restores.\n"
-            "Expert controls offers alternative shortcut profiles.",
+        char help[CommandHelpBufferSize];
+        const char* message = "RedLight " REDLIGHT_VERSION;
+        if (action != StartupAction::Version) {
+            if (!FormatCommandLineHelp(REDLIGHT_VERSION, help)) {
+                Diagnostics::Log("Startup help could not be formatted completely.");
+                Diagnostics::Shutdown();
+                return 1;
+            }
+            help[sizeof(help) - 1] = '\0';
+            message = help;
+        }
+        const int shown = MessageBoxA(NULL, message,
             action == StartupAction::Invalid ? "RedLight - invalid command line" : "RedLight",
             MB_OK | (action == StartupAction::Invalid ? MB_ICONERROR : MB_ICONINFORMATION));
         if (!shown) Diagnostics::LogFormat("MessageBox(startup information) failed (error %lu).", GetLastError());

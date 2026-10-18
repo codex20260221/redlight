@@ -5,7 +5,7 @@
 #include <string>
 #include <string_view>
 
-enum class StartupAction { Tray, Restore, Help, Version, BuildInfo, Settings, Status, ValidateProfile, NormalizeProfile, CompareProfile, SaveProfile, ExportProfile, Invalid, Failed };
+enum class StartupAction { Tray, Restore, Help, HelpText, Version, BuildInfo, Settings, Status, ValidateProfile, NormalizeProfile, CompareProfile, SaveProfile, ExportProfile, Invalid, Failed };
 enum class StartupErrorOutput { Dialog, Json, LogOnly };
 struct StartupOptions {
     StartupAction action = StartupAction::Tray;
@@ -20,7 +20,7 @@ inline StartupOptions ParseStartupOptions(std::span<const std::wstring_view> arg
             arg.starts_with(L"--compare-profile") || arg.starts_with(L"--save-profile") || arg.starts_with(L"--settings");
     });
     const bool quietText = std::any_of(args.begin(), args.end(), [](std::wstring_view arg) {
-        return arg.starts_with(L"--export-profile") || arg.starts_with(L"--normalize-profile");
+        return arg.starts_with(L"--export-profile") || arg.starts_with(L"--normalize-profile") || arg.starts_with(L"--help-text");
     });
     const auto errorOutput = jsonErrors ? StartupErrorOutput::Json : (quietText ? StartupErrorOutput::LogOnly : StartupErrorOutput::Dialog);
     const auto invalid = [&] { return StartupOptions{StartupAction::Invalid, std::nullopt, {}, errorOutput}; };
@@ -28,6 +28,7 @@ inline StartupOptions ParseStartupOptions(std::span<const std::wstring_view> arg
     const auto arg = args[0];
     if (arg == L"--restore" || arg == L"--reset-display") return {StartupAction::Restore, std::nullopt};
     if (arg == L"--help" || arg == L"-h" || arg == L"/?") return {StartupAction::Help, std::nullopt};
+    if (arg == L"--help-text") return {StartupAction::HelpText, std::nullopt, {}, StartupErrorOutput::LogOnly};
     if (arg == L"--version") return {StartupAction::Version, std::nullopt};
     if (arg == L"--build-info") return {StartupAction::BuildInfo, std::nullopt, {}, StartupErrorOutput::Json};
     if (arg == L"--settings") return {StartupAction::Settings, std::nullopt, {}, StartupErrorOutput::Json};

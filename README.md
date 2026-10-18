@@ -70,6 +70,8 @@ To install RedLight, follow these steps:
 ## Usage
 After starting RedLight, an icon appears in the system tray with the filter off.
 
+For terminal help, use `RedLight.exe --help-text`. It writes the same versioned help body as the native `--help` dialog to standard output, with no dialog or tray/backend/settings initialization. In PowerShell, `& .\RedLight.exe --help-text | Out-String` waits for this GUI executable to finish. Exit codes are `0` for complete help, `1` for formatting/output failure, and `2` for invalid arguments. Malformed text-help requests log errors without opening a dialog; discard partial output after failure. `--help`, `-h`, and `/?` keep their native help dialog, and `--version` keeps its version dialog.
+
 | Control | Action |
 | --- | --- |
 | Left-click, Enter, or Space on the tray icon | Toggle the filter |

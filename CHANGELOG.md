@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Added noninteractive `--help-text` standard output sharing a bounded, versioned UTF-8 help body with the native help dialog, with checked termination, partial-output failures, allocation-free C++ preparation, and unchanged native help/version behavior.
 - Added read-only `--settings` JSON for persisted/default preferences and storage source, sharing canonical profile tokens, supporting older/legacy records without migration, and refusing corrupt/unreadable storage instead of reporting successful fallback defaults.
 - Added cached logical Windows display context to support reports and diagnostics: visible monitor count, virtual desktop metrics, raw remote-session indication, capture reason/age, and explicit refresh failure with prior successful data retained; captures follow restoration handling and report viewing remains read-only.
 - Added explicit `--save-profile=<file>` JSON for next-start configuration, validating/closing bounded input before a shared same-session instance guard and one complete settings write, refusing existing owners, preserving saved truth through cleanup/output failures, and supporting corrupt-record repair without backend/tray initialization.
