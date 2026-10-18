@@ -25,6 +25,8 @@ struct Fake {
     bool failMove = false, failSize = false, failWrite = false, shortWrite = false, failClose = false, failFlush = false;
     std::string lastDebug;
     unsigned writes = 0;
+    bool snapshotDuringWrite = false, clearDuringWrite = false;
+    bool snapshotDuringWriteSucceeded = false, clearDuringWriteSucceeded = false;
 } fake;
 thread_local DWORD lastError = 0;
 std::wstring Path(unsigned archive = 0) {
@@ -291,6 +293,31 @@ void RecentLogConcurrentClearAndSnapshots() {
         final->find("Earlier records overwritten: 0") != std::string::npos && std::count(bytes.begin(), bytes.end(), '\n') == 100 &&
         Diagnostics::GetStatus().droppedLines == 0, "concurrent clear/snapshot/write operations remain synchronized and never remove file records");
 }
+void RecentLogSnapshotWhileFileWriteOwnsLock() {
+    Diagnostics::Initialize();
+    fake.snapshotDuringWrite = true;
+    Diagnostics::Log("snapshot inside pending file write");
+    Check(fake.snapshotDuringWriteSucceeded && fake.writes == 1 && Diagnostics::GetStatus().file == Diagnostics::FileState::Available &&
+        Diagnostics::RecentLogText()->find("snapshot inside pending file write") != std::string::npos,
+        "memory snapshot succeeds from a fake I/O hook while production file serialization is still locked");
+}
+void RecentLogClearWhileFileWriteOwnsLock() {
+    Diagnostics::Initialize();
+    Diagnostics::Log("record before the I/O hook");
+    fake.snapshotDuringWrite = true; fake.clearDuringWrite = true;
+    Diagnostics::Log("snapshot inside pending file write");
+    const auto text = Diagnostics::RecentLogText();
+    const auto& bytes = fake.files.at(Path())->bytes;
+    Check(fake.snapshotDuringWriteSucceeded && fake.clearDuringWriteSucceeded && text &&
+        text->find("Retained records: 0/32") != std::string::npos && text->find("Earlier records overwritten: 0") != std::string::npos &&
+        fake.writes == 2 && std::count(bytes.begin(), bytes.end(), '\n') == 2 && Diagnostics::GetStatus().droppedLines == 0,
+        "memory clear/snapshot finish while file I/O owns its lock, without losing either serialized file record");
+    fake.snapshotDuringWrite = false; fake.clearDuringWrite = false;
+    fake.failWrite = true;
+    Diagnostics::Log("later file failure remains visible");
+    Check(Diagnostics::RecentLogText()->find("diagnostics write failed") != std::string::npos && Diagnostics::GetStatus().droppedLines == 1,
+        "file-error paths can safely record fresh memory warnings with the separate lock");
+}
 Handle* OpenHandle(HANDLE raw) {
     if (!raw || raw == INVALID_HANDLE_VALUE) { lastError = ERROR_INVALID_HANDLE; return nullptr; }
     auto* handle = static_cast<Handle*>(raw);
@@ -343,6 +370,15 @@ BOOL GetFileSizeEx(HANDLE raw, LARGE_INTEGER* size) {
 }
 BOOL WriteFile(HANDLE raw, const void* bytes, DWORD length, DWORD* written, void*) {
     auto* handle = OpenHandle(raw); if (!handle) return 0;
+    if (fake.snapshotDuringWrite) {
+        const auto text = Diagnostics::RecentLogText();
+        fake.snapshotDuringWriteSucceeded = text && text->find("snapshot inside pending file write") != std::string::npos;
+    }
+    if (fake.clearDuringWrite) {
+        Diagnostics::ClearRecentLog();
+        const auto text = Diagnostics::RecentLogText();
+        fake.clearDuringWriteSucceeded = text && text->find("Retained records: 0/32") != std::string::npos;
+    }
     if (fake.failWrite) { lastError = ERROR_DISK_FULL; *written = 0; return 0; }
     const DWORD amount = fake.shortWrite && length ? length - 1 : length;
     const auto* data = static_cast<const char*>(bytes);
@@ -366,7 +402,9 @@ int main() {
         {"Recent log truncation/Unicode", RecentLogTruncationAndUnicode}, {"Recent log allocation failure", RecentLogPreparationFailure},
         {"Recent log concurrent snapshots", RecentLogConcurrentSnapshots},
         {"Recent log clear preserves file/health", RecentLogClearPreservesFileAndHealth}, {"Recent log clear with unavailable storage", RecentLogClearPreservesUnavailableStorage},
-        {"Recent log concurrent clear/snapshots", RecentLogConcurrentClearAndSnapshots}
+        {"Recent log concurrent clear/snapshots", RecentLogConcurrentClearAndSnapshots},
+        {"Recent log snapshot during locked file I/O", RecentLogSnapshotWhileFileWriteOwnsLock},
+        {"Recent log clear during locked file I/O", RecentLogClearWhileFileWriteOwnsLock}
     };
     int failures = 0;
     for (const auto& [name, run] : tests) {

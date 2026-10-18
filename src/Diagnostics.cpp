@@ -10,6 +10,7 @@ namespace {
 HANDLE g_logFile = INVALID_HANDLE_VALUE;
 bool g_initialized = false;
 SRWLOCK g_lock = SRWLOCK_INIT;
+SRWLOCK g_recentLock = SRWLOCK_INIT;
 std::array<std::wstring, 4> g_paths;
 Diagnostics::Status g_status;
 RecentDiagnosticsBuffer g_recent;
@@ -17,9 +18,17 @@ constexpr ULONGLONG kMaxLogSizeBytes = 1ull << 20;
 constexpr std::size_t kMessageLimit = 1900;
 
 struct Guard {
-    Guard() noexcept { AcquireSRWLockExclusive(&g_lock); }
-    ~Guard() { ReleaseSRWLockExclusive(&g_lock); }
+    explicit Guard(SRWLOCK& target = g_lock) noexcept : target_(target) { AcquireSRWLockExclusive(&target_); }
+    ~Guard() { ReleaseSRWLockExclusive(&target_); }
+    Guard(const Guard&) = delete;
+    Guard& operator=(const Guard&) = delete;
+private:
+    SRWLOCK& target_;
 };
+void RecordRecent(std::string_view line) noexcept {
+    Guard guard(g_recentLock);
+    g_recent.append(line);
+}
 std::wstring BuildLogDirectory(DWORD* failure = nullptr) {
     std::wstring directory(32768, L'\0');
     const DWORD length = GetEnvironmentVariableW(L"LOCALAPPDATA", directory.data(), static_cast<DWORD>(directory.size()));
@@ -47,7 +56,7 @@ void FileFailure(const char* action, DWORD error) noexcept {
     if (changed) {
         char text[256];
         std::snprintf(text, sizeof(text), "RedLight: diagnostics %s failed (error %lu); continuing with memory and debugger output.\n", action, error);
-        g_recent.append(text);
+        RecordRecent(text);
         OutputDebugStringA(text);
     }
 }
@@ -120,8 +129,10 @@ void WriteLine(const char* message, bool formatTruncated = false) noexcept {
         OutputDebugStringA("RedLight: diagnostics line formatting failed.\n");
         return;
     }
+    // Release the memory lock before waiting for file serialization. No path
+    // holds the memory lock while acquiring the file lock or performing I/O.
+    RecordRecent(std::string_view(line, static_cast<std::size_t>(length)));
     Guard guard;
-    g_recent.append(std::string_view(line, static_cast<std::size_t>(length)));
     OutputDebugStringA(line);
     if (!g_initialized) return;
     if (truncated) ++g_status.truncatedLines;
@@ -143,12 +154,12 @@ void WriteLine(const char* message, bool formatTruncated = false) noexcept {
 namespace Diagnostics {
 std::wstring LogDirectory() { return BuildLogDirectory(); }
 Status GetStatus() noexcept { Guard guard; return g_status; }
-void ClearRecentLog() noexcept { Guard guard; g_recent.clear(); }
+void ClearRecentLog() noexcept { Guard guard(g_recentLock); g_recent.clear(); }
 std::optional<std::string> RecentLogText() noexcept {
     try {
         // Allocate before taking the logger lock; snapshot construction does no I/O/logging.
         std::string text(RecentDiagnosticsBuffer::maximumTextBytes, '\0');
-        Guard guard;
+        Guard guard(g_recentLock);
         const auto formatted = g_recent.format(text);
         if (!formatted) return std::nullopt;
         text.resize(formatted->size());
@@ -158,7 +169,7 @@ std::optional<std::string> RecentLogText() noexcept {
 void Initialize() noexcept {
     Guard guard;
     if (g_initialized) return;
-    g_recent.clear();
+    { Guard recentGuard(g_recentLock); g_recent.clear(); }
     g_status = {};
     g_initialized = true;
     try {
