@@ -854,6 +854,8 @@ void CopySupportReport(HWND owner) {
     state.restoreHotkey = g_hotkeys.restore().has_value();
     state.shortcutProfile = ShortcutProfileName(g_preferences.shortcuts);
     state.shortcutProfileApplied = g_hotkeys.matches(g_preferences.shortcuts);
+    state.shortcutFailure = g_hotkeys.lastFailure();
+    state.shortcutRollbackIncomplete = g_hotkeys.rollbackIncomplete();
     if (g_hotkeys.toggle()) state.toggleBinding = ShortcutBindingName(*g_hotkeys.toggle());
     if (g_hotkeys.restore()) state.restoreBinding = ShortcutBindingName(*g_hotkeys.restore());
     state.sessionNotifications = g_sessionNotifications.isRegistered();
@@ -986,17 +988,24 @@ void VerifyBackendState(HWND owner) {
 void ShowAboutDialog(HWND parent) {
     char aboutText[2048];
     char sessionRecovery[96];
+    char shortcutError[160];
     char verificationTiming[128];
     const auto verificationAge = g_verification.ageSeconds(GetTickCount64());
     if (verificationAge) sprintf_s(verificationTiming, "%llu seconds ago (%llu ms)",
         static_cast<unsigned long long>(*verificationAge),
         static_cast<unsigned long long>(g_verification.durationMilliseconds().value_or(0)));
     else strcpy_s(verificationTiming, "Not checked since last filter operation");
+    if (g_hotkeys.lastFailure()) {
+        const auto& failure = *g_hotkeys.lastFailure();
+        sprintf_s(shortcutError, "%s id %u, error %lu%s%s", ShortcutApiName(failure.operation), failure.id,
+            static_cast<unsigned long>(failure.errorCode), failure.duringRollback ? " during rollback" : "",
+            g_hotkeys.rollbackIncomplete() ? "; rollback incomplete" : "");
+    } else strcpy_s(shortcutError, "None");
     if (g_sessionNotifications.isRegistered()) strcpy_s(sessionRecovery, "Available");
     else sprintf_s(sessionRecovery, "Unavailable (error %lu); retry in Expert controls", g_sessionNotifications.lastError());
     const auto logging = Diagnostics::GetStatus();
     sprintf_s(aboutText, "RedLight " REDLIGHT_VERSION "\nBuild revision: " REDLIGHT_BUILD_REVISION " (" REDLIGHT_SOURCE_STATE ")\n\nBackend: %s\nStartup selection: %s%s\nNext start: %s\nMode: %s\nLuma detail: %s\nPreferred mode/detail: %s / %s\nStatus: %s\nVerification: %s\nLast check: %s\nSettings: %s\nStartup preferences: %s%s\n\n"
-        "Toggle shortcut: %s\nRestore shortcut: %s\nShortcut preference: %s\nShortcut preference applied: %s\nSession recovery: %s\nExpiry warning: %s\n\n"
+        "Toggle shortcut: %s\nRestore shortcut: %s\nShortcut preference: %s\nShortcut preference applied: %s\nLast shortcut error: %s\nSession recovery: %s\nExpiry warning: %s\n\n"
         "File logging: %s\nMissing file records: %llu\nTruncated records: %llu\nLast file error: %lu\n\n"
         "Logs: %%LOCALAPPDATA%%\\RedLight\nUnsigned release candidate\n"
         "github.com/michaelmawhinney/redlight",
@@ -1013,6 +1022,7 @@ void ShowAboutDialog(HWND parent) {
         g_hotkeys.restore() ? ShortcutBindingName(*g_hotkeys.restore()) : "Unavailable/disabled",
         ShortcutProfileName(g_preferences.shortcuts),
         g_hotkeys.matches(g_preferences.shortcuts) ? "Yes" : "No; retry in Expert controls",
+        shortcutError,
         sessionRecovery,
         ExpiryWarningName(g_preferences.expiryWarning),
         Diagnostics::FileStateName(logging.file), static_cast<unsigned long long>(logging.droppedLines),

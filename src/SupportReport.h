@@ -1,5 +1,6 @@
 #pragma once
 #include "DisplayFilter.h"
+#include "ShortcutDiagnostics.h"
 #include <cstdint>
 #include <optional>
 #include <sstream>
@@ -21,6 +22,8 @@ struct SupportReportState {
     bool startupPreferenceWarning = false;
     std::string_view shortcutProfile = "Default", toggleBinding = "none", restoreBinding = "none";
     bool shortcutProfileApplied = false;
+    std::optional<ShortcutApiFailure> shortcutFailure;
+    bool shortcutRollbackIncomplete = false;
     std::string_view fileLogging = "Not reported";
     std::uint64_t droppedLogLines = 0, truncatedLogLines = 0;
     std::uint32_t lastFileError = 0;
@@ -68,6 +71,13 @@ inline std::string BuildSupportReport(const SupportReportState& state) {
         << "\r\nControl restore requested: " << (state.restoreRequested ? "yes" : "no")
         << "\r\nShortcut preference: " << state.shortcutProfile
         << "\r\nShortcut preference applied: " << (state.shortcutProfileApplied ? "yes" : "no")
+        << "\r\nLast shortcut API failure: ";
+    if (state.shortcutFailure) {
+        const auto& failure = *state.shortcutFailure;
+        report << ShortcutApiName(failure.operation) << " (id " << failure.id << ", error " << failure.errorCode
+            << ", rollback " << (failure.duringRollback ? "yes" : "no") << ")";
+    } else report << "none";
+    report << "\r\nShortcut rollback incomplete: " << (state.shortcutRollbackIncomplete ? "yes" : "no")
         << "\r\nToggle shortcut: " << (state.toggleHotkey ? "registered" : "unavailable") << " (" << state.toggleBinding << ")"
         << "\r\nRestore shortcut: " << (state.restoreHotkey ? "registered" : "unavailable") << " (" << state.restoreBinding << ")"
         << "\r\nSession notifications: " << (state.sessionNotifications ? "registered" : "unavailable")

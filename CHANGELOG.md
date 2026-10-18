@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Added cached shortcut API/error/ID and rollback-failure details to About/support reports, preserving original error codes across logging and successful rollback while clearing diagnostics after healthy retries; actual binding ownership and retry behavior remain unchanged.
 - Added offline `--normalize-profile=<file>` to upgrade valid older profiles and standardize current-format output for comparison/backups, reusing checked bounded read-only input with no preference/backend changes and no stdout on invalid input or file failures.
 - Added monotonic age and inspection duration for the last explicit backend check in About/support reports and duration diagnostics, with absent-versus-zero timing, wrapped-clock handling, and result/timing invalidation together after filter operations; reporting remains read-only.
 - Added read-only `--build-info` JSON for the invoked binary's version, path-free source identity, platform, settings schema, and status protocol, with bounded allocation-free C++ preparation and noninteractive output failures before tray/backend/preferences initialization.

@@ -2,19 +2,23 @@
 #include "CommandIds.h"
 #include "Diagnostics.h"
 
-bool HotkeyManager::set(unsigned slot, const std::optional<ShortcutBinding>& target) {
+bool HotkeyManager::set(unsigned slot, const std::optional<ShortcutBinding>& target, bool rollback) {
     if (actual_[slot] == target) return true;
     const int id = static_cast<int>(slot == 0 ? ID_HOTKEY_TOGGLE : ID_HOTKEY_RESTORE);
     if (actual_[slot]) {
         if (!UnregisterHotKey(owner_, id)) {
-            Diagnostics::LogFormat("UnregisterHotKey(%d) failed (error %lu); keeping actual binding.", id, GetLastError());
+            const DWORD error = GetLastError();
+            failure_ = ShortcutApiFailure{ShortcutApiOperation::Unregister, static_cast<unsigned>(id), error, rollback};
+            Diagnostics::LogFormat("UnregisterHotKey(%d) failed (error %lu); keeping actual binding.", id, error);
             return false;
         }
         actual_[slot].reset();
     }
     if (target) {
         if (!RegisterHotKey(owner_, id, target->modifiers | MOD_NOREPEAT, target->key)) {
-            Diagnostics::LogFormat("RegisterHotKey(%d, %s) failed (error %lu).", id, ShortcutBindingName(*target), GetLastError());
+            const DWORD error = GetLastError();
+            failure_ = ShortcutApiFailure{ShortcutApiOperation::Register, static_cast<unsigned>(id), error, rollback};
+            Diagnostics::LogFormat("RegisterHotKey(%d, %s) failed (error %lu).", id, ShortcutBindingName(*target), error);
             return false;
         }
         actual_[slot] = target;
@@ -23,6 +27,8 @@ bool HotkeyManager::set(unsigned slot, const std::optional<ShortcutBinding>& tar
 }
 bool HotkeyManager::initialize(HWND owner, ShortcutProfile profile) {
     if (initialized_ || !IsValidShortcutProfile(static_cast<unsigned>(profile))) return false;
+    failure_.reset();
+    rollbackIncomplete_ = false;
     owner_ = owner;
     initialized_ = true;
     const auto wanted = ShortcutBindings(profile);
@@ -32,17 +38,22 @@ bool HotkeyManager::initialize(HWND owner, ShortcutProfile profile) {
 }
 bool HotkeyManager::change(ShortcutProfile profile) {
     if (!initialized_ || !IsValidShortcutProfile(static_cast<unsigned>(profile))) return false;
+    failure_.reset();
+    rollbackIncomplete_ = false;
     const auto before = actual_;
     const auto wanted = ShortcutBindings(profile);
     if (set(0, wanted[0]) && set(1, wanted[1])) return true;
-    const bool toggleRestored = set(0, before[0]);
-    const bool restoreRestored = set(1, before[1]);
-    Diagnostics::Log(toggleRestored && restoreRestored ? "Shortcut change failed; previous actual registrations restored." :
+    const bool toggleRestored = set(0, before[0], true);
+    const bool restoreRestored = set(1, before[1], true);
+    rollbackIncomplete_ = !toggleRestored || !restoreRestored;
+    Diagnostics::Log(!rollbackIncomplete_ ? "Shortcut change failed; previous actual registrations restored." :
         "Shortcut rollback incomplete; actual registrations remain tracked for recovery.");
     return false;
 }
 bool HotkeyManager::release() {
     if (!initialized_) return true;
+    failure_.reset();
+    rollbackIncomplete_ = false;
     const bool toggleReleased = set(0, std::nullopt);
     const bool restoreReleased = set(1, std::nullopt);
     if (toggleReleased && restoreReleased) { initialized_ = false; owner_ = NULL; }

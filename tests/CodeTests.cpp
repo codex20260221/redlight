@@ -62,6 +62,7 @@ struct Fake {
     std::map<int, ShortcutBinding> registeredHotkeys;
     std::deque<bool> hotkeyRegisterResults, hotkeyUnregisterResults;
     int hotkeyRegisters = 0, hotkeyUnregisters = 0;
+    DWORD hotkeyRegisterError = 1409, hotkeyUnregisterError = ERROR_ACCESS_DENIED;
     bool stdoutValid = true, stdoutInvalidHandle = false, consoleAttach = true, consoleFree = true, attachedOutputValid = true;
     bool stdoutWrite = true, stdoutZeroWrite = false, stdoutOverWrite = false;
     DWORD stdoutChunk = (std::numeric_limits<DWORD>::max)();
@@ -2046,6 +2047,71 @@ void ProfileNormalizationOwnedPathArguments() {
         Check(GetStartupOptions().action == StartupAction::Failed && !fake.argumentsOutstanding, "normalization path allocation failure frees native argv");
     }
 }
+void ShortcutFailureStartupAndRetryDiagnostics() {
+    HotkeyManager manager;
+    fake.hotkeyRegisterResults = {false, true}; fake.diagnosticsClobbersError = true;
+    Check(!manager.initialize(nullptr, ShortcutProfile::Default) && manager.lastFailure() ==
+        ShortcutApiFailure{ShortcutApiOperation::Register, ID_HOTKEY_TOGGLE, 1409, false} && !manager.rollbackIncomplete(),
+        "startup registration failure retains the API, binding ID, and original error despite later logging");
+    const auto failure = manager.lastFailure();
+    Check(!manager.change(static_cast<ShortcutProfile>(99)) && manager.lastFailure() == failure && manager.restore() && !manager.toggle(),
+        "invalid requests retain prior diagnostic and actual registrations without native calls");
+    Check(manager.change(ShortcutProfile::Default) && manager.matches(ShortcutProfile::Default) && !manager.lastFailure() && !manager.rollbackIncomplete(),
+        "successful selected-profile retry clears earlier failure details");
+    Check(manager.release(), "release startup-diagnostic registrations");
+}
+void ShortcutFailureSurvivesSuccessfulRollback() {
+    HotkeyManager manager;
+    Check(manager.initialize(nullptr, ShortcutProfile::Default), "prepare complete original shortcut profile");
+    fake.hotkeyRegisterResults = {true, false, true, true}; fake.diagnosticsClobbersError = true;
+    Check(!manager.change(ShortcutProfile::F10) && manager.matches(ShortcutProfile::Default) && !manager.rollbackIncomplete() && manager.lastFailure() ==
+        ShortcutApiFailure{ShortcutApiOperation::Register, ID_HOTKEY_RESTORE, 1409, false},
+        "successful rollback preserves the rejected change's cause without claiming recovery is incomplete");
+    const auto registrations = fake.hotkeyRegisters, unregistrations = fake.hotkeyUnregisters;
+    Check(manager.change(ShortcutProfile::Default) && !manager.lastFailure() && fake.hotkeyRegisters == registrations && fake.hotkeyUnregisters == unregistrations,
+        "a healthy no-op retry clears historical last-attempt diagnostics without duplicate registration");
+    Check(manager.release(), "release rollback-diagnostic registrations");
+}
+void ShortcutFailureRollbackAndRecoveryDiagnostics() {
+    HotkeyManager manager;
+    Check(manager.initialize(nullptr, ShortcutProfile::Default), "prepare rollback-failure diagnostic profile");
+    fake.hotkeyRegisterResults = {true, false, true}; fake.hotkeyUnregisterResults = {true, true, false}; fake.diagnosticsClobbersError = true;
+    Check(!manager.change(ShortcutProfile::F9) && manager.rollbackIncomplete() && manager.lastFailure() ==
+        ShortcutApiFailure{ShortcutApiOperation::Unregister, ID_HOTKEY_TOGGLE, ERROR_ACCESS_DENIED, true},
+        "a later rollback error is cached with its API, original code, and rollback phase");
+    Check(manager.toggle() == ShortcutBinding{3, 0x78} && manager.restore() == ShortcutBinding{7, 'R'},
+        "diagnostics preserve actual mixed bindings after rollback failure");
+    Check(manager.change(ShortcutProfile::Default) && !manager.lastFailure() && !manager.rollbackIncomplete() && manager.matches(ShortcutProfile::Default),
+        "recovery retry clears failed rollback diagnostics only after the actual pair is recovered");
+    Check(manager.release(), "release recovered diagnostic registrations");
+}
+void ShortcutFailureReleaseDiagnostics() {
+    HotkeyManager manager;
+    Check(manager.initialize(nullptr, ShortcutProfile::Default), "prepare cleanup diagnostics");
+    fake.hotkeyUnregisterResults = {false, true}; fake.diagnosticsClobbersError = true;
+    Check(!manager.release() && manager.toggle() && !manager.restore() && manager.lastFailure() ==
+        ShortcutApiFailure{ShortcutApiOperation::Unregister, ID_HOTKEY_TOGGLE, ERROR_ACCESS_DENIED, false} && !manager.rollbackIncomplete(),
+        "cleanup failures stay cached alongside the still-owned binding, distinct from rollback failures");
+    Check(manager.release() && !manager.lastFailure() && !manager.rollbackIncomplete() && fake.registeredHotkeys.empty(),
+        "successful cleanup retry clears its failure and releases actual ownership");
+}
+void ShortcutFailureSupportReportIsReadOnly() {
+    SupportReportState state;
+    Check(BuildSupportReport(state).find("Last shortcut API failure: none\r\nShortcut rollback incomplete: no") != std::string::npos,
+        "reports explicitly distinguish no API failure from incomplete shortcut selection");
+    state.active = true; state.needsRestore = true;
+    state.shortcutFailure = ShortcutApiFailure{ShortcutApiOperation::Unregister, ID_HOTKEY_TOGGLE, (std::numeric_limits<std::uint32_t>::max)(), true};
+    state.shortcutRollbackIncomplete = true;
+    auto report = BuildSupportReport(state);
+    Check(report.find("UnregisterHotKey (id 1, error 4294967295, rollback yes)") != std::string::npos &&
+        report.find("Shortcut rollback incomplete: yes") != std::string::npos && report.find("State: ON") != std::string::npos,
+        "full-width cached API details and rollback health do not change reported display state");
+    state.shortcutFailure = ShortcutApiFailure{ShortcutApiOperation::Register, ID_HOTKEY_RESTORE, 1409, false};
+    Check(BuildSupportReport(state).find("RegisterHotKey (id 2, error 1409, rollback no)") != std::string::npos,
+        "both native operations and forward failure phase remain distinguishable");
+    Check(fake.hotkeyRegisters == 0 && fake.hotkeyUnregisters == 0 && fake.magReads == 0 && fake.gammaReads == 0 && fake.registryReads == 0,
+        "cached shortcut diagnostics perform no registration, backend, or preference reads");
+}
 } // namespace
 
 DWORD GetLastError() { return fake.lastError; }
@@ -2241,7 +2307,7 @@ BOOL RegisterHotKey(HWND, int id, unsigned modifiers, unsigned key) {
     ++fake.hotkeyRegisters;
     bool success = true;
     if (!fake.hotkeyRegisterResults.empty()) { success = fake.hotkeyRegisterResults.front(); fake.hotkeyRegisterResults.pop_front(); }
-    if (!success || fake.registeredHotkeys.contains(id)) return 0;
+    if (!success || fake.registeredHotkeys.contains(id)) { fake.lastError = fake.hotkeyRegisterError; return 0; }
     fake.registeredHotkeys[id] = {modifiers & 0xf, key};
     return 1;
 }
@@ -2249,8 +2315,8 @@ BOOL UnregisterHotKey(HWND, int id) {
     ++fake.hotkeyUnregisters;
     bool success = true;
     if (!fake.hotkeyUnregisterResults.empty()) { success = fake.hotkeyUnregisterResults.front(); fake.hotkeyUnregisterResults.pop_front(); }
-    if (!success) return 0;
-    return fake.registeredHotkeys.erase(id) != 0;
+    if (!success || fake.registeredHotkeys.erase(id) == 0) { fake.lastError = fake.hotkeyUnregisterError; return 0; }
+    return 1;
 }
 namespace Diagnostics {
 void Log(const char*) noexcept {}
@@ -2332,6 +2398,9 @@ int main() {
         {"Profile normalization schema upgrade/canonical output", ProfileNormalizationUpgradeAndCanonical}, {"Profile normalization read-only isolation", ProfileNormalizationReadOnlyIsolation},
         {"Profile normalization bounds/invalid data", ProfileNormalizationBoundsAndRejections}, {"Profile normalization I/O cleanup failures", ProfileNormalizationIoCleanupFailures},
         {"Profile normalization output/allocation failures", ProfileNormalizationOutputAndAllocationFailures}, {"Profile normalization owned path arguments", ProfileNormalizationOwnedPathArguments},
+        {"Shortcut startup failure diagnostics/retry", ShortcutFailureStartupAndRetryDiagnostics}, {"Shortcut failure retained after rollback", ShortcutFailureSurvivesSuccessfulRollback},
+        {"Shortcut rollback failure diagnostics/recovery", ShortcutFailureRollbackAndRecoveryDiagnostics}, {"Shortcut release failure diagnostics", ShortcutFailureReleaseDiagnostics},
+        {"Read-only shortcut failure reports", ShortcutFailureSupportReportIsReadOnly},
         {"Command line", Arguments}
     };
     int failed = 0;
