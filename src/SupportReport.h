@@ -138,10 +138,14 @@ inline std::string BuildSupportReport(const SupportReportState& state) {
     for (std::size_t index = 0; index < state.restorationHistory.size(); ++index) {
         const auto& event = *state.restorationHistory.newest(index);
         report << "\r\n  " << RestoreRequestAgeSeconds(event, state.reportTick) << " seconds ago: " << RestoreReasonName(event.reason)
-            << " - " << RestoreOutcomeName(event.outcome);
+            << " - " << RestoreOutcomeName(event.outcome) << " (request duration: ";
+        if (event.durationMilliseconds) report << *event.durationMilliseconds << " milliseconds";
+        else report << "not recorded";
+        report << ")";
     }
     report << "\r\nOlder restoration records overwritten: " << state.restorationHistory.overwritten()
         << "\r\nRestoration request scopes in progress: " << state.restorationHistory.inProgress()
+        << "\r\nRequest durations include control/UI work, dialog wait, and nested scopes; nested times overlap. Deferred attempts/replay are separate scopes."
         << "\r\nHistory is in-memory control activity; it does not measure display output."
         << "\r\nFile logging: " << state.fileLogging << "\r\nMissing file records: " << state.droppedLogLines
         << "\r\nTruncated records: " << state.truncatedLogLines << "\r\nLast file error: " << state.lastFileError

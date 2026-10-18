@@ -498,7 +498,7 @@ void ReportError(const char* message, bool modal) {
 }
 
 bool RestoreFilter(RestoreReason reason, bool showError, bool notifyFailure) {
-    RecordRestorationRequest request(g_restorationHistory, reason, GetTickCount64());
+    RecordRestorationRequest request(g_restorationHistory, reason, GetTickCount64(), []() noexcept -> std::uint64_t { return GetTickCount64(); });
     if (g_busy) { request.finish(RestoreOutcome::Deferred); g_pendingRestore = true; return false; }
     g_pendingRestore = false;
     g_verification = {};

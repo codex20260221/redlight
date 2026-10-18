@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <optional>
 
 enum class RestoreReason {
     Manual, Countdown, TimerFailure, DisplayChange, PowerTransition, SessionTransition,
@@ -41,6 +42,7 @@ struct RestoreEvent {
     RestoreReason reason;
     RestoreOutcome outcome;
     std::uint64_t requestedAt;
+    std::optional<std::uint64_t> durationMilliseconds;
 };
 inline std::uint64_t RestoreRequestAgeSeconds(const RestoreEvent& event, std::uint64_t now) noexcept {
     return (now - event.requestedAt) / 1000;
@@ -85,9 +87,14 @@ private:
 // Observation only: never invokes the backend or changes recovery decisions.
 class RecordRestorationRequest {
 public:
-    RecordRestorationRequest(RestorationHistory& history, RestoreReason reason, std::uint64_t now) noexcept
-        : history_(history), event_{reason, RestoreOutcome::Interrupted, now}, tracked_(history_.beginScope()) {}
-    ~RecordRestorationRequest() { history_.record(event_); history_.endScope(tracked_); }
+    using Clock = std::uint64_t(*)() noexcept;
+    RecordRestorationRequest(RestorationHistory& history, RestoreReason reason, std::uint64_t now, Clock clock = nullptr) noexcept
+        : history_(history), event_{reason, RestoreOutcome::Interrupted, now}, tracked_(history_.beginScope()), clock_(clock) {}
+    ~RecordRestorationRequest() {
+        if (clock_) event_.durationMilliseconds = clock_() - event_.requestedAt;
+        history_.record(event_);
+        history_.endScope(tracked_);
+    }
     RecordRestorationRequest(const RecordRestorationRequest&) = delete;
     RecordRestorationRequest& operator=(const RecordRestorationRequest&) = delete;
     void finish(RestoreOutcome outcome) noexcept { event_.outcome = outcome; }
@@ -95,4 +102,5 @@ private:
     RestorationHistory& history_;
     RestoreEvent event_;
     bool tracked_;
+    Clock clock_;
 };

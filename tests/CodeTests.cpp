@@ -2483,6 +2483,99 @@ void RestorationHistorySupportReportBound() {
     Check(fake.magWrites == 0 && fake.gammaWrites == 0 && fake.clipOpens == 0 && fake.registryReads == 0,
         "formatting restoration history has no native output, clipboard, or settings effects");
 }
+void RestorationRequestTimingOutcomesAndZero() {
+    RestorationHistory history;
+    history.record({RestoreReason::Manual, RestoreOutcome::AlreadyClear, 1000});
+    Check(!history.newest(0)->durationMilliseconds, "direct observations have no invented request duration");
+    for (const auto outcome : {RestoreOutcome::Interrupted, RestoreOutcome::Deferred, RestoreOutcome::AlreadyClear, RestoreOutcome::Restored, RestoreOutcome::Failed}) {
+        fake.monotonicNow = 1050;
+        {
+            RecordRestorationRequest request(history, RestoreReason::Manual, 1000, BackendMonotonicMilliseconds);
+            request.finish(outcome);
+        }
+        Check(history.newest(0)->durationMilliseconds == 50 && history.newest(0)->outcome == outcome && history.inProgress() == 0,
+            "each completed scope outcome retains its exact elapsed duration without changing recovery classification");
+    }
+    fake.monotonicNow = 1000;
+    { RecordRestorationRequest zero(history, RestoreReason::Manual, 1000, BackendMonotonicMilliseconds); zero.finish(RestoreOutcome::AlreadyClear); }
+    Check(history.newest(0)->durationMilliseconds == 0 && fake.backendClockReads == 6, "genuine zero timing is present and each timed scope samples completion exactly once");
+    { RecordRestorationRequest untimed(history, RestoreReason::DeferredRequest, 1000); untimed.finish(RestoreOutcome::Deferred); }
+    Check(!history.newest(0)->durationMilliseconds && fake.backendClockReads == 6, "untimed scopes never call a clock or invent elapsed zero");
+}
+void RestorationRequestTimingNestedWrapAndUnwind() {
+    RestorationHistory history;
+    const auto maximum = (std::numeric_limits<std::uint64_t>::max)();
+    try {
+        RecordRestorationRequest outer(history, RestoreReason::Manual, maximum - 4, BackendMonotonicMilliseconds);
+        {
+            RecordRestorationRequest nested(history, RestoreReason::SessionTransition, maximum - 1, BackendMonotonicMilliseconds);
+            nested.finish(RestoreOutcome::Deferred);
+            fake.monotonicNow = 2;
+        }
+        fake.monotonicNow = 5;
+        throw 7;
+    } catch (int) {}
+    Check(history.size() == 2 && history.inProgress() == 0 && history.newest(0)->outcome == RestoreOutcome::Interrupted &&
+        history.newest(0)->durationMilliseconds == 10 && history.newest(1)->outcome == RestoreOutcome::Deferred &&
+        history.newest(1)->durationMilliseconds == 4 && fake.backendClockReads == 2,
+        "scope completion order, nested inclusive duration, clock wrap, and exception unwinding preserve observation and scope ownership");
+    const auto snapshot = history;
+    Check(history.clear() && history.size() == 0 && snapshot.newest(0)->durationMilliseconds == 10 && snapshot.newest(1)->durationMilliseconds == 4,
+        "clearing completed history preserves an earlier timed report snapshot");
+}
+void RestorationRequestTimingIncludesPostBackendWork() {
+    MagnificationFilter filter;
+    Check(filter.initialize() && filter.enable(), "prepare a recoverable active backend");
+    RestorationHistory history;
+    fake.monotonicNow = 1000; fake.magWriteMilliseconds = 7;
+    fake.magWriteResults = {Write::Fail};
+    {
+        RecordRestorationRequest request(history, RestoreReason::Countdown, 1000, BackendMonotonicMilliseconds);
+        request.finish(filter.disable() ? RestoreOutcome::Restored : RestoreOutcome::Failed);
+        fake.monotonicNow += 25; // Model control/UI work after the backend result is known.
+    }
+    Check(history.newest(0)->durationMilliseconds == 32 && history.newest(0)->outcome == RestoreOutcome::Failed &&
+        filter.statistics().restoration.timing.lastMilliseconds == 7 && filter.isActive() && filter.needsRestore(),
+        "request timing includes post-backend work while backend timing, failure state, and recovery ownership remain distinct");
+    SupportReportState state; state.restorationHistory = history; state.reportTick = 1032;
+    state.active = filter.isActive(); state.needsRestore = filter.needsRestore(); state.lastError = filter.lastError();
+    const auto statistics = filter.statistics();
+    const auto reads = fake.magReads, writes = fake.magWrites;
+    const auto clockReads = fake.backendClockReads;
+    const auto report = BuildSupportReport(state);
+    Check(report.find("Backend restoration failed (request duration: 32 milliseconds)") != std::string::npos &&
+        report.find("dialog wait") != std::string::npos && report.find("nested times overlap") != std::string::npos &&
+        fake.magReads == reads && fake.magWrites == writes && fake.backendClockReads == clockReads && filter.statistics() == statistics,
+        "reporting stored duration performs no backend/clock work and explains inclusive UI/nested semantics");
+    Check(filter.disable() && fake.effect.transform[1][1] == 1, "request timing never consumes the original restoration snapshot");
+}
+void RestorationRequestTimingAllocationAndReporting() {
+    RestorationHistory history;
+    bool unused = false;
+    {
+        TestMemory::FailNextAllocation fail;
+        for (std::uint64_t index = 0; index < 20; ++index) {
+            fake.monotonicNow = index + 10;
+            RecordRestorationRequest request(history, RestoreReason::CallbackFailure, index, BackendMonotonicMilliseconds);
+            request.finish(RestoreOutcome::Deferred);
+        }
+        unused = TestMemory::AllocationFailurePending();
+    }
+    Check(unused && history.size() == 8 && history.overwritten() == 12 && history.newest(0)->durationMilliseconds == 10,
+        "timed recording, overwrite, and scope completion remain allocation-free");
+    SupportReportState state; state.restorationHistory = history; state.reportTick = 2000;
+    state.restorationHistory.record({RestoreReason::Manual, RestoreOutcome::AlreadyClear, 1000, 0});
+    state.restorationHistory.record({RestoreReason::Manual, RestoreOutcome::Deferred, 1000});
+    state.restorationHistory.record({RestoreReason::Manual, RestoreOutcome::Restored, 1000, (std::numeric_limits<std::uint64_t>::max)()});
+    const auto report = BuildSupportReport(state);
+    Check(report.find("request duration: 0 milliseconds") != std::string::npos && report.find("request duration: not recorded") != std::string::npos &&
+        report.find("request duration: 18446744073709551615 milliseconds") != std::string::npos && report.size() < 6000,
+        "bounded history reports distinguish unknown/zero/maximum elapsed duration without numeric truncation");
+    Check(history.clear(), "completed timed history can clear normally");
+    history.record({RestoreReason::Manual, RestoreOutcome::Deferred, 2000});
+    Check(!history.newest(0)->durationMilliseconds && state.restorationHistory.newest(0)->durationMilliseconds == (std::numeric_limits<std::uint64_t>::max)(),
+        "cleared/new observations cannot retain stale timing while copied reports stay stable");
+}
 void MagFailedActivationRollbackRestoresLatestCapture() {
     MagnificationFilter filter;
     Check(filter.initialize(), "initialize failed-activation rollback test");
@@ -4391,6 +4484,8 @@ int main() {
         {"Restoration history bound/snapshots", RestorationHistoryBoundAndSnapshots}, {"Restoration history nested/interrupted scopes", RestorationHistoryNestedAndInterruptedScopes},
         {"Restoration history retains backend recovery", RestorationHistoryRetainsBackendRecovery}, {"Restoration history without C++ allocation", RestorationHistoryNoCppAllocation},
         {"Restoration history wrap/names", RestorationHistoryClockWrapAndNames}, {"Restoration history bounded support report", RestorationHistorySupportReportBound},
+        {"Restoration request timing outcomes/zero", RestorationRequestTimingOutcomesAndZero}, {"Restoration request timing nested wrap/unwind", RestorationRequestTimingNestedWrapAndUnwind},
+        {"Restoration request timing includes control work", RestorationRequestTimingIncludesPostBackendWork}, {"Restoration request timing allocation/reporting", RestorationRequestTimingAllocationAndReporting},
         {"Mag failed activation rollback/latest capture", MagFailedActivationRollbackRestoresLatestCapture}, {"Mag failed activation preserves snapshot", MagFailedActivationKeepsSnapshotUntilRecovery},
         {"Mag unconfirmed rollback/shutdown ownership", MagUnconfirmedRollbackAndShutdownRetainOwnership}, {"Mag ordinary activation failure rollback/error", MagFailedActivationWithoutMutationStillChecksRollback},
         {"Mag partial activation verification/status", MagFailedActivationVerificationDoesNotClaimActive}, {"Mag activation recovery without C++ allocation", MagFailedActivationRecoveryWithoutCppAllocation},
