@@ -2,6 +2,7 @@
 #include "BackendPreference.h"
 #include "DisplayFilter.h"
 #include "SessionTimer.h"
+#include "ShortcutProfile.h"
 #include <charconv>
 #include <optional>
 #include <string>
@@ -12,20 +13,21 @@ struct AppPreferences {
     LumaProfile luma = LumaProfile::Classic;
     BackendPreference backend = BackendPreference::Automatic;
     unsigned sessionMinutes = 0;
+    ShortcutProfile shortcuts = ShortcutProfile::Default;
     bool operator==(const AppPreferences&) const = default;
 };
 inline bool ValidPreferences(const AppPreferences& value) {
     return (value.mode == RedMode::StrictRed || value.mode == RedMode::LumaRed) &&
         IsValidLumaProfile(static_cast<unsigned>(value.luma)) &&
-        IsValidBackendPreference(static_cast<unsigned>(value.backend)) && value.sessionMinutes <= SessionTimer::maxMinutes;
+        IsValidBackendPreference(static_cast<unsigned>(value.backend)) && value.sessionMinutes <= SessionTimer::maxMinutes && IsValidShortcutProfile(static_cast<unsigned>(value.shortcuts));
 }
 inline std::optional<std::string> SerializePreferences(const AppPreferences& value) {
     if (!ValidPreferences(value)) return std::nullopt;
     const char* luma = value.luma == LumaProfile::Classic ? "classic" : (value.luma == LumaProfile::GreenDetail ? "green" : "equal");
     const char* backend = value.backend == BackendPreference::Automatic ? "auto" :
         (value.backend == BackendPreference::Magnification ? "magnification" : "gamma");
-    return std::string("[RedLightProfile]\r\nversion=1\r\nmode=") + (value.mode == RedMode::LumaRed ? "luma" : "strict") +
-        "\r\nluma=" + luma + "\r\nbackend=" + backend + "\r\nsession_minutes=" + std::to_string(value.sessionMinutes) + "\r\n";
+    return std::string("[RedLightProfile]\r\nversion=2\r\nmode=") + (value.mode == RedMode::LumaRed ? "luma" : "strict") +
+        "\r\nluma=" + luma + "\r\nbackend=" + backend + "\r\nsession_minutes=" + std::to_string(value.sessionMinutes) + "\r\nhotkeys=" + ShortcutProfileToken(value.shortcuts) + "\r\n";
 }
 struct PreferencesParseResult {
     std::optional<AppPreferences> preferences;
@@ -42,7 +44,7 @@ inline PreferencesParseResult ParsePreferences(std::string_view input) {
     if (input.size() >= 3 && static_cast<unsigned char>(input[0]) == 0xef &&
         static_cast<unsigned char>(input[1]) == 0xbb && static_cast<unsigned char>(input[2]) == 0xbf) input.remove_prefix(3);
     AppPreferences value;
-    unsigned seen = 0, lineNumber = 0;
+    unsigned seen = 0, lineNumber = 0, version = 0;
     bool header = false;
     while (!input.empty()) {
         ++lineNumber;
@@ -63,7 +65,8 @@ inline PreferencesParseResult ParsePreferences(std::string_view input) {
         unsigned flag = 0;
         if (key == "version") {
             flag = 1;
-            if (field != "1") return {std::nullopt, "Unsupported profile version", lineNumber};
+            if (field != "1" && field != "2") return {std::nullopt, "Unsupported profile version", lineNumber};
+            version = field == "1" ? 1 : 2;
         } else if (key == "mode") {
             flag = 2;
             if (field == "strict") value.mode = RedMode::StrictRed;
@@ -88,10 +91,16 @@ inline PreferencesParseResult ParsePreferences(std::string_view input) {
             if (parsed.ec != std::errc{} || parsed.ptr != field.data() + field.size() || minutes > SessionTimer::maxMinutes)
                 return {std::nullopt, "Session limit must be an integer from 0 to 240", lineNumber};
             value.sessionMinutes = minutes;
+        } else if (key == "hotkeys") {
+            flag = 32;
+            const auto profile = ParseShortcutProfile(field);
+            if (!profile) return {std::nullopt, "Invalid shortcut profile", lineNumber};
+            value.shortcuts = *profile;
         } else return {std::nullopt, "Unknown profile field", lineNumber};
         if (seen & flag) return {std::nullopt, "Duplicate profile field", lineNumber};
         seen |= flag;
     }
-    if (!header || seen != 31) return {std::nullopt, "Profile section or required fields are missing", lineNumber};
+    if (version == 1 && (seen & 32)) return {std::nullopt, "Shortcut settings require profile version 2", lineNumber};
+    if (!header || seen != (version == 2 ? 63u : 31u)) return {std::nullopt, "Profile section or required fields are missing", lineNumber};
     return {value, nullptr, 0};
 }

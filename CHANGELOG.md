@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Added saved shortcut profiles for Ctrl+Alt+R, Ctrl+Alt+F9, Ctrl+Alt+F10, or disabled shortcuts; restore adds Shift. Track actual bindings through registration/rollback failures and reject stale queued shortcut messages. Settings profiles now export version 2 while accepting version 1 with default shortcuts.
 - Added a native Custom auto-restore time-limit dialog for 0–240 whole minutes, with validation, cancellation, and protection against truncated pasted input.
 - Added explicit read-only backend-state verification, showing software read-back mismatches/unavailability in the tray and support report without reapplying the filter or discarding recovery data.
 - Added bounded settings-profile import from clipboard with strict validation and a readable confirmation preview; restore succeeds before saving, imports stay off, and failed restoration/storage keeps prior preferences.

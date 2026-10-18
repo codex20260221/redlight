@@ -11,6 +11,7 @@ struct SupportReportState {
     BackendVerification verification = BackendVerification::NotChecked;
     bool commandLineOverride = false;
     bool preferencesUnsaved = false;
+    std::string_view shortcutProfile = "Default", toggleBinding = "none", restoreBinding = "none";
     bool active = false, needsRestore = false;
     bool toggleHotkey = false, restoreHotkey = false, sessionNotifications = false;
     unsigned sessionMinutes = 0;
@@ -27,8 +28,9 @@ inline std::string BuildSupportReport(const SupportReportState& state) {
         << "\r\nBackend verification: " << BackendVerificationName(state.verification)
         << "\r\nSettings persistence: " << (state.preferencesUnsaved ? "unsaved changes" : "saved/default")
         << "\r\nRecovery data pending: " << (state.needsRestore ? "yes" : "no")
-        << "\r\nToggle shortcut: " << (state.toggleHotkey ? "registered" : "unavailable")
-        << "\r\nRestore shortcut: " << (state.restoreHotkey ? "registered" : "unavailable")
+        << "\r\nShortcut preference: " << state.shortcutProfile
+        << "\r\nToggle shortcut: " << (state.toggleHotkey ? "registered" : "unavailable") << " (" << state.toggleBinding << ")"
+        << "\r\nRestore shortcut: " << (state.restoreHotkey ? "registered" : "unavailable") << " (" << state.restoreBinding << ")"
         << "\r\nSession notifications: " << (state.sessionNotifications ? "registered" : "unavailable")
         << "\r\nSession limit: ";
     if (state.sessionMinutes) report << state.sessionMinutes << " minutes";

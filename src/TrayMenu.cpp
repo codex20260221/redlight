@@ -37,7 +37,7 @@ UINT Checked(bool value) { return MF_STRING | (value ? MF_CHECKED : MF_UNCHECKED
 }
 
 HMENU BuildTrayMenu(const TrayMenuState& state) {
-    Menu root, session, luma, backend, expert;
+    Menu root, session, luma, backend, shortcuts, expert;
     for (const unsigned minutes : {0u, 15u, 30u, 60u, 120u, 240u}) {
         char label[48];
         if (minutes == 0) strcpy_s(label, "Unlimited");
@@ -56,16 +56,21 @@ HMENU BuildTrayMenu(const TrayMenuState& state) {
     if (!backend.add(ID_BACKEND_PREFERENCE_BASE, "&Automatic", Checked(state.backendPreference == BackendPreference::Automatic)) ||
         !backend.add(ID_BACKEND_PREFERENCE_BASE + 1, "&Magnification only", Checked(state.backendPreference == BackendPreference::Magnification)) ||
         !backend.add(ID_BACKEND_PREFERENCE_BASE + 2, "Legacy &gamma only", Checked(state.backendPreference == BackendPreference::Gamma))) return NULL;
-    if (!expert.child(backend, "&Backend preference (next start)") ||
+    if (!shortcuts.add(ID_SHORTCUT_PROFILE_BASE, "&Default: Ctrl+Alt+R", Checked(state.shortcutProfile == ShortcutProfile::Default)) ||
+        !shortcuts.add(ID_SHORTCUT_PROFILE_BASE + 1, "Ctrl+Alt+F&9", Checked(state.shortcutProfile == ShortcutProfile::F9)) ||
+        !shortcuts.add(ID_SHORTCUT_PROFILE_BASE + 2, "Ctrl+Alt+F&10", Checked(state.shortcutProfile == ShortcutProfile::F10)) ||
+        !shortcuts.add(ID_SHORTCUT_PROFILE_BASE + 3, "D&isabled", Checked(state.shortcutProfile == ShortcutProfile::Disabled))) return NULL;
+    if (!expert.child(shortcuts, "&Shortcut profile") || !expert.child(backend, "&Backend preference (next start)") ||
         !expert.add(ID_TRAY_VERIFY_BACKEND, "&Verify backend state") ||
         !expert.add(ID_TRAY_COPY_REPORT, "&Copy support report") ||
         !expert.add(0, NULL, MF_SEPARATOR) ||
         !expert.add(ID_TRAY_COPY_PROFILE, "&Export settings profile to clipboard") ||
         !expert.add(ID_TRAY_IMPORT_PROFILE, "&Import settings profile from clipboard")) return NULL;
-    const char* toggleLabel = state.needsRestore ?
-        (state.toggleHotkey ? "Turn o&ff\tCtrl+Alt+R" : "Turn o&ff (shortcut unavailable)") :
-        (state.toggleHotkey ? "Turn &on\tCtrl+Alt+R" : "Turn &on (shortcut unavailable)");
-    const char* restoreLabel = state.restoreHotkey ? "&Restore display\tCtrl+Alt+Shift+R" : "&Restore display (shortcut unavailable)";
+    char toggleLabel[128], restoreLabel[128];
+    const char* absent = state.shortcutProfile == ShortcutProfile::Disabled ? "Disabled" : "Unavailable";
+    sprintf_s(toggleLabel, state.needsRestore ? "Turn o&ff\t%s" : "Turn &on\t%s",
+        state.toggleShortcut ? state.toggleShortcut : absent);
+    sprintf_s(restoreLabel, "&Restore display\t%s", state.restoreShortcut ? state.restoreShortcut : absent);
     if (!root.add(ID_TRAY_TOGGLE, toggleLabel) || !root.add(ID_TRAY_RESTORE, restoreLabel) ||
         !root.add(0, NULL, MF_SEPARATOR) ||
         !root.add(ID_TRAY_MODE_STRICT_RED, "&Strict Red", Checked(state.mode == RedMode::StrictRed)) ||

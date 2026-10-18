@@ -55,3 +55,7 @@ constexpr DWORD WC_ERR_INVALID_CHARS = 128;
 HANDLE GetClipboardData(unsigned);
 std::size_t GlobalSize(HGLOBAL);
 int WideCharToMultiByte(unsigned, DWORD, const wchar_t*, int, char*, int, const char*, BOOL*);
+
+constexpr unsigned MOD_NOREPEAT = 0x4000;
+BOOL RegisterHotKey(HWND, int, unsigned, unsigned);
+BOOL UnregisterHotKey(HWND, int);

@@ -14,6 +14,7 @@
 #include "CommandIds.h"
 #include "TrayMenu.h"
 #include "SessionLimitDialog.h"
+#include "HotkeyManager.h"
 #include <cstdio>
 
 #include "Diagnostics.h"
@@ -33,8 +34,7 @@ UINT g_taskbarCreated = 0;
 bool g_trayAdded = false;
 bool g_trayVersion4 = false;
 bool g_sessionNotifications = false;
-bool g_toggleHotkey = false;
-bool g_restoreHotkey = false;
+HotkeyManager g_hotkeys;
 bool g_busy = false;
 bool g_pendingRestore = false;
 SessionTimer g_sessionTimer;
@@ -56,6 +56,7 @@ bool RestoreFilter(bool showError, bool notifyFailure = true);
 void StopSessionTimer();
 bool StartSessionTimer();
 void SetSessionLimit(unsigned minutes);
+void SetShortcutProfile(ShortcutProfile profile);
 void OnSessionTimer();
 void CloseInstanceMutex(HANDLE handle);
 void PostTrayCommand(HWND hwnd, UINT command);
@@ -102,7 +103,8 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
             "--help: show this help\n--version: show version\n"
             "--backend=auto|magnification|gamma: one-start backend override\n\n"
             "Without options, start in the tray with the filter off.\n"
-            "Ctrl+Alt+R: toggle. Ctrl+Alt+Shift+R: restore.",
+            "Default shortcuts: Ctrl+Alt+R toggles; Ctrl+Alt+Shift+R restores.\n"
+            "Expert controls offers alternative shortcut profiles.",
             action == StartupAction::Invalid ? "RedLight - invalid command line" : "RedLight",
             MB_OK | (action == StartupAction::Invalid ? MB_ICONERROR : MB_ICONINFORMATION));
         Diagnostics::Shutdown();
@@ -388,7 +390,7 @@ bool RestoreFilter(bool showError, bool notifyFailure) {
     if (!restored && notifyFailure) {
         char message[768];
         sprintf_s(message, "Display restoration failed. RedLight has kept its recovery data.\n"
-            "Use Restore display or Ctrl+Alt+Shift+R to retry.\n\n%s", g_displayFilter->lastError());
+            "Use Restore display to retry. About lists available shortcuts.\n\n%s", g_displayFilter->lastError());
         ReportError(message, showError);
     }
     return restored;
@@ -513,7 +515,7 @@ void OnSessionTimer() {
 void ScheduleTrayRecovery() {
     if (!SetTimer(nid.hWnd, ID_TRAY_RETRY_TIMER, 2000, NULL)) {
         Diagnostics::LogFormat("SetTimer for tray recovery failed (error %lu).", GetLastError());
-        ReportError("Tray recovery failed. Use Ctrl+Alt+Shift+R to restore colors, then restart RedLight.");
+        ReportError("Tray recovery failed. Use an available restore shortcut or RedLight.exe --restore, then restart RedLight.");
     } else {
         Diagnostics::Log("Tray registration will be retried every two seconds; new activation is blocked until controls return.");
     }
@@ -562,16 +564,31 @@ bool InitializeTrayIcon(HINSTANCE hInstance) {
     }
     RefreshTrayIconTip();
     if (!AddTrayIcon()) return false;
-    g_toggleHotkey = RegisterHotKey(nid.hWnd, ID_HOTKEY_TOGGLE, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'R') != FALSE;
-    g_restoreHotkey = RegisterHotKey(nid.hWnd, ID_HOTKEY_RESTORE, MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_NOREPEAT, 'R') != FALSE;
+    const bool shortcutsReady = g_hotkeys.initialize(nid.hWnd, g_preferences.shortcuts);
     g_sessionNotifications = WTSRegisterSessionNotification(nid.hWnd, NOTIFY_FOR_THIS_SESSION) != FALSE;
     if (g_displayFilter == &g_gammaRampFilter) {
         ReportError("Using the legacy Strict Red fallback. Driver and multi-monitor support varies. See About and the README for details.", false);
     }
-    if (!g_toggleHotkey || !g_restoreHotkey || !g_sessionNotifications) {
+    if (!shortcutsReady || !g_sessionNotifications) {
         ReportError("Some keyboard shortcuts or session notifications are unavailable. See About for shortcut status. Tray controls remain available.", false);
     }
     return true;
+}
+
+void SetShortcutProfile(ShortcutProfile profile) {
+    if (g_busy || !IsValidShortcutProfile(static_cast<unsigned>(profile))) return;
+    g_busy = true;
+    const bool changed = g_hotkeys.change(profile);
+    g_busy = false;
+    if (g_pendingRestore) RestoreFilter(false);
+    if (!changed) {
+        ReportError("The shortcut profile could not be applied. The prior preference was kept and rollback was attempted. About lists the actual active bindings.");
+        return;
+    }
+    g_preferences.shortcuts = profile;
+    g_preferencesUnsaved = !SavePreferences(g_preferences);
+    if (g_preferencesUnsaved) ReportError("The shortcuts changed but could not be saved for the next start.");
+    Diagnostics::LogFormat("Shortcut preference: %s", ShortcutProfileName(profile));
 }
 
 bool ApplyInactivePreferences(const AppPreferences& preferences) {
@@ -674,8 +691,11 @@ void CopySupportReport(HWND owner) {
     state.lastError = g_displayFilter->lastError();
     state.active = g_displayFilter->isActive();
     state.needsRestore = g_displayFilter->needsRestore();
-    state.toggleHotkey = g_toggleHotkey;
-    state.restoreHotkey = g_restoreHotkey;
+    state.toggleHotkey = g_hotkeys.toggle().has_value();
+    state.restoreHotkey = g_hotkeys.restore().has_value();
+    state.shortcutProfile = ShortcutProfileName(g_preferences.shortcuts);
+    if (g_hotkeys.toggle()) state.toggleBinding = ShortcutBindingName(*g_hotkeys.toggle());
+    if (g_hotkeys.restore()) state.restoreBinding = ShortcutBindingName(*g_hotkeys.restore());
     state.sessionNotifications = g_sessionNotifications;
     state.sessionMinutes = g_sessionTimer.minutes();
     if (g_sessionTimer.armed()) state.remainingSeconds = (g_sessionTimer.remainingMilliseconds(GetTickCount64()) + 999) / 1000;
@@ -723,10 +743,10 @@ void ImportSettingsProfile(HWND owner) {
     const auto candidate = *parsed.preferences;
     char preview[768];
     sprintf_s(preview, "Import these preferences?\n\nMode: %s\nLuma detail: %s\nBackend on next start: %s\n"
-        "Session limit: %u minutes (0 = unlimited)\n\n"
+        "Session limit: %u minutes (0 = unlimited)\nShortcut profile: %s\n\n"
         "The display will be restored and stay off. Backend selection applies on the next start.\n"
         "Luma preferences are retained for Magnification when the current backend is gamma.",
-        RedModeDisplayName(candidate.mode), LumaProfileName(candidate.luma), BackendPreferenceName(candidate.backend), candidate.sessionMinutes);
+        RedModeDisplayName(candidate.mode), LumaProfileName(candidate.luma), BackendPreferenceName(candidate.backend), candidate.sessionMinutes, ShortcutProfileName(candidate.shortcuts));
     if (MessageBoxA(owner, preview, "Import RedLight settings", MB_YESNO | MB_DEFBUTTON2 | MB_ICONQUESTION) != IDYES) return;
     // Recheck after the modal preview: native callbacks may have run while it was open.
     if (g_busy) return;
@@ -739,7 +759,9 @@ void ImportSettingsProfile(HWND owner) {
     g_preferences = candidate;
     g_backendPreference = candidate.backend;
     g_preferencesUnsaved = false;
-    if (!ApplyInactivePreferences(candidate)) {
+    const bool modeApplied = ApplyInactivePreferences(candidate);
+    const bool shortcutsApplied = g_hotkeys.change(candidate.shortcuts);
+    if (!modeApplied || !shortcutsApplied) {
         ReportError("The profile was saved, but some preferences could not be applied in this session. Restart RedLight to use them.");
         return;
     }
@@ -775,7 +797,7 @@ void VerifyBackendState(HWND owner) {
 void ShowAboutDialog(HWND parent) {
     char aboutText[1024];
     sprintf_s(aboutText, "RedLight " REDLIGHT_VERSION "\n\nBackend: %s\nStartup selection: %s%s\nNext start: %s\nMode: %s\nLuma detail: %s\nStatus: %s\nSettings: %s\n\n"
-        "Ctrl+Alt+R: %s\nCtrl+Alt+Shift+R: %s\nSession recovery: %s\n\n"
+        "Toggle shortcut: %s\nRestore shortcut: %s\nShortcut preference: %s\nSession recovery: %s\n\n"
         "Logs: %%LOCALAPPDATA%%\\RedLight\nUnsigned release candidate\n"
         "github.com/michaelmawhinney/redlight",
         g_displayFilter->name(), BackendPreferenceName(g_startupBackendPreference),
@@ -784,8 +806,9 @@ void ShowAboutDialog(HWND parent) {
         g_displayFilter->supportsRedMode(RedMode::LumaRed) ? LumaProfileName(g_displayFilter->lumaProfile()) : "Unavailable on gamma",
         FilterStatusText(),
         g_preferencesUnsaved ? "Unsaved changes" : "Saved/default",
-        g_toggleHotkey ? "Toggle filter" : "Unavailable (shortcut in use)",
-        g_restoreHotkey ? "Restore display" : "Unavailable (shortcut in use)",
+        g_hotkeys.toggle() ? ShortcutBindingName(*g_hotkeys.toggle()) : "Unavailable/disabled",
+        g_hotkeys.restore() ? ShortcutBindingName(*g_hotkeys.restore()) : "Unavailable/disabled",
+        ShortcutProfileName(g_preferences.shortcuts),
         g_sessionNotifications ? "Available" : "Unavailable (registration failed)");
     MessageBoxA(parent, aboutText, "About RedLight", MB_OK | MB_ICONINFORMATION);
 }
@@ -805,7 +828,9 @@ void ShowTrayMenu(HWND hwnd) {
     }
     const TrayMenuState state{g_displayFilter->needsRestore(), g_displayFilter->redMode(),
         g_displayFilter->supportsRedMode(RedMode::LumaRed), g_displayFilter->lumaProfile(),
-        g_backendPreference, g_sessionTimer.minutes(), g_toggleHotkey, g_restoreHotkey};
+        g_backendPreference, g_sessionTimer.minutes(), g_preferences.shortcuts,
+        g_hotkeys.toggle() ? ShortcutBindingName(*g_hotkeys.toggle()) : NULL,
+        g_hotkeys.restore() ? ShortcutBindingName(*g_hotkeys.restore()) : NULL};
     HMENU menu = BuildTrayMenu(state);
     if (!menu) { ReportError("Could not build the tray menu."); return; }
     if (!SetForegroundWindow(hwnd)) Diagnostics::Log("SetForegroundWindow failed for tray menu.");
@@ -843,10 +868,18 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         return 0;
     }
     case WM_HOTKEY:
+        if (!g_hotkeys.accepts(static_cast<unsigned>(wParam), LOWORD(lParam), HIWORD(lParam))) {
+            Diagnostics::Log("Ignored stale/unregistered shortcut message.");
+            return 0;
+        }
         if (wParam == ID_HOTKEY_TOGGLE) ToggleRedlight();
         else if (wParam == ID_HOTKEY_RESTORE) RestoreFilter(true);
         return 0;
     case WM_COMMAND:
+        if (LOWORD(wParam) >= ID_SHORTCUT_PROFILE_BASE && LOWORD(wParam) <= ID_SHORTCUT_PROFILE_BASE + 3) {
+            SetShortcutProfile(static_cast<ShortcutProfile>(LOWORD(wParam) - ID_SHORTCUT_PROFILE_BASE));
+            return 0;
+        }
         if (LOWORD(wParam) >= ID_LUMA_PROFILE_BASE && LOWORD(wParam) <= ID_LUMA_PROFILE_BASE + 2) {
             SetLumaProfile(static_cast<LumaProfile>(LOWORD(wParam) - ID_LUMA_PROFILE_BASE));
             return 0;
@@ -920,8 +953,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         return 0;
     case WM_DESTROY:
         StopSessionTimer();
-        if (g_toggleHotkey && !UnregisterHotKey(hwnd, ID_HOTKEY_TOGGLE)) Diagnostics::Log("Unregister toggle hotkey failed.");
-        if (g_restoreHotkey && !UnregisterHotKey(hwnd, ID_HOTKEY_RESTORE)) Diagnostics::Log("Unregister restore hotkey failed.");
+        if (!g_hotkeys.release()) Diagnostics::Log("Some shortcut registrations could not be released before window destruction.");
         if (g_sessionNotifications && !WTSUnRegisterSessionNotification(hwnd)) Diagnostics::Log("Unregister session notifications failed.");
         if (g_trayAdded && !Shell_NotifyIconA(NIM_DELETE, &nid)) Diagnostics::Log("Tray icon removal failed.");
         g_trayAdded = false;

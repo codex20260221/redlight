@@ -71,8 +71,8 @@ After starting RedLight, an icon appears in the system tray with the filter off.
 | Control | Action |
 | --- | --- |
 | Left-click, Enter, or Space on the tray icon | Toggle the filter |
-| Ctrl+Alt+R | Toggle the filter |
-| Ctrl+Alt+Shift+R | Restore the display |
+| Ctrl+Alt+R (default profile) | Toggle the filter |
+| Ctrl+Alt+Shift+R (default profile) | Restore the display |
 | Right-click or the keyboard context menu | Open the tray menu |
 
 The menu provides **Turn on / Turn off**, **Restore display**, **Strict Red**, **Luma Red**, **Open logs folder**, **About**, and **Exit**. About shows the backend, mode, filter status, and shortcut/session registration status. If another program has registered a shortcut, use the tray controls.
@@ -82,6 +82,12 @@ The menu provides **Turn on / Turn off**, **Restore display**, **Strict Red**, *
 Preferences are saved as one validated SettingsProfile record under `HKCU\Software\RedLight`. Prior individual settings are loaded when this record is absent and migrated on the next save. Corrupt or unreadable settings are reported and use safe defaults. About and support reports identify unsaved changes after a failed save. An unavailable Luma Red preference is retained for a future Magnification session, while gamma fallback uses Strict Red. The enabled state is never saved. Exit first restores display state; if restoration fails, RedLight stays available for another attempt.
 
 On an Explorer restart, display change, sleep/wake, or session change, RedLight attempts to restore the saved state and leaves the filter off. If restoration fails, an error is logged and recovery data is kept. Use **Restore display** to retry. No automatic re-enabling occurs.
+
+### Shortcut profiles
+
+**Expert controls → Shortcut profile** offers Ctrl+Alt+R (default), Ctrl+Alt+F9, Ctrl+Alt+F10, or Disabled. Toggle uses the chosen combination; Restore adds Shift. Tray captions, About, and support reports show the actual registered combinations. Disabling shortcuts leaves tray controls and the restore command available.
+
+A rejected change attempts to restore the previous registrations and keeps the prior preference. If rollback also fails, the actual remaining bindings are shown rather than assuming success. Retry the desired profile to recover. Stale queued messages from old or disabled combinations are ignored. A successful change is saved; storage failures are shown as unsaved changes. Imported profiles apply shortcut choices after restoring the display and keep the filter off.
 
 ### Expert backend control
 
@@ -101,7 +107,7 @@ Use the Automatic override if an unavailable saved backend prevents startup. Gam
 
 **Expert controls → Import settings profile from clipboard** reads a copied profile, validates it, and previews all choices before applying. Cancel or invalid input changes nothing. On confirmation, RedLight first restores any active filter, saves one complete configuration, applies available mode/luma preferences, and leaves the filter off. Backend selection applies on the next start. A restoration failure aborts import with recovery data intact; a storage failure keeps prior preferences selected and leaves the already-restored display off. Clipboard reads are bounded to 4096 bytes of UTF-8 text and never clear or replace clipboard contents.
 
-The format uses a RedLightProfile section, version 1, and explicit mode/luma/backend/session_minutes fields. Blank lines, whole-line comments, whitespace around fields, and UTF-8 BOMs are accepted by the parser; duplicates, unknown fields, missing fields, unsupported versions, and invalid ranges are rejected. Profiles are data and contain no commands to execute.
+The format uses a RedLightProfile section. Version 2 exports explicit mode/luma/backend/session_minutes/hotkeys fields; version 1 profiles are accepted with default shortcuts. The hotkeys tokens are default, f9, f10, or disabled. Blank lines, whole-line comments, whitespace around fields, and UTF-8 BOMs are accepted by the parser; duplicates, unknown fields, missing fields, unsupported versions, and invalid ranges are rejected. Profiles are data and contain no commands to execute.
 
 ## Compatibility and limitations
 

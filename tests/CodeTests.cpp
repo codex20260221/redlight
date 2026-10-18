@@ -9,6 +9,8 @@
 #include "Preferences.h"
 #include "PreferencesStore.h"
 #include "PreferencesImport.h"
+#include "HotkeyManager.h"
+#include "CommandIds.h"
 #include <map>
 #include "Clipboard.h"
 #include <limits>
@@ -41,6 +43,9 @@ struct Fake {
     std::map<std::wstring, RegistryValue> registry;
     bool registryRead = true, registryWrite = true;
     int registryWrites = 0;
+    std::map<int, ShortcutBinding> registeredHotkeys;
+    std::deque<bool> hotkeyRegisterResults, hotkeyUnregisterResults;
+    int hotkeyRegisters = 0, hotkeyUnregisters = 0;
 } fake;
 
 void Reset() {
@@ -386,8 +391,9 @@ void PreferenceProfileRoundTrip() {
     for (const auto mode : {RedMode::StrictRed, RedMode::LumaRed})
     for (const auto luma : {LumaProfile::Classic, LumaProfile::GreenDetail, LumaProfile::EqualDetail})
     for (const auto backend : {BackendPreference::Automatic, BackendPreference::Magnification, BackendPreference::Gamma})
-    for (const unsigned minutes : {0u, 1u, 15u, 240u}) {
-        const AppPreferences original{mode, luma, backend, minutes};
+    for (const unsigned minutes : {0u, 1u, 15u, 240u})
+    for (const auto shortcuts : {ShortcutProfile::Default, ShortcutProfile::F9, ShortcutProfile::F10, ShortcutProfile::Disabled}) {
+        const AppPreferences original{mode, luma, backend, minutes, shortcuts};
         const auto text = SerializePreferences(original);
         Check(text.has_value(), "serialize supported preferences");
         const auto parsed = ParsePreferences(*text);
@@ -402,7 +408,7 @@ void PreferenceProfileRoundTrip() {
 }
 void PreferenceProfileStrictValidation() {
     const auto text = *SerializePreferences(AppPreferences{});
-    Check(text.find("version=1") != std::string::npos && text.find("mode=luma") != std::string::npos && text.find("backend=auto") != std::string::npos, "stable human-readable versioned format");
+    Check(text.find("version=2") != std::string::npos && text.find("mode=luma") != std::string::npos && text.find("backend=auto") != std::string::npos, "stable human-readable versioned format");
     Check(!ParsePreferences(text + "mode=strict\n").preferences, "duplicate fields rejected");
     Check(!ParsePreferences(text + "mdoe=strict\n").preferences, "unknown fields rejected instead of ignored");
     Check(!ParsePreferences(text + "[RedLightProfile]\n").preferences, "duplicate sections rejected");
@@ -414,7 +420,7 @@ void PreferenceProfileStrictValidation() {
         Check(!parsed.preferences && parsed.error && parsed.line > 0, "invalid numeric input has a line diagnostic");
     }
     auto newer = text;
-    newer.replace(newer.find("version=1"), 9, "version=2");
+    newer.replace(newer.find("version=2"), 9, "version=999");
     Check(!ParsePreferences(newer).preferences, "future schemas cannot silently reinterpret settings");
     Check(!ParsePreferences("[RedLightProfile]\nversion=1\n").preferences, "missing settings rejected");
     Check(!ParsePreferences(std::string(4097, ' ')).preferences, "bounded input size");
@@ -579,6 +585,55 @@ void CustomSessionLimitParsing() {
     Check(timer.configure(*ParseSessionMinutes(L"57"), 1000, true) &&
         timer.remainingMilliseconds(1000) == 3420000, "custom limit uses the same tested session timer");
 }
+void ShortcutRegistrationAndStaleMessages() {
+    HotkeyManager manager;
+    Check(manager.initialize(nullptr, ShortcutProfile::Default) && fake.registeredHotkeys.size() == 2, "initial shortcuts registered independently");
+    Check(manager.accepts(ID_HOTKEY_TOGGLE, 3, 'R') && manager.accepts(ID_HOTKEY_RESTORE, 7, 'R'), "only actual bindings accepted");
+    Check(!manager.accepts(ID_HOTKEY_TOGGLE, 7, 'R') && !manager.accepts(99, 3, 'R'), "wrong modifiers/IDs rejected");
+    Check(manager.change(ShortcutProfile::F9) && manager.toggle() == ShortcutBinding{3, 0x78}, "alternate shortcut profile registered");
+    Check(!manager.accepts(ID_HOTKEY_TOGGLE, 3, 'R') && manager.accepts(ID_HOTKEY_TOGGLE, 3 | MOD_NOREPEAT, 0x78), "queued old hotkeys ignored after change");
+    const int registrations = fake.hotkeyRegisters;
+    Check(manager.change(ShortcutProfile::F9) && fake.hotkeyRegisters == registrations, "idempotent profile does not duplicate registrations");
+    Check(manager.change(ShortcutProfile::Disabled) && !manager.toggle() && !manager.restore() && fake.registeredHotkeys.empty(), "disable unregisters both shortcuts");
+    Check(!manager.accepts(ID_HOTKEY_TOGGLE, 3, 0x78) && manager.release(), "disabled profile ignores queued shortcuts");
+}
+void ShortcutRegistrationRollback() {
+    HotkeyManager manager;
+    Check(manager.initialize(nullptr, ShortcutProfile::Default), "initial profile");
+    fake.hotkeyRegisterResults = {true, false, true, true};
+    Check(!manager.change(ShortcutProfile::F10), "reject incomplete new profile");
+    Check(manager.toggle() == ShortcutBinding{3, 'R'} && manager.restore() == ShortcutBinding{7, 'R'}, "both previous actual bindings restored");
+    Check(fake.registeredHotkeys.at(ID_HOTKEY_TOGGLE) == *manager.toggle() && fake.registeredHotkeys.at(ID_HOTKEY_RESTORE) == *manager.restore(), "reported registrations match fake OS after rollback");
+    Check(manager.release(), "release registered shortcuts");
+}
+void ShortcutPartialRollbackAndRetry() {
+    HotkeyManager manager;
+    Check(manager.initialize(nullptr, ShortcutProfile::Default), "initial profile");
+    fake.hotkeyRegisterResults = {true, false, true};
+    fake.hotkeyUnregisterResults = {true, true, false};
+    Check(!manager.change(ShortcutProfile::F9), "registration and rollback can both fail");
+    Check(manager.toggle() == ShortcutBinding{3, 0x78} && manager.restore() == ShortcutBinding{7, 'R'}, "partial rollback reports actual mixed bindings without inventing prior state");
+    Check(fake.registeredHotkeys.at(ID_HOTKEY_TOGGLE) == *manager.toggle() && fake.registeredHotkeys.at(ID_HOTKEY_RESTORE) == *manager.restore(), "actual and reported state agree after rollback failure");
+    Check(manager.change(ShortcutProfile::Default) && manager.toggle() == ShortcutBinding{3, 'R'}, "retry can recover the prior profile");
+    fake.hotkeyUnregisterResults = {false, true};
+    Check(!manager.release() && manager.toggle() && !manager.restore(), "failed unregister keeps actual registration and still releases other shortcut");
+    Check(manager.release() && fake.registeredHotkeys.empty(), "release failure retry");
+}
+void ShortcutStartupPartialAndSchemaMigration() {
+    HotkeyManager manager;
+    fake.hotkeyRegisterResults = {false, true};
+    Check(!manager.initialize(nullptr, ShortcutProfile::Default) && !manager.toggle() && manager.restore(), "startup conflict retains available restore shortcut");
+    Check(manager.release(), "cleanup partial startup");
+    HotkeyManager disabled;
+    const int calls = fake.hotkeyRegisters;
+    Check(disabled.initialize(nullptr, ShortcutProfile::Disabled) && fake.hotkeyRegisters == calls, "disabled startup registers nothing");
+    Check(!disabled.change(static_cast<ShortcutProfile>(99)), "invalid shortcut profile rejected");
+    const auto old = ParsePreferences("[RedLightProfile]\nversion=1\nmode=luma\nluma=classic\nbackend=auto\nsession_minutes=0\n");
+    Check(old.preferences && old.preferences->shortcuts == ShortcutProfile::Default, "v1 profile retains default shortcuts");
+    auto current = *SerializePreferences(AppPreferences{});
+    current.replace(current.find("hotkeys=default"), 15, "hotkeys=unexpected");
+    Check(!ParsePreferences(current).preferences, "invalid shortcut token rejected");
+}
 void Arguments() {
     using S = StartupAction;
     Check(ParseArguments({}) == S::Tray, "no arguments");
@@ -670,6 +725,21 @@ LSTATUS RegSetKeyValueW(HKEY, const wchar_t*, const wchar_t* name, DWORD type, c
     fake.registry[name] = {type, std::vector<char>(begin, begin + bytes)};
     return ERROR_SUCCESS;
 }
+BOOL RegisterHotKey(HWND, int id, unsigned modifiers, unsigned key) {
+    ++fake.hotkeyRegisters;
+    bool success = true;
+    if (!fake.hotkeyRegisterResults.empty()) { success = fake.hotkeyRegisterResults.front(); fake.hotkeyRegisterResults.pop_front(); }
+    if (!success || fake.registeredHotkeys.contains(id)) return 0;
+    fake.registeredHotkeys[id] = {modifiers & 0xf, key};
+    return 1;
+}
+BOOL UnregisterHotKey(HWND, int id) {
+    ++fake.hotkeyUnregisters;
+    bool success = true;
+    if (!fake.hotkeyUnregisterResults.empty()) { success = fake.hotkeyUnregisterResults.front(); fake.hotkeyUnregisterResults.pop_front(); }
+    if (!success) return 0;
+    return fake.registeredHotkeys.erase(id) != 0;
+}
 namespace Diagnostics {
 void Log(const char*) {}
 void LogFormat(const char*, ...) {}
@@ -701,6 +771,8 @@ int main() {
         {"Magnification read-only verification", MagnificationVerificationReadOnly}, {"Matrix verification nonfinite values", MagnificationVerificationFiniteValues},
         {"Gamma read-only verification", GammaVerificationReadOnly}, {"Verification status priority", VerificationStatusPriority},
         {"Custom session-limit input", CustomSessionLimitParsing},
+        {"Shortcut registration and stale messages", ShortcutRegistrationAndStaleMessages}, {"Shortcut rollback", ShortcutRegistrationRollback},
+        {"Shortcut partial rollback/retry", ShortcutPartialRollbackAndRetry}, {"Shortcut startup and schema migration", ShortcutStartupPartialAndSchemaMigration},
         {"Command line", Arguments}
     };
     int failed = 0;
