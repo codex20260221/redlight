@@ -2,6 +2,12 @@
 #include "BackendPreference.h"
 #include "DisplayFilter.h"
 
+// The effective startup policy stays separate from editable next-start preferences.
+inline std::string_view StartupFallbackReason(BackendPreference startupPolicy, bool selectedGamma, std::string_view magnificationError) noexcept {
+    if (startupPolicy != BackendPreference::Automatic || !selectedGamma) return "Not applicable";
+    return magnificationError.empty() ? "Magnification initialization failed; reason not retained" : magnificationError;
+}
+
 // Selection only initializes backends; activation always remains explicit.
 inline DisplayFilter* InitializePreferredBackend(BackendPreference preference,
     DisplayFilter& magnification, DisplayFilter& gamma) {

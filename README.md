@@ -123,6 +123,8 @@ Start with one of these options to override the saved preference for that launch
 
 Use the Automatic override if an unavailable saved backend prevents startup. Gamma is a legacy diagnostic/compatibility option with driver and multi-monitor limitations. Close the running instance before using a startup override. The override is not saved.
 
+When Automatic startup falls back to Gamma, the support report includes the retained Magnification startup error alongside the effective startup policy. This is historical context, separate from a current Gamma recovery failure or an edited next-start preference. It reports the retained error; logs can contain earlier capture/cleanup failures in the same sequence. Explicit Gamma selection is labeled not applicable. Viewing the reason does not retry initialization or change backend selection.
+
 ### Portable settings profiles
 
 **Expert controls → Export settings profile to clipboard** copies a small versioned text profile containing preferred red mode, luma detail, next-start backend preference, shortcuts, session limit, and expiry warning. Paste it into a text file to keep or share the configuration. It preserves preferred Luma Red settings even while gamma fallback is running, and includes no enabled state, countdown, recovery snapshot, account identity, or file path. A command-line backend override does not replace the saved next-start preference in the export.

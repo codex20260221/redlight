@@ -955,6 +955,7 @@ void CopySupportReport(HWND owner) {
     state.sourceState = REDLIGHT_SOURCE_STATE;
     state.backend = g_displayFilter->name();
     state.startupPolicy = BackendPreferenceName(g_startupBackendPreference);
+    state.startupFallbackReason = StartupFallbackReason(g_startupBackendPreference, g_displayFilter == &g_gammaRampFilter, g_magnificationFilter.lastError());
     state.nextStartupPolicy = BackendPreferenceName(g_backendPreference);
     state.commandLineOverride = g_backendOverride;
     state.preferencesUnsaved = g_preferencesUnsaved;

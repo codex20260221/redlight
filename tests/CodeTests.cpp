@@ -921,6 +921,61 @@ void SessionTimerChangesAndClockWrap() {
     Check(timer.configure(1, nearWrap, true), "clock near wrap");
     Check(!timer.restoreDue(nearWrap + 59999) && timer.restoreDue(nearWrap + 60000), "deadline survives unsigned clock wrap");
 }
+void StartupFallbackReasonPolicyAndAllocation() {
+    for (auto policy : {BackendPreference::Automatic, BackendPreference::Magnification, BackendPreference::Gamma, static_cast<BackendPreference>(99)})
+        for (bool gamma : {false, true}) {
+            std::string_view reason; bool unused = false;
+            { TestMemory::FailNextAllocation fail; reason = StartupFallbackReason(policy, gamma, "retained primary failure"); unused = TestMemory::AllocationFailurePending(); }
+            Check(reason == (policy == BackendPreference::Automatic && gamma ? "retained primary failure" : "Not applicable") && unused,
+                "only actual Automatic-to-Gamma fallback exposes a retained failure; explicit selection and stale errors are distinct without allocation");
+        }
+    Check(StartupFallbackReason(BackendPreference::Automatic, true, {}) == "Magnification initialization failed; reason not retained" &&
+        BuildSupportReport({}).find("Automatic startup fallback reason: Not reported") != std::string::npos &&
+        fake.magInitializes == 0 && fake.dcRequests == 0 && fake.backendClockReads == 0,
+        "missing fallback details are distinct from unavailable metadata and never trigger another initialization or clock sample");
+}
+void StartupFallbackRetainsInitializationFailure() {
+    for (unsigned failure = 0; failure < 3; ++failure) {
+        Reset(); MagnificationFilter magnification; GammaRampFilter gamma;
+        if (failure == 0) { fake.magInit = false; fake.magInitializeError = 4321; }
+        if (failure == 1) { fake.magGet = false; fake.magReadError = 4321; }
+        if (failure == 2) fake.effect.transform[0][0] = (std::numeric_limits<float>::quiet_NaN)();
+        auto* selected = InitializePreferredBackend(BackendPreference::Automatic, magnification, gamma);
+        Check(selected == &gamma && !gamma.isActive() && !gamma.needsRestore() && !magnification.needsRestore(),
+            "existing fallback selects only initialized/off Gamma after primary initialization/capture failure cleanup completes");
+        const auto reason = StartupFallbackReason(BackendPreference::Automatic, true, magnification.lastError());
+        Check(reason.find(failure == 0 ? "MagInitialize" : (failure == 1 ? "MagGetFullscreenColorEffect" : "non-finite")) != std::string_view::npos,
+            "native initialization failure, capture read failure, and nonfinite capture retain their specific primary cause after successful fallback");
+        SupportReportState state; state.backend = selected->name(); state.startupPolicy = "Automatic"; state.nextStartupPolicy = "Magnification only";
+        state.startupFallbackReason = reason;
+        const auto report = BuildSupportReport(state);
+        Check(report.find(std::string("Automatic startup fallback reason: ") + std::string(reason)) != std::string::npos &&
+            report.find("Next-start preference: Magnification only") != std::string::npos &&
+            gamma.enable() && gamma.disable() && gamma.shutdown() && BuildSupportReport(state) == report,
+            "support retains startup cause independently of next-start preference and later Gamma operations; it cannot reselect a backend");
+    }
+}
+void StartupFallbackReportPreservesGammaRecovery() {
+    MagnificationFilter magnification; GammaRampFilter gamma;
+    fake.magInit = false;
+    Check(InitializePreferredBackend(BackendPreference::Automatic, magnification, gamma) == &gamma, "prepare automatic fallback");
+    fake.writes = {Write::FailAfterApply, Write::Fail};
+    Check(!gamma.enable() && gamma.needsRestore() && !gamma.isActive(), "retain Gamma calibration after fallback activation/rollback failure");
+    SupportReportState state; state.backend = gamma.name(); state.startupPolicy = "Automatic"; state.nextStartupPolicy = "Legacy gamma only";
+    state.startupFallbackReason = StartupFallbackReason(BackendPreference::Automatic, true, magnification.lastError());
+    state.needsRestore = true; state.lastError = "captured Gamma failure";
+    const auto magStatistics = magnification.statistics(), gammaStatistics = gamma.statistics(); const auto clocks = fake.backendClockReads;
+    const auto reads = fake.gammaReads, writes = fake.gammaWrites, initializes = fake.magInitializes, magReads = fake.magReads, releases = fake.mutexReleases;
+    const auto primaryError = std::string(magnification.lastError()), recoveryError = std::string(gamma.lastError());
+    const auto report = BuildSupportReport(state);
+    Check(report.find("Automatic startup fallback reason: MagnificationFilter: MagInitialize failed (no native error code)") != std::string::npos &&
+        report.find("State: Recovery needed") != std::string::npos && primaryError == magnification.lastError() && recoveryError == gamma.lastError() &&
+        magnification.statistics() == magStatistics && gamma.statistics() == gammaStatistics && fake.backendClockReads == clocks &&
+        fake.gammaReads == reads && fake.gammaWrites == writes && fake.magInitializes == initializes && fake.magReads == magReads && fake.mutexReleases == releases &&
+        fake.mutexOwned && gamma.needsRestore() && !gamma.isActive(),
+        "copied fallback cause and current recovery have separate diagnostics without native reads, initialization, timing, or ownership changes");
+    Check(gamma.disable() && gamma.shutdown(), "Gamma original remains recoverable after fallback reporting");
+}
 void BackendSelectionPolicies() {
     MagnificationFilter m;
     GammaRampFilter g;
@@ -6112,6 +6167,8 @@ int main() {
         {"Session timer boundaries", SessionTimerBoundaries},
         {"Session timer retries", SessionTimerRetryAndCancellation}, {"Session timer clock", SessionTimerChangesAndClockWrap},
         {"Backend default selection", BackendSelectionPolicies}, {"Backend strict/fallback selection", BackendSelectionStrictAndFallback},
+        {"Startup fallback reason policy/allocation", StartupFallbackReasonPolicyAndAllocation}, {"Startup fallback retained initialization failure", StartupFallbackRetainsInitializationFailure},
+        {"Startup fallback report preserves Gamma recovery", StartupFallbackReportPreservesGammaRecovery},
         {"Backend cleanup failure", BackendSelectionCleanupFailure}, {"Backend command line", BackendCommandLine},
         {"Luma preset output", LumaPresetOutput}, {"Luma preset failure/restoration", LumaPresetFailureAndRestore},
         {"Luma preset strict/gamma behavior", LumaPresetInStrictModeAndGamma},
