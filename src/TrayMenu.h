@@ -19,6 +19,9 @@ struct TrayMenuState {
     bool preferencesUnsaved;
     bool canChangeSessionLimit, canRestartCountdown;
     bool canClearRestorationHistory = true;
+    bool backendActive = false, restoreRequested = false, canToggle = true;
 };
 // Ownership of the returned root menu transfers to the caller.
 HMENU BuildTrayMenu(const TrayMenuState& state);
+// Bind a menu's displayed toggle intent before its asynchronous command is posted.
+unsigned ResolveTrayMenuCommand(unsigned command, const TrayMenuState& state) noexcept;

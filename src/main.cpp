@@ -23,6 +23,7 @@
 #include "CommandHelp.h"
 #include "LoopShutdown.h"
 #include "StatusClipboard.h"
+#include "FilterControl.h"
 #include "CommandIds.h"
 #include "TrayMenu.h"
 #include "SessionLimitDialog.h"
@@ -104,6 +105,7 @@ void RefreshDisplayContext(DisplayContextReason reason);
 bool ResetDisplay();
 bool RequestRunningInstanceRestore(bool* handled);
 void ToggleRedlight();
+void EnableRedlight();
 void UpdateTrayIconTip(const char* tip);
 void RefreshTrayIconTip();
 bool InitializeTrayIcon(HINSTANCE hInstance);
@@ -543,13 +545,15 @@ void RefreshTrayIconTip() {
     UpdateTrayIconTip(tip);
 }
 
-void ToggleRedlight() {
-    if (g_busy || g_preferencesApplying) return;
-    if (!g_trayAdded && !g_displayFilter->needsRestore()) {
+void ControlRedlight(bool toggle) {
+    const auto intent = SelectFilterControlIntent(toggle, g_busy, g_preferencesApplying, g_pendingRestore,
+        g_displayFilter->isActive(), g_displayFilter->needsRestore());
+    if (intent == FilterControlIntent::None) return;
+    if (!g_trayAdded && intent == FilterControlIntent::Enable) {
         ReportError("RedLight is waiting for its tray controls to return. The filter will stay off.");
         return;
     }
-    if (g_displayFilter->needsRestore()) {
+    if (intent == FilterControlIntent::Restore) {
         RestoreFilter(RestoreReason::Manual, true);
     } else {
         Diagnostics::LogFormat("Enable request: %s (%s)", g_displayFilter->name(), RedModeDisplayName(g_displayFilter->redMode()));
@@ -571,6 +575,9 @@ void ToggleRedlight() {
         RefreshTrayIconTip();
     }
 }
+
+void ToggleRedlight() { ControlRedlight(true); }
+void EnableRedlight() { ControlRedlight(false); }
 
 void StopSessionTimer() {
     g_sessionTimer.cancel();
@@ -1156,13 +1163,14 @@ void ShowTrayMenu(HWND hwnd) {
         g_hotkeys.restore() ? ShortcutBindingName(*g_hotkeys.restore()) : NULL, g_preferences.expiryWarning, g_preferencesUnsaved,
         !g_busy && !g_preferencesApplying && CanChangeSessionLimit(g_sessionTimer, now, *g_displayFilter, g_verification.result().state, g_pendingRestore),
         !g_busy && !g_preferencesApplying && CanRestartCountdown(g_sessionTimer, now, *g_displayFilter, g_verification.result().state, g_pendingRestore),
-        !g_busy && !g_preferencesApplying && g_restorationHistory.inProgress() == 0};
+        !g_busy && !g_preferencesApplying && g_restorationHistory.inProgress() == 0,
+        g_displayFilter->isActive(), g_pendingRestore, !g_busy && !g_preferencesApplying};
     HMENU menu = BuildTrayMenu(state);
     if (!menu) { ReportError("Could not build the tray menu."); return; }
     if (!SetForegroundWindow(hwnd)) Diagnostics::Log("SetForegroundWindow failed for tray menu.");
     const UINT command = TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
         pt.x, pt.y, 0, hwnd, NULL);
-    if (command) PostTrayCommand(hwnd, command);
+    if (command) PostTrayCommand(hwnd, ResolveTrayMenuCommand(command, state));
     if (!PostMessageA(hwnd, WM_NULL, 0, 0)) Diagnostics::Log("Posting tray menu dismissal failed.");
     if (!Shell_NotifyIconA(NIM_SETFOCUS, &nid)) Diagnostics::Log("Could not restore tray keyboard focus.");
     if (!DestroyMenu(menu)) Diagnostics::Log("DestroyMenu failed.");
@@ -1266,6 +1274,7 @@ LRESULT HandleWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         }
         switch (LOWORD(wParam)) {
         case ID_TRAY_TOGGLE: ToggleRedlight(); break;
+        case ID_TRAY_ENABLE: EnableRedlight(); break;
         case ID_TRAY_CUSTOM_SESSION:
             if (!g_busy && !g_preferencesApplying && CanChangeSessionLimit(g_sessionTimer, GetTickCount64(), *g_displayFilter, g_verification.result().state, g_pendingRestore)) {
                 if (const auto minutes = ShowSessionLimitDialog(hwnd, g_sessionTimer.minutes())) SetSessionLimit(*minutes);

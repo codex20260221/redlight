@@ -28,6 +28,7 @@
 #include "LoopShutdown.h"
 #include "TrayMenu.h"
 #include "StatusClipboard.h"
+#include "FilterControl.h"
 #include <memory>
 #include "InstanceName.h"
 #include "JsonString.h"
@@ -3462,6 +3463,85 @@ void ManualContextRefreshNoAllocationAndReadOnlyPolicy() {
         fake.magInitializes == 0 && fake.dcRequests == 0 && fake.statusSends == 0,
         "manual context refresh allocates no C++ storage and uses read-only display-failure policy without backend/tray work");
 }
+void FilterControlRecoveryPriorityAndBusyScopes() {
+    MagnificationFilter filter;
+    Check(filter.initialize(), "initialize filter-control recovery policy");
+    fake.magWriteResults = {Write::FailAfterApply, Write::Fail};
+    Check(!filter.enable() && !filter.isActive() && filter.needsRestore(), "prepare inactive owned recovery");
+    Check(SelectFilterControlIntent(true, false, false, false, filter.isActive(), filter.needsRestore()) == FilterControlIntent::Restore &&
+        SelectFilterControlIntent(false, false, false, false, filter.isActive(), filter.needsRestore()) == FilterControlIntent::Restore,
+        "both toggle and explicit enable select restoration before touching an inactive recovery snapshot");
+    Check(SelectFilterControlIntent(true, true, false, true, false, true) == FilterControlIntent::None &&
+        SelectFilterControlIntent(false, false, true, true, false, true) == FilterControlIntent::None,
+        "outer busy/preference scopes block either control without consuming queued recovery");
+    Check(filter.disable() && SelectFilterControlIntent(true, false, false, true, false, false) == FilterControlIntent::Restore &&
+        SelectFilterControlIntent(false, false, false, true, false, false) == FilterControlIntent::Restore,
+        "queued restoration dominates an otherwise off/clear backend, preventing an enable/restore flash");
+    Check(SelectFilterControlIntent(true, false, false, false, false, false) == FilterControlIntent::Enable,
+        "only a later clear off-state action requests activation");
+}
+void ExplicitEnableIntentIsIdempotentForActiveSession() {
+    MagnificationFilter filter;
+    Check(filter.initialize() && filter.enable(), "active filter for explicit enable intent");
+    SessionTimer timer;
+    Check(timer.configure(1, 1000, true), "active countdown before a stale enable action");
+    const auto statistics = filter.statistics();
+    const auto reads = fake.magReads, writes = fake.magWrites;
+    Check(SelectFilterControlIntent(false, false, false, false, filter.isActive(), filter.needsRestore()) == FilterControlIntent::None &&
+        SelectFilterControlIntent(true, false, false, false, filter.isActive(), filter.needsRestore()) == FilterControlIntent::Restore &&
+        timer.remainingMilliseconds(6000) == 55000 && filter.statistics() == statistics && fake.magReads == reads && fake.magWrites == writes,
+        "explicit enable cannot toggle an already active session off or restart its countdown, while ordinary toggle retains restore semantics");
+    Check(filter.disable(), "restore after idempotent explicit-enable policy");
+}
+void RecoveryMenuCaptionsAndBusyAvailability() {
+    for (unsigned scenario = 0; scenario < 5; ++scenario) {
+        Reset(); auto state = DefaultMenuState();
+        if (scenario == 1) { state.backendActive = true; state.needsRestore = true; }
+        if (scenario == 2) state.needsRestore = true;
+        if (scenario == 3) state.restoreRequested = true;
+        if (scenario == 4) state.canToggle = false;
+        const auto root = BuildTrayMenu(state);
+        const auto toggle = FakeMenuCommand(root, ID_TRAY_TOGGLE);
+        const auto restore = FakeMenuCommand(root, ID_TRAY_RESTORE);
+        const char* expected = scenario == 1 ? "Turn o&ff" : (scenario == 2 || scenario == 3 ? "Retry rec&overy" : "Turn &on");
+        Check(toggle && toggle->label.starts_with(expected) && ((toggle->flags & MF_GRAYED) != 0) == (scenario == 4) &&
+            restore && !(restore->flags & MF_GRAYED), "captions distinguish confirmed active, inactive/queued recovery, and disabled busy toggle while Restore stays available");
+        for (const auto& menu : fake.menus) Check(UniqueMenuAccelerators(*menu), "recovery captions preserve unique root/submenu accelerators");
+        Check(DestroyMenu(root) && AliveFakeMenus() == 0, "release each recovery menu variant");
+    }
+}
+void StaleTurnOffMenuCannotEnableAfterExternalRestore() {
+    MagnificationFilter filter;
+    Check(filter.initialize() && filter.enable(), "active filter before opening an off menu");
+    auto state = DefaultMenuState(); state.backendActive = true; state.needsRestore = true;
+    const auto menu = BuildTrayMenu(state);
+    Check(menu && filter.disable(), "external restoration occurs after the menu snapshot was built");
+    const auto activations = filter.statistics().activation.requests;
+    const auto writes = fake.magWrites;
+    Check(ResolveTrayMenuCommand(ID_TRAY_TOGGLE, state) == ID_TRAY_RESTORE && filter.disable() && !filter.isActive() && !filter.needsRestore() &&
+        filter.statistics().activation.requests == activations && fake.magWrites == writes,
+        "a displayed Turn off command remains an idempotent restore after state changes, never a fresh activation");
+    Check(DestroyMenu(menu), "release stale off-menu snapshot");
+}
+void StaleTurnOnMenuCannotDisableNewlyActiveSession() {
+    auto state = DefaultMenuState();
+    const auto menu = BuildTrayMenu(state);
+    MagnificationFilter filter;
+    Check(menu && filter.initialize() && filter.enable(), "another control activates after an off-state menu opens");
+    Check(ResolveTrayMenuCommand(ID_TRAY_TOGGLE, state) == ID_TRAY_ENABLE &&
+        SelectFilterControlIntent(false, false, false, false, filter.isActive(), filter.needsRestore()) == FilterControlIntent::None && filter.isActive(),
+        "a displayed Turn on resolves to explicit enable and cannot invert a subsequently active filter");
+    Check(filter.disable() && DestroyMenu(menu), "restore and release stale on-menu test resources");
+}
+void MenuQueuedRecoveryRoutingAndOtherActions() {
+    auto state = DefaultMenuState(); state.restoreRequested = true;
+    Check(ResolveTrayMenuCommand(ID_TRAY_TOGGLE, state) == ID_TRAY_RESTORE, "a queued-only recovery menu binds to restoration even without owned state");
+    for (const auto command : {0u, ID_TRAY_RESTORE, ID_TRAY_ABOUT, ID_TRAY_EXIT, ID_TRAY_MODE_STRICT_RED, ID_TRAY_SAVE_PREFERENCES,
+        ID_TRAY_COPY_STATUS_JSON, ID_TRAY_CLEAR_RESTORATION_HISTORY, ID_TRAY_REFRESH_DISPLAY_CONTEXT, ID_SESSION_LIMIT_BASE + 17})
+        Check(ResolveTrayMenuCommand(command, state) == command, "non-toggle menu actions retain their original commands");
+    Check(CommandMayChangeFilter(ID_TRAY_ENABLE) && fake.magWrites == 0 && fake.gammaWrites == 0 && fake.registryWrites == 0,
+        "explicit enable keeps mutating-action exception policy while routing itself performs no display/settings operation");
+}
 } // namespace
 
 HMENU CreatePopupMenu() {
@@ -3883,6 +3963,9 @@ int main() {
         {"Status clipboard retains pending gamma recovery", StatusClipboardRetainsPendingGammaRecovery},
         {"Manual context refresh preserves active backend", ManualContextRefreshPreservesActiveBackend}, {"Manual context refresh failure preserves cache/verification", ManualContextRefreshFailureRetainsVerificationAndAge},
         {"Manual context refresh allocation/policy", ManualContextRefreshNoAllocationAndReadOnlyPolicy},
+        {"Filter control recovery/busy priority", FilterControlRecoveryPriorityAndBusyScopes}, {"Explicit enable preserves active countdown", ExplicitEnableIntentIsIdempotentForActiveSession},
+        {"Recovery menu captions/busy availability", RecoveryMenuCaptionsAndBusyAvailability}, {"Stale off-menu cannot activate", StaleTurnOffMenuCannotEnableAfterExternalRestore},
+        {"Stale on-menu cannot deactivate", StaleTurnOnMenuCannotDisableNewlyActiveSession}, {"Queued recovery menu routing", MenuQueuedRecoveryRoutingAndOtherActions},
         {"Command line", Arguments}
     };
     int failed = 0;

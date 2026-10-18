@@ -84,10 +84,11 @@ HMENU BuildTrayMenu(const TrayMenuState& state) {
         !expert.add(0, NULL, MF_SEPARATOR) || !expert.add(ID_TRAY_RESET_PREFERENCES, "Reset preferences to &defaults...")) return NULL;
     char toggleLabel[128], restoreLabel[128];
     const char* absent = state.shortcutProfile == ShortcutProfile::Disabled ? "Disabled" : "Unavailable";
-    sprintf_s(toggleLabel, state.needsRestore ? "Turn o&ff\t%s" : "Turn &on\t%s",
-        state.toggleShortcut ? state.toggleShortcut : absent);
+    const char* action = state.restoreRequested || (state.needsRestore && !state.backendActive) ? "Retry rec&overy" :
+        (state.backendActive ? "Turn o&ff" : "Turn &on");
+    sprintf_s(toggleLabel, "%s\t%s", action, state.toggleShortcut ? state.toggleShortcut : absent);
     sprintf_s(restoreLabel, "&Restore display\t%s", state.restoreShortcut ? state.restoreShortcut : absent);
-    if (!root.add(ID_TRAY_TOGGLE, toggleLabel) || !root.add(ID_TRAY_RESTORE, restoreLabel) ||
+    if (!root.add(ID_TRAY_TOGGLE, toggleLabel, MF_STRING | (state.canToggle ? MF_ENABLED : MF_GRAYED)) || !root.add(ID_TRAY_RESTORE, restoreLabel) ||
         !root.add(0, NULL, MF_SEPARATOR) ||
         !root.add(ID_TRAY_MODE_STRICT_RED, "&Strict Red", Checked(state.mode == RedMode::StrictRed)) ||
         !root.add(ID_TRAY_MODE_LUMA_RED, "L&uma Red", Checked(state.mode == RedMode::LumaRed) | (state.supportsLuma ? MF_ENABLED : MF_GRAYED)) ||
@@ -97,4 +98,9 @@ HMENU BuildTrayMenu(const TrayMenuState& state) {
         !root.add(ID_TRAY_LOGS, "Open &logs folder") || !root.add(ID_TRAY_ABOUT, "&About") ||
         !root.add(ID_TRAY_EXIT, "E&xit")) return NULL;
     return root.release();
+}
+
+unsigned ResolveTrayMenuCommand(unsigned command, const TrayMenuState& state) noexcept {
+    if (command != ID_TRAY_TOGGLE) return command;
+    return state.restoreRequested || state.needsRestore || state.backendActive ? ID_TRAY_RESTORE : ID_TRAY_ENABLE;
 }
