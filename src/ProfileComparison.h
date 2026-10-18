@@ -13,5 +13,6 @@ inline std::optional<unsigned> ProfileDifferenceMask(const AppPreferences& candi
         (candidate.shortcuts != saved.shortcuts ? 16u : 0u) | (candidate.expiryWarning != saved.expiryWarning ? 32u : 0u);
 }
 // Compare an already validated candidate to persisted/default preferences without writes.
+// JSON includes saved source, changed field names, and typed saved/candidate value pairs.
 // 0 match, 5 different, 4 invalid candidate, 1 settings/output/internal failure.
 int CompareSavedSettingsProfile(const AppPreferences& candidate) noexcept;

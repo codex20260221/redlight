@@ -27,7 +27,7 @@ int CompareSavedSettingsProfile(const AppPreferences& candidate) noexcept {
             Diagnostics::Log("Offline profile comparison refused unreadable or invalid stored preferences.");
             return WriteComparison("{\"protocol\":1,\"status\":\"settings-error\",\"match\":null}\n", 1);
         }
-        char output[512];
+        char output[1024];
         int length = std::snprintf(output, sizeof(output),
             "{\"protocol\":1,\"status\":\"profiles-%s\",\"match\":%s,\"differences\":[", *mask ? "differ" : "match", *mask ? "false" : "true");
         if (length < 0 || static_cast<std::size_t>(length) >= sizeof(output)) return ComparisonFormatFailure();
@@ -40,7 +40,30 @@ int CompareSavedSettingsProfile(const AppPreferences& candidate) noexcept {
             used += static_cast<std::size_t>(length);
             first = false;
         }
-        constexpr std::string_view ending = "]}\n";
+        length = std::snprintf(output + used, sizeof(output) - used,
+            "],\"saved_source\":\"%s\",\"changes\":{", PreferenceSourceToken(loaded.source));
+        if (length < 0 || static_cast<std::size_t>(length) >= sizeof(output) - used) return ComparisonFormatFailure();
+        used += static_cast<std::size_t>(length);
+        const auto tokens = [](const AppPreferences& value) {
+            return std::array<const char*, ProfileDifferenceFieldNames.size()>{PreferenceModeToken(value.mode), PreferenceLumaToken(value.luma),
+                PreferenceBackendToken(value.backend), nullptr, ShortcutProfileToken(value.shortcuts), ExpiryWarningToken(value.expiryWarning)};
+        };
+        const auto savedTokens = tokens(loaded.preferences), candidateTokens = tokens(candidate);
+        first = true;
+        for (std::size_t index = 0; index < ProfileDifferenceFieldNames.size(); ++index) {
+            if ((*mask & (1u << index)) == 0) continue;
+            if (savedTokens[index]) {
+                length = std::snprintf(output + used, sizeof(output) - used,
+                    "%s\"%s\":{\"saved\":\"%s\",\"candidate\":\"%s\"}", first ? "" : ",", ProfileDifferenceFieldNames[index], savedTokens[index], candidateTokens[index]);
+            } else {
+                length = std::snprintf(output + used, sizeof(output) - used,
+                    "%s\"%s\":{\"saved\":%u,\"candidate\":%u}", first ? "" : ",", ProfileDifferenceFieldNames[index], loaded.preferences.sessionMinutes, candidate.sessionMinutes);
+            }
+            if (length < 0 || static_cast<std::size_t>(length) >= sizeof(output) - used) return ComparisonFormatFailure();
+            used += static_cast<std::size_t>(length);
+            first = false;
+        }
+        constexpr std::string_view ending = "}}\n";
         if (ending.size() > sizeof(output) - used) return ComparisonFormatFailure();
         for (const auto character : ending) output[used++] = character;
         return WriteComparison(std::string_view(output, used), *mask ? 5 : 0);

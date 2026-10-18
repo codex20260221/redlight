@@ -16,7 +16,7 @@ inline constexpr char CommandHelpBody[] =
     "--status: report cached tray state as JSON without starting it\n"
     "--validate-profile=<file>: inspect/validate a file offline (schema/settings JSON)\n"
     "--normalize-profile=<file>: write a canonical current-format profile\n"
-    "--compare-profile=<file>: compare with saved preferences (JSON)\n"
+    "--compare-profile=<file>: compare exact saved/candidate values (JSON)\n"
     "--save-profile=<file>: explicitly save for next start (JSON; no running instance)\n"
     "--export-profile: write saved/default preferences as profile text\n"
     "--backend=auto|magnification|gamma: one-start backend override\n\n"

@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Extend offline profile comparison with saved preference source and exact typed saved/candidate pairs for changed settings, retaining the original changed-field list/statuses/exit codes and rejecting unusable input/storage before exposing values.
 - Added guarded Clear recent diagnostic memory under Expert diagnostics, resetting retained records/overwrite counts without file I/O, logging-health changes, or display/preference effects; later records begin a fresh bounded history.
 - Extend offline profile-validation JSON with validated input/current schema, schema-upgrade requirements, exact defaulted fields, and all resolved preference values, preserving read-only behavior, existing statuses/exit codes, and failure output without unvalidated metadata.
 - Added Copy recent diagnostics with a synchronized 32-record memory buffer independent of file availability, complete chronological snapshots and overwrite counts, allocation-free recording, Unicode-safe escaped export, and checked clipboard ownership without display/backend changes.

@@ -2575,18 +2575,31 @@ AppPreferences ComparisonCandidate(unsigned mask) {
     return value;
 }
 void ProfileComparisonAllFieldsAndMasks() {
+    constexpr std::string_view pairs[] = {"\"mode\":{\"saved\":\"luma\",\"candidate\":\"strict\"}", "\"luma\":{\"saved\":\"classic\",\"candidate\":\"equal\"}",
+        "\"backend\":{\"saved\":\"auto\",\"candidate\":\"gamma\"}", "\"session_minutes\":{\"saved\":0,\"candidate\":240}",
+        "\"hotkeys\":{\"saved\":\"default\",\"candidate\":\"disabled\"}", "\"expiry_warning\":{\"saved\":\"off\",\"candidate\":\"5m\"}"};
     for (unsigned mask = 0; mask < 64; ++mask) {
         const auto candidate = ComparisonCandidate(mask);
         Check(ProfileDifferenceMask(candidate, {}) == mask && ProfileDifferenceMask({}, candidate) == mask && ProfileDifferenceMask(candidate, candidate) == 0u,
             "all field combinations compare symmetrically without differences for identical preferences");
         Reset();
         Check(CompareSavedSettingsProfile(candidate) == (mask ? 5 : 0), "comparison exit code distinguishes semantic differences from errors");
+        const std::string_view json(fake.stdoutText);
+        const auto listBegin = json.find("\"differences\":[");
+        Check(listBegin != std::string_view::npos, "comparison retains its named difference array");
+        const auto listEnd = json.find(']', listBegin);
+        Check(listEnd != std::string_view::npos, "comparison difference array is complete");
+        const auto listed = json.substr(listBegin, listEnd - listBegin + 1);
         for (unsigned index = 0; index < ProfileDifferenceFieldNames.size(); ++index) {
             const auto field = std::string("\"") + ProfileDifferenceFieldNames[index] + "\"";
-            Check((fake.stdoutText.find(field) != std::string::npos) == ((mask & (1u << index)) != 0),
-                "JSON lists exactly the changed setting names without values");
+            Check((listed.find(field) != std::string_view::npos) == ((mask & (1u << index)) != 0) &&
+                (json.find(field + ":{") != std::string_view::npos) == ((mask & (1u << index)) != 0),
+                "JSON lists exactly the changed setting names");
+            Check((fake.stdoutText.find(pairs[index]) != std::string::npos) == ((mask & (1u << index)) != 0),
+                "every combination reports exact changed saved/candidate values with numeric session minutes");
         }
-        Check(fake.stdoutText.starts_with("{\"protocol\":1,") && fake.stdoutText.ends_with("]}\n") && fake.registryWrites == 0,
+        Check(fake.stdoutText.starts_with("{\"protocol\":1,") && fake.stdoutText.ends_with("}}\n") && fake.stdoutText.size() < 1024 &&
+            fake.stdoutText.find("\"saved_source\":\"defaults\"") != std::string::npos && fake.registryWrites == 0,
             "each field combination produces complete JSON without storage writes");
     }
 }
@@ -2599,7 +2612,7 @@ void ProfileComparisonFileReadOnly() {
     const auto statistics = filter.statistics();
     fake.profileData = *SerializePreferences(saved); fake.profileChunk = 2; fake.stdoutChunk = 3;
     Check(CompareSettingsProfileFile(L"C:\\profiles\\赤 光.txt") == 0 && fake.stdoutText ==
-        "{\"protocol\":1,\"status\":\"profiles-match\",\"match\":true,\"differences\":[]}\n",
+        "{\"protocol\":1,\"status\":\"profiles-match\",\"match\":true,\"differences\":[],\"saved_source\":\"versioned-record\",\"changes\":{}}\n",
         "matching file and saved preferences produce exact successful JSON through partial reads/writes");
     Check(fake.profileAccess == GENERIC_READ && !fake.profileHandleOpen && fake.stdoutWhileProfileOpen == 0 && fake.stdoutErrorMode == 2 && fake.errorMode == 2 &&
         fake.registryReads > 0 && fake.registryWrites == registryWrites && fake.magWrites == writes && fake.magReads == reads && filter.statistics() == statistics &&
@@ -2653,6 +2666,56 @@ void ProfileComparisonOutputAndAllocationFailures() {
         Check(CompareSavedSettingsProfile({}) == 1 && fake.stdoutText.empty() && fake.registryWrites == 0,
             "internal allocation failure during a fake storage read is contained before comparison output");
     }
+}
+void ProfileComparisonValueDirectionsAndMatch() {
+    const auto saved = ComparisonCandidate(63);
+    Check(SavePreferences(saved), "seed all nondefault saved values");
+    const auto writes = fake.registryWrites;
+    Check(CompareSavedSettingsProfile({}) == 5 && fake.stdoutText.find("\"saved_source\":\"versioned-record\"") != std::string::npos,
+        "comparison reports the successful saved storage source");
+    for (const auto pair : {"\"mode\":{\"saved\":\"strict\",\"candidate\":\"luma\"}", "\"luma\":{\"saved\":\"equal\",\"candidate\":\"classic\"}",
+        "\"backend\":{\"saved\":\"gamma\",\"candidate\":\"auto\"}", "\"session_minutes\":{\"saved\":240,\"candidate\":0}",
+        "\"hotkeys\":{\"saved\":\"disabled\",\"candidate\":\"default\"}", "\"expiry_warning\":{\"saved\":\"5m\",\"candidate\":\"off\"}"})
+        Check(fake.stdoutText.find(pair) != std::string::npos, "saved/candidate direction remains correct when every proposed value reverses toward defaults");
+    fake.stdoutText.clear();
+    Check(CompareSavedSettingsProfile(saved) == 0 && fake.stdoutText ==
+        "{\"protocol\":1,\"status\":\"profiles-match\",\"match\":true,\"differences\":[],\"saved_source\":\"versioned-record\",\"changes\":{}}\n" &&
+        fake.registryWrites == writes, "matching settings report empty changes and preserve the record without rewriting it");
+}
+void ProfileComparisonResolvedLegacyAndOlderValues() {
+    PutLegacy(L"RedMode", 0); PutLegacy(L"LumaProfile", 2); PutLegacy(L"SessionLimitMinutes", 17);
+    const AppPreferences candidate{RedMode::StrictRed, LumaProfile::EqualDetail, BackendPreference::Automatic, 17, ShortcutProfile::F9};
+    Check(CompareSavedSettingsProfile(candidate) == 5 && fake.stdoutText.find("\"saved_source\":\"legacy-values\"") != std::string::npos &&
+        fake.stdoutText.find("\"changes\":{\"hotkeys\":{\"saved\":\"default\",\"candidate\":\"f9\"}}") != std::string::npos &&
+        fake.registryWrites == 0 && !fake.registry.contains(L"SettingsProfile"), "legacy saved choices expose resolved default shortcuts without migration or spurious unchanged pairs");
+    Reset();
+    const std::string older = "[RedLightProfile]\nversion=1\nmode=luma\nluma=classic\nbackend=auto\nsession_minutes=15\n";
+    const std::vector<char> original(older.begin(), older.end());
+    fake.registry[L"SettingsProfile"] = {REG_BINARY, original};
+    Check(CompareSavedSettingsProfile({RedMode::LumaRed, LumaProfile::Classic, BackendPreference::Automatic, 15, ShortcutProfile::F10, ExpiryWarning::OneMinute}) == 5 &&
+        fake.stdoutText.find("\"saved_source\":\"versioned-record\"") != std::string::npos &&
+        fake.stdoutText.find("\"hotkeys\":{\"saved\":\"default\",\"candidate\":\"f10\"}") != std::string::npos &&
+        fake.stdoutText.find("\"expiry_warning\":{\"saved\":\"off\",\"candidate\":\"1m\"}") != std::string::npos &&
+        fake.registryWrites == 0 && fake.registry.at(L"SettingsProfile").bytes == original,
+        "older record defaults appear as exact current semantic values without rewriting the old bytes");
+}
+void ProfileComparisonValuePairsPreserveGammaRecovery() {
+    Check(SavePreferences(ComparisonCandidate(63)), "seed a complete saved profile");
+    GammaRampFilter filter;
+    Check(filter.initialize(), "prepare gamma backend");
+    fake.writes = {Write::FailAfterApply, Write::Fail};
+    Check(!filter.enable() && filter.needsRestore() && !filter.isActive(), "retain pending gamma recovery");
+    const auto statistics = filter.statistics();
+    const auto error = std::string(filter.lastError());
+    const auto reads = fake.gammaReads, writes = fake.gammaWrites, releases = fake.mutexReleases, registryWrites = fake.registryWrites;
+    fake.profileData = *SerializePreferences({});
+    Check(CompareSettingsProfileFile(L"candidate.profile") == 5 &&
+        fake.stdoutText.find("\"session_minutes\":{\"saved\":240,\"candidate\":0}") != std::string::npos &&
+        fake.stdoutWhileProfileOpen == 0 && !fake.profileHandleOpen && fake.registryWrites == registryWrites && fake.metricReads == 0 &&
+        filter.statistics() == statistics && error == filter.lastError() && filter.needsRestore() && !filter.isActive() && fake.mutexOwned &&
+        fake.gammaReads == reads && fake.gammaWrites == writes && fake.mutexReleases == releases,
+        "changed-value comparison closes input, only reads saved preferences, and preserves pending calibration/error/ownership/counters");
+    Check(filter.disable(), "original calibration remains recoverable after value-pair output");
 }
 void ProfileComparisonOwnedPathArguments() {
     std::wstring option = L"--compare-profile=C:\\profiles\\赤 光.txt";
@@ -4335,6 +4398,8 @@ int main() {
         {"Profile comparison older/legacy defaults", ProfileComparisonOlderAndLegacyDefaults}, {"Profile comparison input failure gates", ProfileComparisonInputFailureGates},
         {"Profile comparison stored-data refusal", ProfileComparisonStoredFailureRefusal}, {"Profile comparison output/allocation failures", ProfileComparisonOutputAndAllocationFailures},
         {"Profile comparison owned path arguments", ProfileComparisonOwnedPathArguments},
+        {"Profile comparison value directions/match", ProfileComparisonValueDirectionsAndMatch}, {"Profile comparison resolved legacy/older values", ProfileComparisonResolvedLegacyAndOlderValues},
+        {"Profile comparison value pairs preserve recovery", ProfileComparisonValuePairsPreserveGammaRecovery},
         {"Preference preview exact changed fields", PreferencePreviewChangedFields}, {"Preference preview identical/full choices", PreferencePreviewIdenticalAndFullValues},
         {"Preference preview bounds/validation", PreferencePreviewBoundsAndInvalidInput}, {"Preference preview without C++ allocation", PreferencePreviewNoCppAllocation},
         {"Preference preview backend/storage isolation", PreferencePreviewPreservesCurrentBackendAndStorage},
