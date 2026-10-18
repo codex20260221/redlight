@@ -13,6 +13,7 @@ Run from a Visual Studio 2022 x64 C++ environment with CMake 3.20 or later:
 ```powershell
 cmake -S . -B build
 cmake --build build --config Release
+./tools/Test-BinaryImports.ps1
 ./tools/Test-CodeOnlyBinary.ps1
 ctest --test-dir build -C Release --output-on-failure
 ./tools/Verify-Release.ps1
@@ -53,6 +54,8 @@ Validation performed: Windows x64 build, isolated backend/command-line tests, st
 | Unicode Windows profile / clean PC | Diagnostics folder opens, log rotation works, portable app needs no VC++ redistributable | Pending |
 
 ## Expert-feature follow-up validation
+
+Static DLL policies: 21 additional synthetic PowerShell code scenarios cover ordinary/delayed lists, dependency/import-table disagreement, nonstandard/suffixless/path/space/Unicode names, ordinal case-insensitive duplicate handling, malformed/empty/truncated/multiple-image output, individual-symbol exclusion, and refusal of runtime/private DLLs or unknown policies. All pass in PowerShell 7.6.7 and Windows PowerShell 5.1.26100.9711. Native static checks confirm both isolated executables remain KERNEL32-only, the release has exactly the seven reviewed Windows libraries, and the successfully inspected release is rejected by code-test policy. All 293 isolated C++ scenarios pass under the revised gate. [Microsoft documents /IMPORTS as including ordinary and delay-loaded DLLs](https://learn.microsoft.com/en-us/cpp/build/reference/imports-dumpbin?view=msvc-170); unknown/mismatched tool formatting fails rather than proving a policy. Native discovery output is collected before reading exit status. CI definitions are updated locally; no remote run/publication is claimed. Manual notes (pending; not executed): qualify startup/filtering/recovery/Exit on a clean supported Windows machine, confirm no separate CRT installation is needed, and review any intentional dependency changes. These import checks do not cover runtime module loads or physical display behavior. No inspected executable, application, or display test ran.
 
 Late-cleanup diagnostic path storage: two additional isolated production-logger scenarios cover destructor-style logging/rotation after failed close with changed/unavailable environment, exact longest-archive capacity, one-character overflow refused before current-file open, retained memory fallback, and shorter Unicode retry without stale suffix bytes. A constinit cache plus a trivial-destruction static assertion removes the dynamically destructed path-owner dependency; the four UTF-16 buffers reserve 256 KiB of static storage. All 293 isolated scenarios pass; Release and MSVC /analyze builds are clean with KERNEL32-only imports. Manual notes (pending; not executed): exercise controlled close/rotation failures and late cleanup logging, environment/path-capacity boundaries with ordinary filesystem restrictions, retry file logging, and confirm backend restore/Exit recovery remains usable. Fake synthetic long directories qualify the internal bound only. No real static teardown, file fault, application, or display test ran.
 

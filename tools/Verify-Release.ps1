@@ -28,6 +28,10 @@ try {
     $flags = $reader.ReadUInt16()
     if (($flags -band 0x140) -ne 0x140) { throw 'ASLR and DEP must be enabled.' }
 } finally { $reader.Dispose() }
+Import-Module (Join-Path $PSScriptRoot 'BinaryImports.psm1') -Force
+$dlls = @(Get-BinaryDllImports -Binary $item.FullName)
+Test-BinaryDllImports -Dlls $dlls -Policy PortableRelease
+Write-Output "Portable Windows imports verified: $($dlls -join ', ')"
 # Inspect the embedded manifest as data. An .rc file can compile a mistakenly
 # named resource type, so source presence alone does not establish embedding.
 $sdkBin = Join-Path ([Environment]::GetFolderPath('ProgramFilesX86')) 'Windows Kits/10/bin'

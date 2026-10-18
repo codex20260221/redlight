@@ -20,6 +20,9 @@ jobs:
         run: cmake -S . -B build -A x64 -DREDLIGHT_BUILD_PROBE=OFF
       - name: Build
         run: cmake --build build --config Release
+      - name: Test static import parser and policies
+        shell: pwsh
+        run: ./tools/Test-BinaryImports.ps1
       - name: Verify tests cannot access display APIs
         shell: pwsh
         run: ./tools/Test-CodeOnlyBinary.ps1
