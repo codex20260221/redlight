@@ -9,6 +9,7 @@
 
 struct SupportReportState {
     std::string_view version, backend, startupPolicy, nextStartupPolicy, redMode, lumaProfile, lastError;
+    std::string_view preferredRedMode = "Not reported", preferredLumaProfile = "Not reported";
     std::string_view buildRevision = "unversioned", sourceState = "unknown";
     BackendVerification verification = BackendVerification::NotChecked;
     std::optional<BackendReadbackDetails> readback;
@@ -38,7 +39,9 @@ inline std::string BuildSupportReport(const SupportReportState& state) {
         << "Backend: " << state.backend << "\r\nStartup policy: " << state.startupPolicy
         << (state.commandLineOverride ? " (command-line override)" : "")
         << "\r\nNext-start preference: " << state.nextStartupPolicy << "\r\nMode: " << state.redMode
-        << "\r\nLuma detail: " << state.lumaProfile << "\r\nState: "
+        << "\r\nLuma detail: " << state.lumaProfile
+        << "\r\nPreferred red mode: " << state.preferredRedMode << "\r\nPreferred Luma detail: " << state.preferredLumaProfile
+        << "\r\nState: "
         << FilterStatusDescription(state.active, state.needsRestore, !state.lastError.empty(), state.verification, state.restoreRequested)
         << "\r\nBackend verification: " << BackendVerificationName(state.verification);
     if (state.readback) {

@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Allow preferred Luma-detail edits during gamma fallback without backend calls, output/error/snapshot changes, or verification invalidation; distinguish effective and preferred selections in About/support reports and add explicit Luma-profile scope to status JSON.
 - Added an Expert retry for Windows session-recovery notifications, checked registration ownership and cleanup, idempotent/reentrant-call protection, and cached last-error details in About/support reports; deferred restore requests remain honored.
 - Added an explicit Save current preferences command (labeled Retry after failed saves) with transaction guarding and unchanged filtering/countdowns, plus persistent startup preference-source/load-warning details in About and support reports.
 - Added numerical backend-verification details to the check dialog, logs, and cached support reports: complete value/mismatch counts, largest finite difference with units, nonfinite/unexpected green-blue flags, and preserved read-error codes; comparison tolerances and restore policies remain unchanged.

@@ -22,6 +22,7 @@
 #include "ProfileValidation.h"
 #include "ProfileExport.h"
 #include "SessionNotifications.h"
+#include "LumaPreference.h"
 #include "StandardOutput.h"
 #include <cstdio>
 
@@ -708,26 +709,29 @@ void SaveRedMode(RedMode mode) {
 }
 
 void SetLumaProfile(LumaProfile profile) {
-    if (g_busy || g_preferencesApplying || !g_displayFilter->supportsRedMode(RedMode::LumaRed) ||
-        !IsValidLumaProfile(static_cast<unsigned>(profile))) return;
-    bool applied = false;
+    if (g_busy || g_preferencesApplying || !IsValidLumaProfile(static_cast<unsigned>(profile))) return;
+    LumaPreferenceResult result = LumaPreferenceResult::Rejected;
     char error[256] = {};
     {
         ScopedFlag busy(g_busy);
-        g_verification = {};
-        applied = g_displayFilter->setLumaProfile(profile);
-        if (!applied) strcpy_s(error, g_displayFilter->lastError());
+        if (g_displayFilter->supportsRedMode(RedMode::LumaRed)) g_verification = {};
+        result = UpdateLumaPreference(*g_displayFilter, g_preferences, profile);
+        if (result == LumaPreferenceResult::BackendFailed) strcpy_s(error, g_displayFilter->lastError());
     }
-    if (g_pendingRestore) RestoreFilter(false);
-    if (!applied) {
+    const bool restored = !g_pendingRestore || RestoreFilter(false);
+    if (result == LumaPreferenceResult::BackendFailed) {
         ReportError(error);
         return;
     }
-    g_preferences.luma = profile;
+    if (result == LumaPreferenceResult::Rejected) { ReportError("Restore display before changing Luma detail."); return; }
     g_preferencesUnsaved = !SavePreferences(g_preferences);
     if (g_preferencesUnsaved) {
-        ReportError("The luma profile was applied but could not be saved for the next start.");
+        ReportError("The Luma detail preference changed but could not be saved for the next start.");
+    } else if (result == LumaPreferenceResult::PreferredOnly && restored) {
+        ShowTrayInfo("RedLight preferred Luma detail saved", "This preset is saved for Magnification's Luma Red mode. Gamma stays in Strict Red mode.");
     }
+    Diagnostics::LogFormat("Luma detail preference: %s (%s).", LumaProfileName(profile),
+        result == LumaPreferenceResult::PreferredOnly ? "preferred for Magnification; current backend unchanged" : "selected on current backend");
     RefreshTrayIconTip();
 }
 
@@ -790,6 +794,8 @@ void CopySupportReport(HWND owner) {
     state.redMode = RedModeDisplayName(g_displayFilter->redMode());
     state.lumaProfile = g_displayFilter->supportsRedMode(RedMode::LumaRed) ?
         LumaProfileName(g_displayFilter->lumaProfile()) : "Unavailable on gamma";
+    state.preferredRedMode = RedModeDisplayName(g_preferences.mode);
+    state.preferredLumaProfile = LumaProfileName(g_preferences.luma);
     state.lastError = g_displayFilter->lastError();
     state.active = g_displayFilter->isActive();
     state.needsRestore = g_displayFilter->needsRestore();
@@ -924,7 +930,7 @@ void ShowAboutDialog(HWND parent) {
     if (g_sessionNotifications.isRegistered()) strcpy_s(sessionRecovery, "Available");
     else sprintf_s(sessionRecovery, "Unavailable (error %lu); retry in Expert controls", g_sessionNotifications.lastError());
     const auto logging = Diagnostics::GetStatus();
-    sprintf_s(aboutText, "RedLight " REDLIGHT_VERSION "\nBuild revision: " REDLIGHT_BUILD_REVISION " (" REDLIGHT_SOURCE_STATE ")\n\nBackend: %s\nStartup selection: %s%s\nNext start: %s\nMode: %s\nLuma detail: %s\nStatus: %s\nSettings: %s\nStartup preferences: %s%s\n\n"
+    sprintf_s(aboutText, "RedLight " REDLIGHT_VERSION "\nBuild revision: " REDLIGHT_BUILD_REVISION " (" REDLIGHT_SOURCE_STATE ")\n\nBackend: %s\nStartup selection: %s%s\nNext start: %s\nMode: %s\nLuma detail: %s\nPreferred mode/detail: %s / %s\nStatus: %s\nSettings: %s\nStartup preferences: %s%s\n\n"
         "Toggle shortcut: %s\nRestore shortcut: %s\nShortcut preference: %s\nSession recovery: %s\nExpiry warning: %s\n\n"
         "File logging: %s\nMissing file records: %llu\nTruncated records: %llu\nLast file error: %lu\n\n"
         "Logs: %%LOCALAPPDATA%%\\RedLight\nUnsigned release candidate\n"
@@ -933,6 +939,7 @@ void ShowAboutDialog(HWND parent) {
         g_backendOverride ? " (command line)" : "", BackendPreferenceName(g_backendPreference),
         RedModeDisplayName(g_displayFilter->redMode()),
         g_displayFilter->supportsRedMode(RedMode::LumaRed) ? LumaProfileName(g_displayFilter->lumaProfile()) : "Unavailable on gamma",
+        RedModeDisplayName(g_preferences.mode), LumaProfileName(g_preferences.luma),
         FilterStatusText(),
         g_preferencesUnsaved ? "Unsaved changes" : "Saved/default",
         PreferenceSourceName(g_startupPreferenceSource), g_startupPreferenceWarning ? " (load warnings)" : "",
@@ -961,7 +968,7 @@ void ShowTrayMenu(HWND hwnd) {
         return;
     }
     const TrayMenuState state{g_displayFilter->needsRestore(), g_displayFilter->redMode(),
-        g_displayFilter->supportsRedMode(RedMode::LumaRed), g_displayFilter->lumaProfile(),
+        g_displayFilter->supportsRedMode(RedMode::LumaRed), g_preferences.luma,
         g_backendPreference, g_sessionTimer.minutes(), g_preferences.shortcuts,
         g_hotkeys.toggle() ? ShortcutBindingName(*g_hotkeys.toggle()) : NULL,
         g_hotkeys.restore() ? ShortcutBindingName(*g_hotkeys.restore()) : NULL, g_preferences.expiryWarning, g_preferencesUnsaved};
@@ -982,7 +989,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         [&](const char* error) -> LRESULT {
             Diagnostics::LogFormat("C++ failure in window message %u: %s", uMsg, error);
             if (uMsg == WM_REDLIGHT_STATUS) return 0; // Read-only automation never restores or opens an error dialog.
-            const bool mayChangeFilter = uMsg == WM_COMMAND ? CommandMayChangeFilter(LOWORD(wParam)) :
+            const bool mayChangeFilter = uMsg == WM_COMMAND ? CommandMayChangeFilter(LOWORD(wParam), g_displayFilter->supportsRedMode(RedMode::LumaRed)) :
                 (uMsg == WM_REDLIGHT_UI_ERROR ? wParam != 0 : uMsg != WM_TRAYICON);
             const auto recovery = RecoveryAfterUiFailure(mayChangeFilter, g_pendingRestore, g_busy);
             if (recovery == UiFailureRecovery::Defer) g_pendingRestore = true;
@@ -1017,7 +1024,7 @@ LRESULT HandleWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         state.supportsLuma = g_displayFilter->supportsRedMode(RedMode::LumaRed);
         state.backend = g_displayFilter == &g_magnificationFilter ? StatusBackend::Magnification : StatusBackend::Gamma;
         state.mode = g_displayFilter->redMode();
-        state.luma = g_displayFilter->lumaProfile();
+        state.luma = g_preferences.luma;
         state.verification = g_verification.state;
         state.sessionMinutes = g_sessionTimer.minutes();
         state.timerArmed = g_sessionTimer.armed();

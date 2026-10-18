@@ -12,8 +12,9 @@ private:
     bool& flag_;
     bool previous_;
 };
-inline bool CommandMayChangeFilter(unsigned command) noexcept {
+inline bool CommandMayChangeFilter(unsigned command, bool supportsLuma = true) noexcept {
     if (command >= ID_EXPIRY_WARNING_BASE && command <= ID_EXPIRY_WARNING_BASE + 3) return false;
+    if (!supportsLuma && command >= ID_LUMA_PROFILE_BASE && command <= ID_LUMA_PROFILE_BASE + 2) return false;
     switch (command) {
     case ID_TRAY_ABOUT:
     case ID_TRAY_LOGS:

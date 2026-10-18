@@ -85,7 +85,7 @@ HMENU BuildTrayMenu(const TrayMenuState& state) {
         !root.add(0, NULL, MF_SEPARATOR) ||
         !root.add(ID_TRAY_MODE_STRICT_RED, "&Strict Red", Checked(state.mode == RedMode::StrictRed)) ||
         !root.add(ID_TRAY_MODE_LUMA_RED, "L&uma Red", Checked(state.mode == RedMode::LumaRed) | (state.supportsLuma ? MF_ENABLED : MF_GRAYED)) ||
-        !root.child(luma, "Luma color &detail", state.supportsLuma ? MF_ENABLED : MF_GRAYED) ||
+        !root.child(luma, state.supportsLuma ? "Luma color &detail" : "Preferred Luma &detail (Magnification)") ||
         !root.child(session, "Auto-restore &time limit") ||
         !root.add(0, NULL, MF_SEPARATOR) || !root.child(expert, "&Expert controls") ||
         !root.add(ID_TRAY_LOGS, "Open &logs folder") || !root.add(ID_TRAY_ABOUT, "&About") ||

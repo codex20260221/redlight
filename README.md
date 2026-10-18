@@ -41,6 +41,8 @@ The **Luma color detail** menu offers three red-only mappings on Magnification:
 
 Every preset keeps black black, maps white to pure red, preserves alpha, and produces no green/blue output. The choice is saved and can be changed while filtering. In Strict Red, it only selects the preset for a later switch to Luma Red. Gamma fallback does not support these cross-channel mappings; it retains the saved choice for a future Magnification session. Failed application keeps the previously confirmed preset and the original restoration snapshot.
 
+During gamma fallback, the menu becomes **Preferred Luma detail (Magnification)**. You can edit this saved choice while gamma is off, active, or awaiting recovery. It affects a future Magnification Luma Red session; gamma output, mode, last error, verification cache, and recovery data stay intact. About and support reports show effective mode/detail and preferred mode/detail separately. A failed save remains marked unsaved and can be retried through Save current preferences.
+
 ## Screenshots
 
 ### Desktop example
@@ -156,6 +158,8 @@ Malformed `--status` or `--validate-profile` requests produce JSON with `status:
 Snapshots report backend/mode/luma selection, configured session limit and remaining whole seconds, preferred/actual shortcuts, unsaved settings, session-notification registration, and logging health flags. `remaining_seconds` is null when the countdown is unarmed. `restore_pending` means restoration data or ownership cleanup is pending, including during a normal active session. `backend_active` is the last confirmed backend activation flag; `active` is true only when `status` is `on`, and becomes false for busy, recovery-needed, backend-changed, or verification-unavailable states. `verification` describes the last explicit check, which may be `not-checked`. A status query does not refresh verification or measure physical output. Full diagnostic counters and build identity remain available in the support report.
 
 The `busy` status also covers a queued control restore request. About/support status gives recovery priority to pending restoration or inactive ownership cleanup; support reports show control restore requests separately from owned recovery data.
+
+`luma_profile_scope` is `backend-selection` on Magnification or `magnification-preference` on gamma. `luma_profile` reports that configured choice; gamma remains Strict Red, and a Magnification selection in Strict Red applies only after switching to Luma Red.
 
 ## Compatibility and limitations
 

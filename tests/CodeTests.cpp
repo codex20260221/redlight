@@ -22,6 +22,7 @@
 #include "JsonString.h"
 #include "BackendComparison.h"
 #include "SessionNotifications.h"
+#include "LumaPreference.h"
 #include <map>
 #include <algorithm>
 #include "Clipboard.h"
@@ -1604,6 +1605,65 @@ void QueuedRestoreRetainsOuterBusyOwnership() {
     }
     Check(!busy && requested && RecoveryAfterUiFailure(false, requested, busy) == UiFailureRecovery::Restore && filter.disable(), "queued restoration remains actionable after outer scope ends");
 }
+void GammaPreferredLumaWithoutBackendChanges() {
+    GammaRampFilter filter;
+    Check(filter.initialize() && filter.enable(), "active strict gamma backend");
+    Check(!filter.setLumaProfile(LumaProfile::GreenDetail), "seed an existing unsupported-operation diagnostic");
+    const auto cached = filter.inspectState();
+    const auto statistics = filter.statistics();
+    const auto lastError = std::string(filter.lastError());
+    const auto reads = fake.gammaReads, writes = fake.gammaWrites, releases = fake.mutexReleases;
+    WORD before[3][256]; std::memcpy(before, fake.ramp, sizeof(before));
+    AppPreferences preferences;
+    Check(UpdateLumaPreference(filter, preferences, LumaProfile::EqualDetail) == LumaPreferenceResult::PreferredOnly && SavePreferences(preferences),
+        "gamma stores a preferred Magnification preset through the normal complete-record save");
+    Check(preferences.luma == LumaProfile::EqualDetail && LoadPreferences().preferences.luma == LumaProfile::EqualDetail && filter.redMode() == RedMode::StrictRed &&
+        filter.lumaProfile() == LumaProfile::Classic && filter.isActive() && filter.needsRestore() && fake.mutexOwned &&
+        fake.gammaReads == reads && fake.gammaWrites == writes && fake.mutexReleases == releases && std::memcmp(before, fake.ramp, sizeof(before)) == 0 &&
+        lastError == filter.lastError() && filter.statistics() == statistics && cached.state == BackendVerification::Matches,
+        "preferred-only change leaves exact output, mode, API errors, verification, statistics, ownership and snapshots untouched");
+    TrayStatus status; status.backend = StatusBackend::Gamma; status.mode = RedMode::StrictRed; status.supportsLuma = false; status.luma = preferences.luma;
+    const auto json = *TrayStatusJson(status);
+    Check(json.find("\"luma_profile\":\"equal\"") != std::string::npos && json.find("\"luma_profile_scope\":\"magnification-preference\"") != std::string::npos,
+        "status makes the gamma preference scope explicit");
+    SupportReportState report; report.redMode = "Strict Red"; report.lumaProfile = "Unavailable on gamma";
+    report.preferredRedMode = RedModeDisplayName(preferences.mode); report.preferredLumaProfile = LumaProfileName(preferences.luma);
+    Check(BuildSupportReport(report).find("Preferred red mode: Luma Red") != std::string::npos && BuildSupportReport(report).find("Preferred Luma detail: Equal color detail") != std::string::npos,
+        "reports distinguish stored preference from effective gamma mode");
+    Check(!CommandMayChangeFilter(ID_LUMA_PROFILE_BASE + 2, false) && CommandMayChangeFilter(ID_LUMA_PROFILE_BASE + 2, true),
+        "read-only display-failure policy follows current backend capability");
+    Check(filter.disable() && fake.ramp[1][100] == 100 * 257, "original calibration restores after preferred-only edits");
+}
+void MagnificationLumaPreferenceCommitRules() {
+    MagnificationFilter filter;
+    Check(filter.initialize() && filter.enable(), "active Magnification backend");
+    AppPreferences preferences;
+    fake.magSet = false;
+    Check(UpdateLumaPreference(filter, preferences, LumaProfile::GreenDetail) == LumaPreferenceResult::BackendFailed && preferences.luma == LumaProfile::Classic &&
+        filter.lumaProfile() == LumaProfile::Classic && filter.isActive() && filter.needsRestore(), "failed live application never commits the preferred preset");
+    fake.magSet = true;
+    Check(UpdateLumaPreference(filter, preferences, LumaProfile::GreenDetail) == LumaPreferenceResult::Applied && preferences.luma == LumaProfile::GreenDetail && filter.lumaProfile() == LumaProfile::GreenDetail,
+        "confirmed live application commits matching preference");
+    const auto writes = fake.magWrites;
+    Check(UpdateLumaPreference(filter, preferences, static_cast<LumaProfile>(99)) == LumaPreferenceResult::Rejected && preferences.luma == LumaProfile::GreenDetail && fake.magWrites == writes,
+        "invalid preference cannot reach the backend");
+    Check(filter.disable() && fake.effect.transform[0][0] == 1 && fake.effect.transform[1][1] == 1, "original snapshot survives preference updates/failures");
+}
+void GammaPreferredLumaDuringRecoveryAndSaveFailure() {
+    GammaRampFilter filter;
+    Check(filter.initialize(), "initialize");
+    fake.writes = {Write::FailAfterApply, Write::Fail};
+    Check(!filter.enable() && filter.needsRestore() && !filter.isActive(), "partial-write recovery is pending");
+    const auto reads = fake.gammaReads, writes = fake.gammaWrites;
+    const auto error = std::string(filter.lastError());
+    AppPreferences preferences;
+    Check(UpdateLumaPreference(filter, preferences, LumaProfile::GreenDetail) == LumaPreferenceResult::PreferredOnly, "future preset remains editable during gamma recovery");
+    fake.registryWrite = false;
+    Check(!SavePreferences(preferences) && preferences.luma == LumaProfile::GreenDetail && filter.needsRestore() && !filter.isActive() && fake.mutexOwned &&
+        fake.gammaReads == reads && fake.gammaWrites == writes && error == filter.lastError(), "save failure preserves current preference and pending recovery without new backend calls");
+    fake.registryWrite = true;
+    Check(SavePreferences(preferences) && filter.disable(), "preference persistence and display restoration can retry independently");
+}
 } // namespace
 
 DWORD GetLastError() { return fake.lastError; }
@@ -1872,6 +1932,8 @@ int main() {
         {"Session notification ownership", SessionNotificationOwnership}, {"Session notification failure/retry", SessionNotificationFailureRecovery},
         {"Session notification reentrancy/unwind", SessionNotificationReentrancyAndUnwind}, {"Session notification support report", SessionNotificationReport},
         {"Read-only exception with queued restore", ReadOnlyFailureHonorsQueuedRestore}, {"Queued restore under outer busy scope", QueuedRestoreRetainsOuterBusyOwnership},
+        {"Gamma preferred Luma without output changes", GammaPreferredLumaWithoutBackendChanges}, {"Live Luma preference commit rules", MagnificationLumaPreferenceCommitRules},
+        {"Gamma preferred Luma during recovery", GammaPreferredLumaDuringRecoveryAndSaveFailure},
         {"Command line", Arguments}
     };
     int failed = 0;

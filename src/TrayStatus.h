@@ -98,7 +98,7 @@ inline std::optional<std::string> TrayStatusJson(const TrayStatus& s) {
     char text[2048];
     const int length = std::snprintf(text, sizeof(text),
         "{\n  \"protocol\":1,\n  \"status\":\"%s\",\n  \"active\":%s,\n  \"backend_active\":%s,\n  \"restore_pending\":%s,\n  \"backend_error\":%s,\n  \"verification\":\"%s\",\n"
-        "  \"backend\":\"%s\",\n  \"red_mode\":\"%s\",\n  \"luma_profile\":\"%s\",\n"
+        "  \"backend\":\"%s\",\n  \"red_mode\":\"%s\",\n  \"luma_profile\":\"%s\",\n  \"luma_profile_scope\":\"%s\",\n"
         "  \"session_limit_minutes\":%u,\n  \"remaining_seconds\":%s,\n  \"shortcut_profile\":\"%s\",\n"
         "  \"toggle_shortcut\":\"%s\",\n  \"restore_shortcut\":\"%s\",\n  \"settings_unsaved\":%s,\n"
         "  \"session_notifications\":%s,\n  \"file_logging\":\"%s\",\n  \"file_records_missing\":%s,\n"
@@ -106,6 +106,7 @@ inline std::optional<std::string> TrayStatusJson(const TrayStatus& s) {
         token, boolean(active), boolean(s.backendActive), boolean(s.restorePending), boolean(s.backendError), verification,
         s.backend == StatusBackend::Magnification ? "magnification" : "gamma", s.mode == RedMode::LumaRed ? "luma" : "strict",
         s.luma == LumaProfile::Classic ? "classic" : (s.luma == LumaProfile::GreenDetail ? "green" : "equal"),
+        s.supportsLuma ? "backend-selection" : "magnification-preference",
         s.sessionMinutes, remaining, ShortcutProfileToken(s.shortcutProfile), StatusShortcutName(s.toggle, false), StatusShortcutName(s.restore, true),
         boolean(s.settingsUnsaved), boolean(s.sessionNotifications), fileState, boolean(s.missingFileRecords), boolean(s.truncatedRecords), boolean(s.fileError));
     if (length < 0 || static_cast<std::size_t>(length) >= sizeof(text)) return std::nullopt;
