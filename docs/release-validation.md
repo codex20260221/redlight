@@ -2,6 +2,8 @@
 
 This is a release candidate for review and manual qualification, not a claim of completed hardware testing. The authorized scope for this preparation excludes launching RedLight, running MagRedProbe, or performing display/monitor tests. None of those actions were performed. Historical beta screenshots and changelog tests are not evidence for this candidate.
 
+The [post-implementation issue re-audit](issue-roadmap.md#re-audit-after-the-issue-driven-implementations) rechecked all 19 open descriptions and nine comments after `c95f97b`, with no additional production gap identified. It records the evidence still blocked by native/hardware restrictions or maintainer/provider/publication decisions. Repository history confirms the unchanged original icon and its README custom-artwork acknowledgment; the image PR supplies no image-specific permissions record. This documentation review changes no runtime behavior and does not replace any pending acceptance item below. The existing 542 isolated scenarios remain the runtime evidence.
+
 ## Candidate scope
 
 Preserve the native red-only filter, both established modes, Magnification-first selection, and legacy Strict Red gamma fallback. Add recoverable failure handling, usable tray/keyboard controls, remembered mode/brightness and optional activation-only fade-in, diagnostics, portable release delivery, and explicitly consented optional per-user startup and daily enable/restore scheduling. Startup remains unconfigured and scheduling remains Off by default; only explicit saved scheduling enables future automatic filtering. No translucent overlay or service is introduced.
