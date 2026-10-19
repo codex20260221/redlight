@@ -7,7 +7,8 @@
 
 // Research component only: no production caller and no executable entry point.
 // The future probe owns the host, topology/DPI proof, input/close controls and
-// deadline. Keep the host hidden and alive until shutdown succeeds. This object
+// deadline. Keep the host hidden during preparation and alive until shutdown
+// succeeds. Its owner must check visibility/opacity and attempt hiding before cleanup. This object
 // owns only its child and its successful MagInitialize reference, on one thread.
 namespace MonitorPrototype {
 enum class ControlStage {

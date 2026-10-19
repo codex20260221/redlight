@@ -309,6 +309,7 @@ BOOL GetMonitorInfoW(HMONITOR handle, MONITORINFO* info) {
     *static_cast<MONITORINFOEXW*>(info) = fake.monitors[index]; if (fake.wrongSize) info->cbSize = 0; return fake.infoOk;
 }
 
+unsigned RunWindowedProbePolicyTests();
 int main() {
     const std::pair<const char*, void(*)()> tests[] = {
         {"Topology confirmed mapping/canonical order", ConfirmedMappingAndCanonicalOrder}, {"Topology read-only DPI gate", DpiContextIsReadOnlyAndRequired},
@@ -325,5 +326,6 @@ int main() {
         try { run(); Check(!invalidDuringRun && !fake.badParameters && fake.errorReads == 0, "native argument/error-contract isolation violation"); std::printf("PASS %s\n", name); }
         catch (const std::exception& error) { ++failures; std::printf("FAIL %s: %s\n", name, error.what()); }
     }
+    failures += RunWindowedProbePolicyTests();
     return failures ? 1 : 0;
 }
