@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <optional>
 
-// Read-only preparation for scheduling. No production dispatch calls this yet.
+// Read-only scheduling capture. No display, timer, or persistence mutation.
 struct ScheduleZoneIdentity {
     std::int32_t bias = 0, standardBias = 0, daylightBias = 0;
     std::array<unsigned, 8> standardDate{}, daylightDate{};
@@ -13,7 +13,7 @@ struct ScheduleZoneIdentity {
 };
 struct ScheduleClockReading {
     unsigned year = 0, month = 0, day = 0, minute = 0, millisecondsInMinute = 0;
-    std::uint64_t utcMilliseconds = 0, awakeMilliseconds = 0, captureMilliseconds = 0;
+    std::uint64_t utcMilliseconds = 0, awakeMilliseconds = 0, captureMilliseconds = 0, startedTick = 0;
     ScheduleZoneIdentity zone;
 };
 enum class ScheduleClockStage { None, AwakeClock, TimeZone, UtcConversion, LocalConversion, InvalidData, CaptureTooSlow };

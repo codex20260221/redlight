@@ -50,9 +50,14 @@
 #include "StartupRegistration.h"
 #include "FadeInControl.h"
 #include "TrayTooltip.h"
-#include "Prototypes/DailySchedule.h"
+#include "DailySchedule.h"
+#include "ScheduleRuntime.h"
+#include "ScheduleApply.h"
+#include "ScheduleDispatch.h"
 #include "Prototypes/MonitorPlan.h"
 #include "ScheduleClock.h"
+#include "ScheduleSession.h"
+#include <wtsapi32.h>
 #include "BuildMetadata.h"
 #include "VerificationCache.h"
 #include <map>
@@ -70,6 +75,7 @@
 #include <vector>
 
 namespace {
+namespace SchedulePrototype = Scheduling;
 enum class Write { Apply, Fail, Ignore, FailAfterApply, LowByteLeak, BlackLift, WhiteLoss, MatrixNonfinite, MatrixRounding };
 struct FakeMenuItem { UINT flags; UINT_PTR value; std::string label; };
 struct FakeMenuData { bool alive = true; std::vector<FakeMenuItem> items; };
@@ -77,6 +83,13 @@ struct RegistryValue { DWORD type; std::vector<char> bytes; };
 struct FakeIconRequest { HINSTANCE instance; unsigned resource, type; int width, height; unsigned flags; DWORD errorBefore; };
 struct FakeWindowTimer { HWND owner = nullptr; UINT_PTR id = 0; };
 struct Fake {
+    Scheduling::Runtime* stopScheduleOnInstall = nullptr;
+    bool scheduleSessionQuery = true, scheduleSessionBuffer = true, scheduleSessionUnaligned = false, scheduleSessionTargetInvalid = false;
+    std::optional<DWORD> scheduleSessionError = 4321;
+    WTSINFOEXW scheduleSessionInfo{1, {{1, WTSActive, WTS_SESSIONSTATE_UNLOCK}}};
+    std::array<unsigned char, sizeof(WTSINFOEXW) + 1> scheduleSessionBytes{};
+    DWORD scheduleSessionSize = sizeof(WTSINFOEXW), scheduleSessionErrorBefore = 999;
+    unsigned scheduleSessionQueries = 0, scheduleSessionFrees = 0;
     bool clockSampling = false, clockUtcConversion = true, clockLocalConversion = true;
     std::array<bool, 2> clockAwakeSuccess{true, true};
     std::array<std::uint64_t, 2> clockTicks{1000, 1002}, clockAwake{10000000, 10020000};
@@ -1369,7 +1382,7 @@ void SupportReportDiagnosticRetentionSnapshot() {
 void SharedPreferencesJsonCanonicalAndBounds() {
     char text[PreferencesJsonBufferSize];
     Check(FormatPreferencesJson({}, text) ==
-        "{\"mode\":\"luma\",\"luma\":\"classic\",\"backend\":\"auto\",\"session_minutes\":0,\"hotkeys\":\"default\",\"expiry_warning\":\"off\",\"brightness_percent\":100,\"fade_in\":\"off\"}",
+        "{\"mode\":\"luma\",\"luma\":\"classic\",\"backend\":\"auto\",\"session_minutes\":0,\"hotkeys\":\"default\",\"expiry_warning\":\"off\",\"brightness_percent\":100,\"fade_in\":\"off\",\"schedule\":\"off\",\"enable_at\":\"00:00\",\"restore_at\":\"00:00\"}",
         "shared preference JSON preserves existing keys and adds numeric brightness and scalar types");
     const AppPreferences largest{RedMode::StrictRed, LumaProfile::EqualDetail, BackendPreference::Magnification, 240, ShortcutProfile::Disabled, ExpiryWarning::FiveMinutes};
     const auto value = FormatPreferencesJson(largest, text);
@@ -1388,7 +1401,7 @@ void CurrentPreferencesJsonScopeAndClipboard() {
         ShortcutProfile::Disabled, ExpiryWarning::FiveMinutes}, true, true, PreferenceSource::VersionedRecord, true};
     char output[CurrentPreferencesJsonBufferSize];
     const auto text = FormatCurrentPreferencesJson(snapshot, output);
-    Check(text && text->find("\"status\":\"current-preferences\",\"source\":\"current-session\",\"profile_schema\":5") != std::string_view::npos &&
+    Check(text && text->find("\"status\":\"current-preferences\",\"source\":\"current-session\",\"profile_schema\":6") != std::string_view::npos &&
         text->find("\"settings_unsaved\":true,\"busy\":true") != std::string_view::npos &&
         text->find("\"startup_source\":\"versioned-record\",\"startup_load_warning\":true") != std::string_view::npos &&
         text->find("\"mode\":\"strict\"") != std::string_view::npos && text->find("\"session_minutes\":240") != std::string_view::npos,
@@ -1527,7 +1540,7 @@ void PreferenceProfileRoundTrip() {
 }
 void PreferenceProfileStrictValidation() {
     const auto text = *SerializePreferences(AppPreferences{});
-    Check(text.find("version=5") != std::string::npos && text.find("mode=luma") != std::string::npos && text.find("backend=auto") != std::string::npos, "stable human-readable versioned format");
+    Check(text.find("version=6") != std::string::npos && text.find("mode=luma") != std::string::npos && text.find("backend=auto") != std::string::npos, "stable human-readable versioned format");
     Check(!ParsePreferences(text + "mode=strict\n").preferences, "duplicate fields rejected");
     Check(!ParsePreferences(text + "mdoe=strict\n").preferences, "unknown fields rejected instead of ignored");
     Check(!ParsePreferences(text + "[RedLightProfile]\n").preferences, "duplicate sections rejected");
@@ -1539,7 +1552,7 @@ void PreferenceProfileStrictValidation() {
         Check(!parsed.preferences && parsed.error && parsed.line > 0, "invalid numeric input has a line diagnostic");
     }
     auto newer = text;
-    newer.replace(newer.find("version=5"), 9, "version=999");
+    newer.replace(newer.find("version=6"), 9, "version=999");
     Check(!ParsePreferences(newer).preferences, "future schemas cannot silently reinterpret settings");
     Check(!ParsePreferences("[RedLightProfile]\nversion=1\n").preferences, "missing settings rejected");
     Check(!ParsePreferences(std::string(4097, ' ')).preferences, "bounded input size");
@@ -2079,16 +2092,16 @@ void CurrentPreferencesPacketRejectsInvalidFields() {
     Check(!UnpackCurrentPreferences((valid & ~(3ull << 1)) | (3ull << 1)) &&
         !UnpackCurrentPreferences((valid & ~(3ull << 3)) | (3ull << 3)) &&
         !UnpackCurrentPreferences((valid & ~(255ull << 5)) | (241ull << 5)) &&
-        !UnpackCurrentPreferences((valid & ~(511ull << 15)) | (1ull << 15)) &&
-        !UnpackCurrentPreferences((valid & ~(3ull << 26)) | (3ull << 26)), "invalid encoded presets/backends/minutes/warnings/source are refused on decode too");
+        !UnpackCurrentPreferences((valid & ~(3ull << 19)) | (3ull << 19)), "invalid encoded presets/backends/minutes/warnings/source are refused on decode too");
 }
 void CurrentPreferencesPacketFamilySchemaAndReservedBits() {
     const auto packet = *PackCurrentPreferences({});
-    Check(!UnpackCurrentPreferences(0) && !UnpackCurrentPreferences(packet ^ (1ull << 48)) &&
-        !UnpackCurrentPreferences(*PackTrayStatus({})) && !UnpackTrayStatus(packet), "status and preference packet families cannot be confused");
-    for (unsigned bit = 47; bit < 48; ++bit) Check(!UnpackCurrentPreferences(packet | (1ull << bit)), "every unused preference payload bit must be zero");
-    for (const unsigned schema : {0u, 2u, 3u, 4u, 6u, 255u})
-        Check(!UnpackCurrentPreferences((packet & ~(255ull << 29)) | (static_cast<std::uint64_t>(schema) << 29)), "incompatible canonical schema cannot be presented as this binary's complete preferences");
+    Check(!UnpackCurrentPreferences(0) && !UnpackCurrentPreferences(packet ^ (1ull << 56)) &&
+        !UnpackCurrentPreferences(*PackTrayStatus({})) && !UnpackTrayStatus(packet), "status and preference families cannot be confused");
+    Check(!UnpackCurrentPreferences(packet | (1ull << 55)), "the unused preference payload bit must be zero");
+    for (const auto tag : {0ull, 0x52ull, 0x54ull, 0xffull})
+        Check(!UnpackCurrentPreferences((packet & 0x00ffffffffffffffull) | (tag << 56)), "incompatible exact-schema packet tags are refused");
+    Check(!UnpackCurrentPreferences(0x5202000000000000ull), "protocol-1 schema packets cannot be interpreted as complete schema-6 settings");
 }
 void CurrentPreferencesQueryExistingAndMissing() {
     const CurrentPreferencesSnapshot snapshot{{RedMode::LumaRed, LumaProfile::GreenDetail, BackendPreference::Magnification, 17,
@@ -2105,13 +2118,13 @@ void CurrentPreferencesQueryExistingAndMissing() {
         "current preference queries do not create an owner, read storage/backends, copy a clipboard, or register controls");
     Reset(); fake.trayExists = false;
     Check(QueryRunningPreferences() == 3 && fake.statusSends == 0 && fake.stdoutText ==
-        "{\"protocol\":1,\"status\":\"not-running\",\"preferences\":null}\n", "absent tray produces a distinct noninteractive result without starting one");
+        "{\"protocol\":2,\"status\":\"not-running\",\"preferences\":null}\n", "absent tray produces a distinct noninteractive result without starting one");
 }
 void CurrentPreferencesQueryFailuresAndOutput() {
     fake.statusMessage = false; fake.statusReply = *PackCurrentPreferences({});
     Check(QueryRunningPreferences() == 1 && fake.stdoutText.find("\"status\":\"query-failed\"") != std::string::npos,
         "transport failure cannot accept an otherwise valid cached reply or start a fallback instance");
-    for (const auto reply : {0ull, 1ull, *PackTrayStatus({}), *PackCurrentPreferences({}) | (1ull << 47)}) {
+    for (const auto reply : {0ull, 1ull, *PackTrayStatus({}), *PackCurrentPreferences({}) | (1ull << 55)}) {
         Reset(); fake.statusReply = reply;
         Check(QueryRunningPreferences() == 1 && fake.stdoutText.find("\"status\":\"invalid-response\"") != std::string::npos &&
             fake.stdoutText.find("\"preferences\":null") != std::string::npos, "unsupported/malformed responses expose no invented preferences");
@@ -2423,12 +2436,13 @@ void ProfileFileValidationOutputFailures() {
 }
 void ProfileParserValidatedSchemaProvenance() {
     const std::string common = "\xef\xbb\xbf# Unicode \xe2\x82\xac\n[RedLightProfile]\nmode=strict\nluma=equal\nbackend=gamma\nsession_minutes=240\n";
-    for (unsigned version = 1; version <= 5; ++version) {
+    for (unsigned version = 1; version <= 6; ++version) {
         auto input = common + "version = " + std::to_string(version) + "\n";
         if (version >= 2) input += "hotkeys=disabled\n";
         if (version >= 3) input += "expiry_warning=5m\n";
         if (version >= 4) input += "brightness_percent=100\n";
         if (version >= 5) input += "fade_in=off\n";
+        if (version >= 6) input += "schedule=off\nenable_at=00:00\nrestore_at=00:00\n";
         const auto parsed = ParsePreferences(input);
         Check(parsed.preferences && parsed.inputSchema == version && !parsed.error && parsed.line == 0 &&
             parsed.preferences->shortcuts == (version >= 2 ? ShortcutProfile::Disabled : ShortcutProfile::Default) &&
@@ -2440,19 +2454,20 @@ void ProfileParserValidatedSchemaProvenance() {
 }
 void ProfileValidationResolvedMetadata() {
     const std::string base = "[RedLightProfile]\nmode=strict\nluma=equal\nbackend=magnification\nsession_minutes=240\n";
-    constexpr std::string_view defaults[] = {"[\"hotkeys\",\"expiry_warning\",\"brightness_percent\",\"fade_in\"]", "[\"expiry_warning\",\"brightness_percent\",\"fade_in\"]", "[\"brightness_percent\",\"fade_in\"]", "[\"fade_in\"]", "[]"};
-    for (unsigned version = 1; version <= 5; ++version) {
+    constexpr std::string_view defaults[] = {"[\"hotkeys\",\"expiry_warning\",\"brightness_percent\",\"fade_in\",\"schedule\",\"enable_at\",\"restore_at\"]", "[\"expiry_warning\",\"brightness_percent\",\"fade_in\",\"schedule\",\"enable_at\",\"restore_at\"]", "[\"brightness_percent\",\"fade_in\",\"schedule\",\"enable_at\",\"restore_at\"]", "[\"fade_in\",\"schedule\",\"enable_at\",\"restore_at\"]", "[\"schedule\",\"enable_at\",\"restore_at\"]", "[]"};
+    for (unsigned version = 1; version <= 6; ++version) {
         Reset();
         fake.profileData = base + "version=" + std::to_string(version) + "\n";
         if (version >= 2) fake.profileData += "hotkeys=disabled\n";
         if (version >= 3) fake.profileData += "expiry_warning=5m\n";
         if (version >= 4) fake.profileData += "brightness_percent=100\n";
         if (version >= 5) fake.profileData += "fade_in=off\n";
+        if (version >= 6) fake.profileData += "schedule=off\nenable_at=00:00\nrestore_at=00:00\n";
         fake.profileChunk = 7;
         Check(ValidateSettingsProfileFile(L"schema.profile") == 0 &&
             fake.stdoutText.find("\"input_schema\":" + std::to_string(version)) != std::string::npos &&
-            fake.stdoutText.find("\"profile_schema\":5") != std::string::npos &&
-            fake.stdoutText.find(version < 5 ? "\"schema_upgrade_required\":true" : "\"schema_upgrade_required\":false") != std::string::npos &&
+            fake.stdoutText.find("\"profile_schema\":6") != std::string::npos &&
+            fake.stdoutText.find(version < 6 ? "\"schema_upgrade_required\":true" : "\"schema_upgrade_required\":false") != std::string::npos &&
             fake.stdoutText.find(std::string("\"defaulted_fields\":") + std::string(defaults[version - 1])) != std::string::npos,
             "valid JSON reports input/current schemas and exactly the fields supplied by version defaults");
         Check(fake.stdoutText.find("\"preferences\":{\"mode\":\"strict\",\"luma\":\"equal\",\"backend\":\"magnification\",\"session_minutes\":240") != std::string::npos &&
@@ -2568,7 +2583,7 @@ void SavedProfileExportDefaultsAndMigration() {
     Reset();
     const std::string v2 = "[RedLightProfile]\nversion=2\nmode=luma\nluma=green\nbackend=auto\nsession_minutes=31\nhotkeys=f10\n";
     fake.registry[L"SettingsProfile"] = {REG_BINARY, std::vector<char>(v2.begin(), v2.end())};
-    Check(ExportSavedSettingsProfile() == 0 && fake.stdoutText.find("version=5") != std::string::npos && ParsePreferences(fake.stdoutText).preferences ==
+    Check(ExportSavedSettingsProfile() == 0 && fake.stdoutText.find("version=6") != std::string::npos && ParsePreferences(fake.stdoutText).preferences ==
         AppPreferences{RedMode::LumaRed, LumaProfile::GreenDetail, BackendPreference::Automatic, 31, ShortcutProfile::F10, ExpiryWarning::Off} && fake.registryWrites == 0,
         "older saved profiles export current complete schema without changing stored record");
     Check(fake.profileOpens == 0 && fake.clipOpens == 0 && fake.hotkeyRegisters == 0 && fake.magInitializes == 0 && fake.dcRequests == 0 && fake.statusSends == 0,
@@ -3203,7 +3218,7 @@ void PreferenceSerializationSingleAllocation() {
     Check(text && spareAllocation && text->size() < 256 && ParsePreferences(*text).preferences == preferences,
         "complete maximum-field profile requires only its owned output allocation");
     const auto versionLine = std::string("version=") + std::to_string(PreferencesProfileVersion) + "\r\n";
-    Check(text->find(versionLine) != std::string::npos && text->ends_with("expiry_warning=5m\r\nbrightness_percent=100\r\nfade_in=off\r\n"), "schema metadata and canonical output remain consistent");
+    Check(text->find(versionLine) != std::string::npos && text->ends_with("expiry_warning=5m\r\nbrightness_percent=100\r\nfade_in=off\r\nschedule=off\r\nenable_at=00:00\r\nrestore_at=00:00\r\n"), "schema metadata and canonical output remain consistent");
 }
 void BuildInfoJsonAndIsolation() {
     fake.stdoutChunk = 7;
@@ -3211,7 +3226,7 @@ void BuildInfoJsonAndIsolation() {
     const auto& text = fake.stdoutText;
     Check(text.starts_with("{\"protocol\":1,\"product\":\"RedLight\",\"version\":\"0.6.0-rc.1\"") &&
         text.find("\"build_revision\":\"0123456789ab\",\"source_state\":\"clean\",\"platform\":\"windows-x64\"") != std::string::npos &&
-        text.ends_with("\"profile_schema\":5,\"status_protocol\":1,\"current_settings_protocol\":1,\"restoration_history_protocol\":1,\"verification_protocol\":1,\"profile_input_schemas\":[1,2,3,4,5],"
+        text.ends_with("\"profile_schema\":6,\"status_protocol\":1,\"current_settings_protocol\":2,\"restoration_history_protocol\":1,\"verification_protocol\":1,\"profile_input_schemas\":[1,2,3,4,5,6],"
             "\"limits\":{\"profile_bytes\":4096,\"session_minutes\":240}}\n"), "build info carries complete identity, supported protocols/schemas, and authoritative limits");
     Check(fake.magInitializes == 0 && fake.dcRequests == 0 && fake.magReads == 0 && fake.gammaReads == 0 &&
         fake.magWrites == 0 && fake.gammaWrites == 0 && fake.mutexCreates == 0 && fake.statusSends == 0 && fake.profileOpens == 0 &&
@@ -3256,7 +3271,7 @@ void BuildInfoOutputFailures() {
     Check(WriteBuildInfo("v", "r", "s") == 1 && fake.stdoutText.empty(), "no inherited output or parent console is a noninteractive failure");
 }
 void BuildInfoSupportedSchemasMatchParser() {
-    Check(WriteBuildInfo("v", "r", "s") == 0 && fake.stdoutText.find("\"profile_input_schemas\":[1,2,3,4,5]") != std::string::npos,
+    Check(WriteBuildInfo("v", "r", "s") == 0 && fake.stdoutText.find("\"profile_input_schemas\":[1,2,3,4,5,6]") != std::string::npos,
         "accepted input schemas are exposed as an ordered JSON number array");
     unsigned previous = 0;
     for (const auto schema : PreferencesInputSchemas) {
@@ -3270,6 +3285,7 @@ void BuildInfoSupportedSchemasMatchParser() {
         if (schema >= 3) profile += "expiry_warning=off\n";
         if (schema >= 4) profile += "brightness_percent=100\n";
         if (schema >= 5) profile += "fade_in=off\n";
+        if (schema >= 6) profile += "schedule=off\nenable_at=00:00\nrestore_at=00:00\n";
         const bool advertised = std::find(PreferencesInputSchemas.begin(), PreferencesInputSchemas.end(), schema) != PreferencesInputSchemas.end();
         const auto parsed = ParsePreferences(profile);
         Check(parsed.preferences.has_value() == advertised && (!advertised || parsed.inputSchema == schema),
@@ -3314,7 +3330,7 @@ void BuildInfoCapabilitiesPreserveRecovery() {
         TestMemory::FailNextAllocation fail;
         result = WriteBuildInfo("v", "r", "s"); unused = TestMemory::AllocationFailurePending();
     }
-    Check(result == 0 && unused && fake.stdoutText.find("\"current_settings_protocol\":1,\"restoration_history_protocol\":1,\"verification_protocol\":1") != std::string::npos &&
+    Check(result == 0 && unused && fake.stdoutText.find("\"current_settings_protocol\":2,\"restoration_history_protocol\":1,\"verification_protocol\":1") != std::string::npos &&
         filter.needsRestore() && !filter.isActive() && fake.mutexOwned && filter.statistics() == statistics && error == filter.lastError() &&
         fake.gammaReads == reads && fake.gammaWrites == writes && fake.mutexReleases == releases && fake.backendClockReads == clocks &&
         fake.registryReads == 0 && fake.registryWrites == 0 && fake.profileOpens == 0 && fake.instanceCreates == 0 && fake.statusSends == 0 &&
@@ -3527,6 +3543,7 @@ void ProfileNormalizationUpgradeAndCanonical() {
         if (version >= 3) fake.profileData += "expiry_warning = 1m\n";
         if (version >= 4) fake.profileData += "brightness_percent = 100\n";
         if (version >= 5) fake.profileData += "fade_in = off\n";
+        if (version >= 6) fake.profileData += "schedule=off\nenable_at=00:00\nrestore_at=00:00\n";
         AppPreferences expected{RedMode::StrictRed, LumaProfile::EqualDetail, BackendPreference::Gamma, 17,
             version >= 2 ? ShortcutProfile::F10 : ShortcutProfile::Default, version >= 3 ? ExpiryWarning::OneMinute : ExpiryWarning::Off};
         const auto canonical = *SerializePreferences(expected);
@@ -3977,15 +3994,22 @@ AppPreferences ComparisonCandidate(unsigned mask) {
     if (mask & 32) value.expiryWarning = ExpiryWarning::FiveMinutes;
     if (mask & 64) value.brightnessPercent = 1;
     if (mask & 128) value.fadeIn = FadeInDuration::Minute;
+    if (mask & 256) value.schedule.enabled = true;
+    if (mask & 512) value.schedule.enableMinute = 1080;
+    if (mask & 1024) value.schedule.restoreMinute = 420;
     return value;
 }
 void ProfileComparisonAllFieldsAndMasks() {
     constexpr std::string_view pairs[] = {"\"mode\":{\"saved\":\"luma\",\"candidate\":\"strict\"}", "\"luma\":{\"saved\":\"classic\",\"candidate\":\"equal\"}",
         "\"backend\":{\"saved\":\"auto\",\"candidate\":\"gamma\"}", "\"session_minutes\":{\"saved\":0,\"candidate\":240}",
         "\"hotkeys\":{\"saved\":\"default\",\"candidate\":\"disabled\"}", "\"expiry_warning\":{\"saved\":\"off\",\"candidate\":\"5m\"}",
-        "\"brightness_percent\":{\"saved\":100,\"candidate\":1}", "\"fade_in\":{\"saved\":\"off\",\"candidate\":\"1m\"}"};
-    for (unsigned mask = 0; mask < 256; ++mask) {
+        "\"brightness_percent\":{\"saved\":100,\"candidate\":1}", "\"fade_in\":{\"saved\":\"off\",\"candidate\":\"1m\"}", "\"schedule\":{\"saved\":\"off\",\"candidate\":\"daily\"}", "\"enable_at\":{\"saved\":\"00:00\",\"candidate\":\"18:00\"}", "\"restore_at\":{\"saved\":\"00:00\",\"candidate\":\"07:00\"}"};
+    for (unsigned mask = 0; mask < 2048; ++mask) {
         const auto candidate = ComparisonCandidate(mask);
+        if (!ValidPreferences(candidate)) {
+            Reset(); Check(!ProfileDifferenceMask(candidate, {}) && CompareSavedSettingsProfile(candidate) == 4, "an enabled equal-time schedule cannot masquerade as a valid difference mask");
+            continue;
+        }
         Check(ProfileDifferenceMask(candidate, {}) == mask && ProfileDifferenceMask({}, candidate) == mask && ProfileDifferenceMask(candidate, candidate) == 0u,
             "all field combinations compare symmetrically without differences for identical preferences");
         Reset();
@@ -4145,26 +4169,27 @@ void ProfileComparisonOwnedPathArguments() {
     }
 }
 void PreferencePreviewChangedFields() {
-    constexpr const char* labels[] = {"Red mode", "Luma detail", "Next-start backend", "Session limit", "Shortcuts", "Expiry warning", "Red brightness", "Fade-in duration"};
-    char text[1024];
-    for (unsigned mask = 1; mask < 256; ++mask) {
+    constexpr const char* labels[] = {"Red mode", "Luma detail", "Next-start backend", "Session limit", "Shortcuts", "Expiry warning", "Red brightness", "Fade-in duration", "Daily schedule", "Enable time", "Restore time"};
+    char text[1536];
+    for (unsigned mask = 1; mask < 2048; ++mask) {
         const auto preview = FormatPreferencePreview({}, ComparisonCandidate(mask), text);
+        if (!ValidPreferences(ComparisonCandidate(mask))) { Check(!preview, "invalid enabled equal-time schedules cannot be confirmed"); continue; }
         Check(preview.has_value(), "all valid combinations produce a complete confirmation preview");
         const auto start = preview->find("Changes from current choices: ");
         const auto end = preview->find("\n\nMode:", start);
         Check(start != std::string_view::npos && end != std::string_view::npos, "changed choices have a distinct review line before full candidate values");
         const auto changes = preview->substr(start, end - start);
-        for (unsigned index = 0; index < 8; ++index)
+        for (unsigned index = 0; index < ProfileDifferenceFieldNames.size(); ++index)
             Check((changes.find(labels[index]) != std::string_view::npos) == ((mask & (1u << index)) != 0),
                 "preview names exactly the fields differing from current choices");
     }
 }
 void PreferencePreviewIdenticalAndFullValues() {
     const auto candidate = ComparisonCandidate(63);
-    char text[1024];
+    char text[1536];
     const auto preview = FormatPreferencePreview(candidate, candidate, text);
     Check(preview && preview->find("None; current preference values are identical") != std::string_view::npos &&
-        preview->find("restored and stay off, even when preference values are identical") != std::string_view::npos,
+        preview->find("restored now, even when preference values are identical") != std::string_view::npos,
         "identical preferences still disclose the confirmed display-restoration action");
     Check(preview->find("Mode: Strict Red") != std::string_view::npos && preview->find("Luma detail: Equal color detail") != std::string_view::npos &&
         preview->find("Session limit: 240 minutes") != std::string_view::npos && preview->find("Expiry warning: 5 minutes") != std::string_view::npos &&
@@ -4172,7 +4197,7 @@ void PreferencePreviewIdenticalAndFullValues() {
         "change summary supplements full candidate choices rather than hiding unchanged values");
 }
 void PreferencePreviewBoundsAndInvalidInput() {
-    char text[1024];
+    char text[1536];
     const auto preview = FormatPreferencePreview({}, ComparisonCandidate(63), text);
     Check(preview.has_value(), "prepare maximum-field preview boundary");
     const auto length = preview->size();
@@ -4184,7 +4209,7 @@ void PreferencePreviewBoundsAndInvalidInput() {
     Check(!FormatPreferencePreview(invalid, {}, text) && !FormatPreferencePreview({}, invalid, text), "invalid current or candidate settings cannot produce a confirmation");
 }
 void PreferencePreviewNoCppAllocation() {
-    char text[1024];
+    char text[1536];
     std::optional<std::string_view> preview;
     bool allocationUnused = false;
     {
@@ -4200,7 +4225,7 @@ void PreferencePreviewPreservesCurrentBackendAndStorage() {
     Check(filter.initialize() && filter.enable() && SavePreferences({}), "active backend and saved settings for preview isolation");
     const auto reads = fake.gammaReads, writes = fake.gammaWrites, registryReads = fake.registryReads, registryWrites = fake.registryWrites;
     const auto statistics = filter.statistics();
-    char text[1024];
+    char text[1536];
     Check(FormatPreferencePreview({}, ComparisonCandidate(63), text).has_value() && filter.isActive() && filter.needsRestore() &&
         filter.statistics() == statistics && fake.gammaReads == reads && fake.gammaWrites == writes && fake.registryReads == registryReads &&
         fake.registryWrites == registryWrites && fake.hotkeyRegisters == 0 && fake.clipOpens == 0,
@@ -4208,10 +4233,10 @@ void PreferencePreviewPreservesCurrentBackendAndStorage() {
     Check(filter.disable(), "preview leaves original restoration data intact");
 }
 void ProfileSchemaDefaultPolicyAndParsing() {
-    const auto first = DefaultsForProfileSchema(1), second = DefaultsForProfileSchema(2), third = DefaultsForProfileSchema(3), fourth = DefaultsForProfileSchema(4), current = DefaultsForProfileSchema(5);
+    const auto first = DefaultsForProfileSchema(1), second = DefaultsForProfileSchema(2), third = DefaultsForProfileSchema(3), fourth = DefaultsForProfileSchema(4), current = DefaultsForProfileSchema(6);
     Check(first && first->shortcuts && first->expiryWarning && second && !second->shortcuts && second->expiryWarning &&
         first->brightness && second->brightness && third && third->brightness && !third->expiryWarning &&
-        current && !current->shortcuts && !current->expiryWarning && !current->brightness && fourth && fourth->fadeIn && first->fadeIn && second->fadeIn && third->fadeIn && !current->fadeIn && !DefaultsForProfileSchema(0) && !DefaultsForProfileSchema(6) &&
+        current && !current->shortcuts && !current->expiryWarning && !current->brightness && fourth && fourth->fadeIn && first->fadeIn && second->fadeIn && third->fadeIn && !current->fadeIn && DefaultsForProfileSchema(5)->schedule && first->schedule && second->schedule && third->schedule && fourth->schedule && !current->schedule && !DefaultsForProfileSchema(0) && !DefaultsForProfileSchema(7) &&
         !DefaultsForProfileSchema((std::numeric_limits<unsigned>::max)()), "shared schema policy names exactly the defined historical defaults and refuses unknown versions");
     const std::string older = "[RedLightProfile]\nversion=1\nmode=strict\nluma=equal\nbackend=gamma\nsession_minutes=17\n";
     const auto parsed1 = ParsePreferences(older);
@@ -4225,20 +4250,21 @@ void ProfileSchemaDefaultPolicyAndParsing() {
 }
 void PreferencePreviewSchemaProvenance() {
     const std::string base = "[RedLightProfile]\nmode=luma\nluma=green\nbackend=magnification\nsession_minutes=31\n";
-    char text[1024];
-    constexpr const char* expected[] = {"Defaults supplied: Shortcuts = Default; Expiry warning = Off; Red brightness = 100%; Fade-in = Off", "Defaults supplied: Expiry warning = Off; Red brightness = 100%; Fade-in = Off", "Defaults supplied: Red brightness = 100%; Fade-in = Off", "Defaults supplied: Fade-in = Off", "Defaults supplied: None; all fields explicit"};
-    for (unsigned schema = 1; schema <= 5; ++schema) {
+    char text[1536];
+    constexpr const char* expected[] = {"Defaults supplied: Shortcuts = Default; Expiry warning = Off; Red brightness = 100%; Fade-in = Off; Schedule = Off (00:00 / 00:00)", "Defaults supplied: Expiry warning = Off; Red brightness = 100%; Fade-in = Off; Schedule = Off (00:00 / 00:00)", "Defaults supplied: Red brightness = 100%; Fade-in = Off; Schedule = Off (00:00 / 00:00)", "Defaults supplied: Fade-in = Off; Schedule = Off (00:00 / 00:00)", "Defaults supplied: Schedule = Off (00:00 / 00:00)", "Defaults supplied: None; all fields explicit"};
+    for (unsigned schema = 1; schema <= 6; ++schema) {
         auto input = base + "version=" + std::to_string(schema) + "\n";
         if (schema >= 2) input += "hotkeys=f10\n";
         if (schema >= 3) input += "expiry_warning=1m\n";
         if (schema >= 4) input += "brightness_percent=100\n";
         if (schema >= 5) input += "fade_in=off\n";
+        if (schema >= 6) input += "schedule=off\nenable_at=00:00\nrestore_at=00:00\n";
         const auto parsed = ParsePreferences(input);
         Check(parsed.preferences.has_value(), "prepare a validated source profile");
         const auto preview = FormatPreferencePreview(ComparisonCandidate(63), *parsed.preferences, text, parsed.inputSchema);
-        Check(preview && preview->find("Input profile version: " + std::to_string(schema) + "; canonical export version: 5") != std::string_view::npos &&
+        Check(preview && preview->find("Input profile version: " + std::to_string(schema) + "; canonical export version: 6") != std::string_view::npos &&
             preview->find(expected[schema - 1]) != std::string_view::npos && preview->find("Mode: Luma Red") != std::string_view::npos &&
-            preview->find("Session limit: 31 minutes") != std::string_view::npos && preview->find("display will be restored and stay off") != std::string_view::npos,
+            preview->find("Session limit: 31 minutes") != std::string_view::npos && preview->find("display will be restored now") != std::string_view::npos,
             "source schema/default disclosure supplements complete candidate choices and the existing restoration consent");
     }
     const auto reset = FormatPreferencePreview({}, {}, text);
@@ -4246,14 +4272,14 @@ void PreferencePreviewSchemaProvenance() {
         "a default-reset preview does not invent file provenance");
 }
 void PreferencePreviewSchemaValidationAndBounds() {
-    char text[1024];
+    char text[1536];
     auto candidate = ComparisonCandidate(63); candidate.backend = BackendPreference::Magnification;
     const auto preview = FormatPreferencePreview({}, candidate, text, 3);
     Check(preview && preview->size() < sizeof(text), "long current-schema choices and provenance fit the native confirmation buffer");
     const auto length = preview->size();
     Check(FormatPreferencePreview({}, candidate, std::span<char>(text, length + 1), 3)->size() == length && text[length] == '\0' &&
         !FormatPreferencePreview({}, candidate, std::span<char>(text, length), 3), "provenance participates in exact output/terminator bounds without exposing truncated previews");
-    Check(!FormatPreferencePreview({}, {}, text, 0) && !FormatPreferencePreview({}, {}, text, 6) &&
+    Check(!FormatPreferencePreview({}, {}, text, 0) && !FormatPreferencePreview({}, {}, text, 7) &&
         !FormatPreferencePreview({}, candidate, text, 1) && !FormatPreferencePreview({}, candidate, text, 2),
         "unknown schemas and candidates contradicting historical defaults cannot produce a trusted source preview");
     candidate.expiryWarning = ExpiryWarning::Off;
@@ -4270,7 +4296,7 @@ void PreferencePreviewSchemaNoAllocationAndRecoveryIsolation() {
     const auto clocks = fake.backendClockReads;
     const auto statistics = filter.statistics();
     const auto error = std::string(filter.lastError());
-    char text[1024];
+    char text[1536];
     bool unused = false;
     std::optional<std::string_view> preview;
     {
@@ -4953,7 +4979,7 @@ void DisplayContextSignedReportPreservesRecovery() {
 void SavedSettingsDefaultsAndReadOnlyIsolation() {
     fake.stdoutChunk = 7;
     Check(QuerySavedSettings() == 0 && fake.stdoutText ==
-        "{\"protocol\":1,\"status\":\"saved-settings\",\"source\":\"defaults\",\"profile_schema\":5,\"preferences\":{\"mode\":\"luma\",\"luma\":\"classic\",\"backend\":\"auto\",\"session_minutes\":0,\"hotkeys\":\"default\",\"expiry_warning\":\"off\",\"brightness_percent\":100,\"fade_in\":\"off\"}}\n",
+        "{\"protocol\":1,\"status\":\"saved-settings\",\"source\":\"defaults\",\"profile_schema\":6,\"preferences\":{\"mode\":\"luma\",\"luma\":\"classic\",\"backend\":\"auto\",\"session_minutes\":0,\"hotkeys\":\"default\",\"expiry_warning\":\"off\",\"brightness_percent\":100,\"fade_in\":\"off\",\"schedule\":\"off\",\"enable_at\":\"00:00\",\"restore_at\":\"00:00\"}}\n",
         "absent storage produces exact complete default JSON using canonical tokens and partial output writes");
     Check(fake.registryWrites == 0 && fake.instanceCreates == 0 && fake.mutexCreates == 0 && fake.profileOpens == 0 && fake.metricReads == 0 &&
         fake.magInitializes == 0 && fake.dcRequests == 0 && fake.magReads == 0 && fake.gammaReads == 0 && fake.magWrites == 0 && fake.gammaWrites == 0 &&
@@ -4967,15 +4993,15 @@ void SavedSettingsCanonicalVariants() {
         {RedMode::StrictRed, LumaProfile::GreenDetail, BackendPreference::Magnification, 17, ShortcutProfile::F10, ExpiryWarning::OneMinute, 7}
     };
     const char* expected[] = {
-        "\"preferences\":{\"mode\":\"strict\",\"luma\":\"equal\",\"backend\":\"gamma\",\"session_minutes\":240,\"hotkeys\":\"disabled\",\"expiry_warning\":\"5m\",\"brightness_percent\":1,\"fade_in\":\"off\"}}\n",
-        "\"preferences\":{\"mode\":\"luma\",\"luma\":\"green\",\"backend\":\"magnification\",\"session_minutes\":1,\"hotkeys\":\"f9\",\"expiry_warning\":\"30s\",\"brightness_percent\":50,\"fade_in\":\"off\"}}\n",
-        "\"preferences\":{\"mode\":\"strict\",\"luma\":\"green\",\"backend\":\"magnification\",\"session_minutes\":17,\"hotkeys\":\"f10\",\"expiry_warning\":\"1m\",\"brightness_percent\":7,\"fade_in\":\"off\"}}\n"
+        "\"preferences\":{\"mode\":\"strict\",\"luma\":\"equal\",\"backend\":\"gamma\",\"session_minutes\":240,\"hotkeys\":\"disabled\",\"expiry_warning\":\"5m\",\"brightness_percent\":1,\"fade_in\":\"off\",\"schedule\":\"off\",\"enable_at\":\"00:00\",\"restore_at\":\"00:00\"}}\n",
+        "\"preferences\":{\"mode\":\"luma\",\"luma\":\"green\",\"backend\":\"magnification\",\"session_minutes\":1,\"hotkeys\":\"f9\",\"expiry_warning\":\"30s\",\"brightness_percent\":50,\"fade_in\":\"off\",\"schedule\":\"off\",\"enable_at\":\"00:00\",\"restore_at\":\"00:00\"}}\n",
+        "\"preferences\":{\"mode\":\"strict\",\"luma\":\"green\",\"backend\":\"magnification\",\"session_minutes\":17,\"hotkeys\":\"f10\",\"expiry_warning\":\"1m\",\"brightness_percent\":7,\"fade_in\":\"off\",\"schedule\":\"off\",\"enable_at\":\"00:00\",\"restore_at\":\"00:00\"}}\n"
     };
     for (unsigned index = 0; index < std::size(variants); ++index) {
         Reset();
         Check(SavePreferences(variants[index]), "seed each canonical settings variant");
         const auto writes = fake.registryWrites;
-        Check(QuerySavedSettings() == 0 && fake.stdoutText.find("\"source\":\"versioned-record\",\"profile_schema\":5") != std::string::npos &&
+        Check(QuerySavedSettings() == 0 && fake.stdoutText.find("\"source\":\"versioned-record\",\"profile_schema\":6") != std::string::npos &&
             fake.stdoutText.ends_with(expected[index]) && fake.registryWrites == writes, "JSON preserves every supported mode/detail/backend/shortcut/warning token and configured minute value");
     }
 }
@@ -4987,7 +5013,7 @@ void SavedSettingsLegacyAndOlderSchema() {
     Reset();
     const std::string old = "[RedLightProfile]\nversion=2\nmode=strict\nluma=green\nbackend=gamma\nsession_minutes=30\nhotkeys=f10\n";
     fake.registry[L"SettingsProfile"] = {REG_BINARY, std::vector<char>(old.begin(), old.end())};
-    Check(QuerySavedSettings() == 0 && fake.stdoutText.find("\"source\":\"versioned-record\",\"profile_schema\":5") != std::string::npos &&
+    Check(QuerySavedSettings() == 0 && fake.stdoutText.find("\"source\":\"versioned-record\",\"profile_schema\":6") != std::string::npos &&
         fake.stdoutText.find("\"hotkeys\":\"f10\",\"expiry_warning\":\"off\"") != std::string::npos && fake.registryWrites == 0,
         "older stored schema reports defined defaults and current export schema without rewriting storage");
 }
@@ -6423,6 +6449,462 @@ void ScheduleCalendarAndTimingLimits() {
     Check(policy.configure({true, 1080, 420}) && policy.rebase(before) &&
         policy.observe(ScheduleSample(2026, 10, 18, 1080, 0, 4001), true) == Event::Rebased, "larger supplied-clock disagreement rebases without enabling");
 }
+ScheduleClockReading ScheduleReading(unsigned minute, unsigned within, std::uint64_t awake, unsigned day = 18, int offset = 0) {
+    const auto supplied = ScheduleSample(2026, 10, day, minute, within, awake, offset);
+    ScheduleClockReading value;
+    value.year = supplied.year; value.month = supplied.month; value.day = supplied.day; value.minute = minute;
+    value.millisecondsInMinute = within; value.utcMilliseconds = supplied.utcMilliseconds; value.awakeMilliseconds = awake;
+    value.startedTick = 1000; value.zone.bias = -offset;
+    return value;
+}
+HWND ScheduleOwner() { return reinterpret_cast<HWND>(std::uintptr_t{0x1234}); }
+// Existing transaction cases model an instantaneous save; race cases below
+// supply a distinct post-save sample to the production helper directly.
+template<class Save>
+Scheduling::ApplyResult ApplyScheduleSnapshot(Scheduling::Runtime& runtime, CountdownTimerRegistration& timer,
+    HWND owner, UINT_PTR id, Scheduling::DailyTimes times, const std::optional<ScheduleClockReading>& clock,
+    Save&& save, bool newLifetime = true) {
+    return Scheduling::Apply(runtime, timer, owner, id, times, clock, std::forward<Save>(save), [&] { return clock; }, newLifetime);
+}
+void ScheduleSessionCurrentActiveUnlockedOnly() {
+    for (unsigned state = 0; state <= 9; ++state) for (const long flags : {WTS_SESSIONSTATE_LOCK, WTS_SESSIONSTATE_UNLOCK}) {
+        Reset(); fake.scheduleSessionInfo.Data.WTSInfoExLevel1.SessionState = static_cast<WTS_CONNECTSTATE_CLASS>(state);
+        fake.scheduleSessionInfo.Data.WTSInfoExLevel1.SessionFlags = flags;
+        const auto result = ReadScheduleSession();
+        Check(result.state == (state == 0 && flags == 1 ? ScheduleSessionState::Ready : ScheduleSessionState::LockedOrInactive) && result.nativeError == 0 &&
+            fake.scheduleSessionQueries == 1 && fake.scheduleSessionFrees == 1 && fake.scheduleSessionErrorBefore == 0 && !fake.scheduleSessionTargetInvalid,
+            "only active/unlocked data for the current local session permits scheduling; all native buffers are freed");
+    }
+}
+void ScheduleSessionMalformedBuffersAndFlags() {
+    for (unsigned invalid = 0; invalid < 6; ++invalid) {
+        Reset();
+        if (invalid == 0) fake.scheduleSessionBuffer = false;
+        if (invalid == 1) fake.scheduleSessionSize = sizeof(WTSINFOEXW) - 1;
+        if (invalid == 2) fake.scheduleSessionInfo.Level = 0;
+        if (invalid == 3) fake.scheduleSessionInfo.Level = 2;
+        if (invalid == 4) fake.scheduleSessionInfo.Data.WTSInfoExLevel1.SessionFlags = -1;
+        if (invalid == 5) { const std::uint32_t bad = 99; std::memcpy(&fake.scheduleSessionInfo.Data.WTSInfoExLevel1.SessionState, &bad, sizeof(bad)); }
+        const auto result = ReadScheduleSession();
+        Check(result.state == ScheduleSessionState::Unavailable && result.nativeError == 0 && fake.scheduleSessionFrees == (invalid == 0 ? 0u : 1u),
+            "null/truncated/unsupported/unknown native session data cannot grant activation or leak a returned buffer");
+    }
+    Reset(); fake.scheduleSessionUnaligned = true;
+    Check(ReadScheduleSession().state == ScheduleSessionState::Ready && fake.scheduleSessionFrees == 1, "known session data is copied safely without assuming native buffer alignment");
+}
+void ScheduleSessionFailureAndAllocationIsolation() {
+    for (const bool supplied : {false, true}) for (const bool buffer : {false, true}) {
+        Reset(); fake.scheduleSessionQuery = false; fake.scheduleSessionBuffer = buffer; fake.lastError = 0xbad;
+        fake.scheduleSessionError = supplied ? std::optional<DWORD>(4321) : std::nullopt;
+        const auto result = ReadScheduleSession();
+        Check(result.state == ScheduleSessionState::Unavailable && result.nativeError == (supplied ? 4321u : 0u) &&
+            fake.scheduleSessionErrorBefore == 0 && fake.scheduleSessionFrees == (buffer ? 1u : 0u), "failed session reads capture supplied/absent errors before cleanup clobbers last-error");
+    }
+    Reset(); MagnificationFilter filter; Check(filter.initialize() && filter.enable(), "retain a display owner beside the session query");
+    const auto reads = fake.magReads, writes = fake.magWrites; const auto stats = filter.statistics();
+    bool ready = false, noAllocation = false;
+    { TestMemory::FailNextAllocation failure; ready = ReadScheduleSession().state == ScheduleSessionState::Ready; noAllocation = TestMemory::AllocationFailurePending(); }
+    Check(ready && noAllocation && fake.magReads == reads && fake.magWrites == writes && filter.statistics() == stats && filter.needsRestore() &&
+        fake.countdownSets == 0 && fake.registryWrites == 0, "read-only session gating allocates no C++ memory and leaves display/storage/timer ownership unchanged");
+    Check(filter.disable(), "the original remains independently restorable");
+}
+void ScheduleTimeInputAndBounds() {
+    for (unsigned minute = 0; minute < 1440; ++minute) {
+        char text[6]; const auto value = Scheduling::FormatMinute(minute, text);
+        Check(value && value->size() == 5 && text[5] == 0 && Scheduling::ParseMinute(*value) == minute &&
+            !Scheduling::FormatMinute(minute, std::span<char>(text, 5)), "every local minute round-trips as strict bounded HH:MM");
+    }
+    for (const auto text : {"", "0:00", "24:00", "12:60", "12:3", " 12:00", "12:00 ", "+1:00", "12.00", "12:00x", "aa:bb"})
+        Check(!Scheduling::ParseMinute(text), "malformed schedule input cannot be silently trimmed, clipped, or reinterpreted by the dialog parser");
+    Check(Scheduling::DailyTimes{false, 0, 0}.valid() && !Scheduling::DailyTimes{true, 0, 0}.valid() && !Scheduling::DailyTimes{false, 1440, 0}.valid(),
+        "Off allows unconfigured equal times; enabled schedules require two distinct valid minutes");
+}
+void ScheduleProfileMigrationAndStrictFields() {
+    for (unsigned schema = 1; schema <= 5; ++schema) {
+        Reset(); std::string old = "[RedLightProfile]\nversion=" + std::to_string(schema) + "\nmode=luma\nluma=green\nbackend=auto\nsession_minutes=17\n";
+        if (schema >= 2) old += "hotkeys=f10\n";
+        if (schema >= 3) old += "expiry_warning=1m\n";
+        if (schema >= 4) old += "brightness_percent=37\n";
+        if (schema >= 5) old += "fade_in=15s\n";
+        const auto parsed = ParsePreferences(old);
+        Check(parsed.preferences && parsed.preferences->schedule == Scheduling::DailyTimes{} &&
+            !ParsePreferences(old + "schedule=off\n").preferences && !ParsePreferences(old + "enable_at=18:00\n").preferences &&
+            !ParsePreferences(old + "restore_at=07:00\n").preferences, "schemas 1-5 pin scheduling Off/00:00 and forbid fields they never defined");
+        fake.registry[L"SettingsProfile"] = {REG_BINARY, std::vector<char>(old.begin(), old.end())}; const auto writes = fake.registryWrites;
+        Check(LoadPreferences().preferences == *parsed.preferences && fake.registryWrites == writes && fake.clockUtcReads == 0 && fake.scheduleSessionQueries == 0,
+            "old stored profiles migrate in memory only without clock/session/timer or display work");
+    }
+    const auto canonical = *SerializePreferences({});
+    for (const auto field : {"schedule=off\r\n", "enable_at=00:00\r\n", "restore_at=00:00\r\n"}) {
+        auto missing = canonical; missing.erase(missing.find(field), std::strlen(field));
+        Check(!ParsePreferences(missing).preferences && !ParsePreferences(canonical + field).preferences, "schema 6 requires exactly one instance of every schedule field");
+    }
+    auto equal = canonical; equal.replace(equal.find("schedule=off"), 12, "schedule=daily");
+    Check(!ParsePreferences(equal).preferences, "enabling an equal-time schedule is rejected before exposing provenance");
+}
+void ScheduleFullPreferencesPacketAndJson() {
+    for (unsigned minute = 0; minute < 1440; ++minute) for (unsigned flags = 0; flags < 8; ++flags) {
+        CurrentPreferencesSnapshot value; value.preferences = ComparisonCandidate(255);
+        value.preferences.schedule = {true, minute, (minute + 719) % 1440}; value.startupSource = PreferenceSource::LegacyValues;
+        value.settingsUnsaved = flags & 1; value.busy = (flags & 2) != 0; value.startupLoadWarning = (flags & 4) != 0;
+        const auto word = PackCurrentPreferences(value);
+        Check(word && *word < (1ull << 63) && UnpackCurrentPreferences(*word) == value, "all schedule minutes and snapshot flags round-trip in one positive schema-6 packet");
+    }
+    const auto base = *PackCurrentPreferences({});
+    for (unsigned invalid = 1440; invalid <= 2047; ++invalid)
+        Check(!UnpackCurrentPreferences((base & ~(2047ull << 33)) | (static_cast<std::uint64_t>(invalid) << 33)) &&
+            !UnpackCurrentPreferences((base & ~(2047ull << 44)) | (static_cast<std::uint64_t>(invalid) << 44)), "invalid 11-bit times cannot be clipped into valid minutes");
+    Check(!UnpackCurrentPreferences(base | (1ull << 32)), "equal-time enable cannot cross the scalar boundary");
+    CurrentPreferencesSnapshot maximum; maximum.preferences = ComparisonCandidate(2047); maximum.preferences.luma = LumaProfile::Classic;
+    maximum.preferences.backend = BackendPreference::Magnification; maximum.preferences.brightnessPercent = 100; maximum.preferences.fadeIn = FadeInDuration::Seconds15;
+    maximum.preferences.schedule = {true, 1439, 1438}; maximum.startupSource = PreferenceSource::VersionedRecord;
+    char json[CurrentPreferencesJsonBufferSize]; const auto text = FormatCurrentPreferencesJson(maximum, json);
+    Check(text && text->starts_with("{\"protocol\":2,") && text->find("\"schedule\":\"daily\",\"enable_at\":\"23:59\",\"restore_at\":\"23:58\"") != std::string_view::npos,
+        "complete current-settings JSON uses protocol 2 and explicit local schedule tokens");
+    const auto length = text->size();
+    Check(!FormatCurrentPreferencesJson(maximum, std::span<char>(json, length)) && FormatCurrentPreferencesJson(maximum, std::span<char>(json, length + 1)),
+        "maximum settings require the complete payload and terminator without enlarging the existing 512-byte buffer");
+}
+void ScheduleRuntimeConsumedDatesSurviveRearm() {
+    using namespace Scheduling;
+    Runtime runtime; const DailyTimes times{true, 90, 120};
+    Check(runtime.configure(times, ScheduleReading(89, 59000, 1000, 18, -240)) &&
+        runtime.observe({ScheduleReading(90, 0, 2000, 18, -240)}, true) == Event::Enable, "first local occurrence may activate");
+    runtime.stop(); const auto revision = runtime.stopRevision();
+    Check(runtime.configure(times, ScheduleReading(89, 59000, 3601000, 18, -300), false) &&
+        runtime.observe({ScheduleReading(90, 0, 3602000, 18, -300)}, true) == Event::None && runtime.stopRevision() == revision,
+        "wake/session/canceled-shutdown rearming preserves consumed dates through a repeated local hour");
+    Check(runtime.configure(times, ScheduleReading(89, 59000, 4001000, 18, -300), true) &&
+        runtime.observe({ScheduleReading(90, 0, 4002000, 18, -300)}, true) == Event::Enable, "only deliberate configuration starts a fresh consumption lifetime");
+}
+void ScheduleRuntimeClockZoneAndBusyCancellation() {
+    using namespace Scheduling;
+    Runtime runtime; Check(runtime.configure({true, 1080, 420}, ScheduleReading(1079, 59000, 1000)), "prepare runtime observation");
+    auto changed = ScheduleReading(1080, 0, 2000); changed.zone.key[0] = L'Z';
+    Check(runtime.observe({changed}, true) == Event::Rebased && runtime.observe({changed}, true) == Event::None,
+        "semantic rule identity change suppresses a due enable even when UTC/local offsets match");
+    Check(runtime.configure({true, 1080, 420}, ScheduleReading(1079, 59000, 1000)) &&
+        runtime.observe({ScheduleReading(1080, 0, 2000)}, false) == Event::SkippedEnable &&
+        runtime.observe({ScheduleReading(1080, 1000, 3000)}, true) == Event::None, "busy/attention events are consumed without deferred enables");
+    Check(runtime.observe({std::nullopt, ScheduleClockStage::TimeZone, 5}, true) == Event::InvalidSample &&
+        runtime.observe({ScheduleReading(1080, 2000, 4000)}, true) == Event::Rebased, "failed clock reads invalidate continuity without catching up after recovery");
+    runtime.stop(); Check(runtime.observe({ScheduleReading(1081, 0, 62000)}, true) == Event::None, "stopped logical work ignores stale native callbacks");
+}
+void ScheduleEnableGateMatrixAndCountdownPriority() {
+    MagnificationFilter filter; SessionTimer countdown; Check(filter.initialize(), "prepare healthy off backend for cached eligibility");
+    const auto reads = fake.magReads, writes = fake.magWrites; const auto clocks = fake.backendClockReads;
+    for (unsigned mask = 0; mask < 256; ++mask)
+        Check(Scheduling::CanEnable(filter, countdown, 0, mask & 128 ? BackendVerification::Changed : BackendVerification::NotChecked,
+            mask & 1, mask & 2, mask & 4, !(mask & 8), !(mask & 16), !(mask & 32), mask & 64) == (mask == 0),
+            "busy/modal/preferences/restore/tray/hooks/timer/power/attention all independently block automatic enable");
+    Check(!Scheduling::CanEnable(filter, countdown, 0, BackendVerification::Unavailable, false, false, false, true, true, true, false) &&
+        !Scheduling::CanEnable(filter, countdown, 0, static_cast<BackendVerification>(99), false, false, false, true, true, true, false) &&
+        fake.magReads == reads && fake.magWrites == writes && fake.backendClockReads == clocks, "gating is cached and rejects unavailable/unknown verification without native work");
+    Check(countdown.configure(1, 0, true) && !Scheduling::CanEnable(filter, countdown, 60000, BackendVerification::Matches, false, false, false, true, true, true, false),
+        "an expired monotonic countdown outranks scheduled activation");
+}
+void ScheduleApplyOrderingAndDisabledClockIndependence() {
+    using namespace Scheduling;
+    Runtime runtime; CountdownTimerRegistration timer; AppPreferences candidate; candidate.schedule = {true, 1080, 420};
+    bool beforePublication = false;
+    const auto result = ApplyScheduleSnapshot(runtime, timer, ScheduleOwner(), ID_SCHEDULE_TIMER, candidate.schedule, ScheduleReading(1079, 59000, 1000), [&] {
+        beforePublication = timer.installed() && !runtime.enabled(); return SavePreferences(candidate);
+    });
+    Check(result == ApplyResult::Applied && beforePublication && runtime.enabled() && LoadPreferences().preferences == candidate &&
+        fake.countdownSetId == ID_SCHEDULE_TIMER && fake.countdownInterval == 1000, "checked timer and complete persistence precede runtime publication");
+    candidate.schedule.enabled = false;
+    Check(ApplyScheduleSnapshot(runtime, timer, ScheduleOwner(), ID_SCHEDULE_TIMER, candidate.schedule, std::nullopt, [&] { return SavePreferences(candidate); }) == ApplyResult::Applied &&
+        !runtime.enabled() && !timer.installed() && fake.clockUtcReads == 0 && fake.scheduleSessionQueries == 0, "disabling works without clock/session reads and removes only the owned schedule timer");
+}
+void ScheduleApplyFailedSavesAndOwnedCleanup() {
+    using namespace Scheduling;
+    Runtime runtime; CountdownTimerRegistration timer; AppPreferences candidate; candidate.schedule = {true, 1080, 420};
+    Check(SavePreferences({}), "seed disabled preferences"); fake.registryWrite = false; fake.countdownKill = false;
+    Check(ApplyScheduleSnapshot(runtime, timer, ScheduleOwner(), ID_SCHEDULE_TIMER, candidate.schedule, ScheduleReading(1079, 59000, 1000), [&] { return SavePreferences(candidate); }) == ApplyResult::SaveFailed &&
+        !runtime.enabled() && timer.installed() && LoadPreferences().preferences.schedule == DailyTimes{} &&
+        runtime.observe({ScheduleReading(1080, 0, 2000)}, true) == Event::None, "failed save/cleanup retains old preferences and native ownership without automatic work");
+    fake.countdownKill = fake.registryWrite = true;
+    Check(timer.remove() && ApplyScheduleSnapshot(runtime, timer, ScheduleOwner(), ID_SCHEDULE_TIMER, candidate.schedule, ScheduleReading(1079, 59000, 1000), [&] { return SavePreferences(candidate); }) == ApplyResult::Applied,
+        "ordinary cleanup/configuration retry can confirm the same schedule");
+    auto replacement = candidate; replacement.schedule = {true, 1140, 480}; fake.registryWrite = false;
+    Check(ApplyScheduleSnapshot(runtime, timer, ScheduleOwner(), ID_SCHEDULE_TIMER, replacement.schedule, ScheduleReading(1079, 59000, 1000), [&] { return SavePreferences(replacement); }) == ApplyResult::SaveFailed &&
+        runtime.enabled() && timer.installed() && LoadPreferences().preferences == candidate && runtime.observe({ScheduleReading(1080, 0, 2000)}, true) == Event::Enable,
+        "failed edits retain the old confirmed policy and timer rather than silently publishing the replacement");
+    fake.registryWrite = true; runtime.stop(); Check(timer.remove(), "release the retained timer");
+}
+void ScheduleApplyTimerFailureAndLogicalDisable() {
+    using namespace Scheduling;
+    Runtime runtime; CountdownTimerRegistration timer; unsigned saves = 0;
+    fake.countdownSet = false;
+    Check(ApplyScheduleSnapshot(runtime, timer, ScheduleOwner(), ID_SCHEDULE_TIMER, {true, 1080, 420}, ScheduleReading(1079, 59000, 1000), [&] { ++saves; return true; }) == ApplyResult::TimerFailed &&
+        !runtime.enabled() && !timer.installed() && saves == 0, "failed timer creation cannot persist or report an armed schedule");
+    fake.countdownSet = true;
+    Check(ApplyScheduleSnapshot(runtime, timer, ScheduleOwner(), ID_SCHEDULE_TIMER, {true, 1080, 420}, ScheduleReading(1079, 59000, 1000), [] { return true; }) == ApplyResult::Applied, "prepare an existing timer");
+    fake.countdownSet = false;
+    Check(ApplyScheduleSnapshot(runtime, timer, ScheduleOwner(), ID_SCHEDULE_TIMER, {true, 1140, 480}, ScheduleReading(1079, 59000, 1000), [&] { ++saves; return true; }) == ApplyResult::TimerFailed &&
+        !runtime.enabled() && timer.installed() && saves == 0, "failed replacement retains native cleanup ownership but stops unconfirmed automatic work");
+    fake.countdownSet = true; fake.countdownKill = false;
+    Check(ApplyScheduleSnapshot(runtime, timer, ScheduleOwner(), ID_SCHEDULE_TIMER, {}, std::nullopt, [] { return true; }) == ApplyResult::AppliedCleanupPending &&
+        !runtime.enabled() && timer.installed(), "failed removal after a committed Off preference cannot reactivate the plan");
+    fake.countdownKill = true; Check(timer.remove(), "cleanup retry releases the exact timer");
+}
+void ScheduleApplyInterruptedBeforeAndAfterSave() {
+    using namespace Scheduling;
+    Runtime runtime; CountdownTimerRegistration timer; unsigned saves = 0;
+    fake.stopScheduleOnInstall = &runtime;
+    const auto interrupted = ApplyScheduleSnapshot(runtime, timer, ScheduleOwner(), ID_SCHEDULE_TIMER, {true, 1080, 420}, ScheduleReading(1079, 59000, 1000), [&] { ++saves; return true; });
+    fake.stopScheduleOnInstall = nullptr;
+    Check(interrupted == ApplyResult::Interrupted && saves == 0 && !runtime.enabled() && !timer.installed(), "a nested stop during timer installation wins before persistence");
+    AppPreferences candidate; candidate.schedule = {true, 1080, 420}; fake.countdownKill = false;
+    Check(ApplyScheduleSnapshot(runtime, timer, ScheduleOwner(), ID_SCHEDULE_TIMER, candidate.schedule, ScheduleReading(1079, 59000, 1000), [&] {
+        const bool saved = SavePreferences(candidate); runtime.stop(); return saved;
+    }) == ApplyResult::AppliedInterrupted && LoadPreferences().preferences == candidate && !runtime.enabled() && timer.installed(),
+        "a callback/exit stop during successful persistence is reported saved-but-not-armed and cannot be overwritten by prepared state");
+    fake.countdownKill = true; Check(timer.remove(), "failed interrupted cleanup is retryable");
+}
+void ScheduleApplyRejectedAndAllocationFailure() {
+    using namespace Scheduling;
+    Runtime runtime; CountdownTimerRegistration timer; unsigned saves = 0;
+    const auto save = [&] { ++saves; return true; };
+    Check(ApplyScheduleSnapshot(runtime, timer, ScheduleOwner(), ID_SCHEDULE_TIMER, {true, 100, 100}, ScheduleReading(99, 59000, 1000), save) == ApplyResult::Rejected &&
+        ApplyScheduleSnapshot(runtime, timer, ScheduleOwner(), ID_SCHEDULE_TIMER, {true, 1080, 420}, std::nullopt, save) == ApplyResult::ClockUnavailable &&
+        saves == 0 && fake.countdownSets == 0 && !runtime.enabled(), "invalid configuration or absent clock is rejected before any timer/storage publication");
+    Check(SavePreferences({}), "seed allocation-failure storage baseline"); const auto writes = fake.registryWrites;
+    AppPreferences candidate; candidate.schedule = {true, 1080, 420}; ApplyResult result;
+    { TestMemory::FailNextAllocation failure;
+        result = ApplyScheduleSnapshot(runtime, timer, ScheduleOwner(), ID_SCHEDULE_TIMER, candidate.schedule, ScheduleReading(1079, 59000, 1000), [&] { return SavePreferences(candidate); }); }
+    Check(result == ApplyResult::SaveFailed && !runtime.enabled() && !timer.installed() && fake.registryWrites == writes &&
+        LoadPreferences().preferences.schedule == DailyTimes{}, "serialization allocation failure cleans the prepared timer and cannot persist or arm automatic activation");
+}
+void ScheduleApplyRefreshesAfterPersistence() {
+    using namespace Scheduling;
+    Runtime runtime; CountdownTimerRegistration timer; AppPreferences candidate; candidate.schedule = {true, 1080, 1081};
+    unsigned sequence = 0; bool ordered = false;
+    const auto result = Apply(runtime, timer, ScheduleOwner(), ID_SCHEDULE_TIMER, candidate.schedule, ScheduleReading(1079, 59000, 1000), [&] {
+        Check(timer.installed() && !runtime.enabled(), "timer confirmation precedes the slow save");
+        ++sequence; return SavePreferences(candidate);
+    }, [&] {
+        ordered = sequence == 1 && !runtime.enabled() && LoadPreferences().preferences == candidate;
+        ++sequence; return ScheduleReading(1080, 1000, 3000);
+    });
+    Check(result == ApplyResult::Applied && ordered && sequence == 2 && runtime.hasBaseline() &&
+        runtime.observe({ScheduleReading(1080, 2000, 4000)}, true) == Event::None,
+        "a trigger crossed during save is already past at publication and cannot replay when the dialog closes");
+    Check(runtime.observe({ScheduleReading(1080, 59000, 61000)}, true) == Event::None &&
+        runtime.observe({ScheduleReading(1081, 0, 62000)}, false) == Event::Restore,
+        "the fresh baseline still delivers a later restore independently of enable eligibility");
+    Check(timer.remove(), "release the freshly published timer");
+}
+void ScheduleApplyPostSaveClockFailureAndStop() {
+    using namespace Scheduling;
+    for (const bool stop : {false, true}) {
+        Reset(); Runtime runtime; CountdownTimerRegistration timer; AppPreferences candidate; candidate.schedule = {true, 1080, 420};
+        fake.countdownKill = false;
+        const auto result = Apply(runtime, timer, ScheduleOwner(), ID_SCHEDULE_TIMER, candidate.schedule, ScheduleReading(1079, 59000, 1000), [&] {
+            return SavePreferences(candidate);
+        }, [&]() -> std::optional<ScheduleClockReading> {
+            if (stop) runtime.stop();
+            return std::nullopt;
+        });
+        Check(result == (stop ? ApplyResult::AppliedInterrupted : ApplyResult::AppliedClockUnavailable) &&
+            LoadPreferences().preferences == candidate && !runtime.enabled() && !runtime.hasBaseline() && timer.installed() &&
+            runtime.observe({ScheduleReading(1080, 0, 2000)}, true) == Event::None,
+            "failed refresh or a stop during refresh retains saved data and cleanup ownership without publishing automatic work");
+        fake.countdownKill = true; Check(timer.remove(), "post-save cleanup remains retryable");
+    }
+    Reset(); Runtime runtime; CountdownTimerRegistration timer; unsigned refreshes = 0;
+    const auto fresh = [&] { ++refreshes; return ScheduleReading(1080, 0, 2000); };
+    Check(Apply(runtime, timer, ScheduleOwner(), ID_SCHEDULE_TIMER, {true, 1080, 420}, ScheduleReading(1079, 59000, 1000), [] { return false; }, fresh) == ApplyResult::SaveFailed &&
+        Apply(runtime, timer, ScheduleOwner(), ID_SCHEDULE_TIMER, {}, std::nullopt, [] { return true; }, fresh) == ApplyResult::Applied && refreshes == 0,
+        "failed saves and committed Off need no post-save clock query");
+}
+void ScheduleModalObservationRebasesOnExit() {
+    using namespace Scheduling;
+    Runtime runtime;
+    Check(runtime.configure({true, 1080, 1081}, ScheduleReading(1079, 59000, 1000)), "prepare pre-dialog observation");
+    {
+        ObservationPause pause(runtime);
+        Check(runtime.enabled() && !runtime.hasBaseline() && runtime.observe({ScheduleReading(1079, 59500, 1500)}, false) == Event::Rebased,
+            "a modal interval can keep observing while retaining enabled policy");
+        // No WM_TIMER was dispatched during the boundary/slow close operation.
+    }
+    Check(!runtime.hasBaseline() && runtime.observe({ScheduleReading(1080, 1000, 3000)}, true) == Event::Rebased &&
+        runtime.observe({ScheduleReading(1080, 2000, 4000)}, true) == Event::None,
+        "modal exit invalidates any earlier observation even when no timer callback consumed the due enable");
+    Check(runtime.observe({ScheduleReading(1080, 59000, 61000)}, false) == Event::None &&
+        runtime.observe({ScheduleReading(1081, 0, 62000)}, false) == Event::Restore, "restoration still bypasses the modal enable gate");
+    {
+        ObservationPause pause(runtime);
+        Check(runtime.configure({true, 1082, 1083}, ScheduleReading(1081, 59000, 121000)), "successful transaction publishes a post-save baseline");
+        pause.keepFresh();
+    }
+    Check(runtime.hasBaseline() && runtime.observe({ScheduleReading(1082, 0, 122000)}, true) == Event::Enable,
+        "only an explicitly fresh successful transaction retains its future observation after the scope closes");
+}
+void ScheduleTimerCoexistsWithCountdownAndFade() {
+    using namespace Scheduling;
+    Runtime runtime; CountdownTimerRegistration countdown, fade, schedule;
+    Check(countdown.install(ScheduleOwner(), ID_SESSION_TIMER) && fade.install(ScheduleOwner(), ID_FADE_TIMER, 100) &&
+        ApplyScheduleSnapshot(runtime, schedule, ScheduleOwner(), ID_SCHEDULE_TIMER, {true, 1080, 420}, ScheduleReading(1079, 59000, 1000), [] { return true; }) == ApplyResult::Applied &&
+        countdown.installed() && fade.installed() && schedule.installed(), "three independent native timer IDs retain separate ownership and periods");
+    Check(ApplyScheduleSnapshot(runtime, schedule, ScheduleOwner(), ID_SCHEDULE_TIMER, {}, std::nullopt, [] { return true; }) == ApplyResult::Applied &&
+        !schedule.installed() && countdown.installed() && fade.installed() && fake.countdownKillId == ID_SCHEDULE_TIMER,
+        "disabling scheduling cannot kill countdown or fade timers");
+    Check(countdown.remove() && fade.remove() && !fake.countdownInstalled, "all independent timers clean up their own window/ID");
+}
+void ScheduleTimerFailureKeepsOriginalRecovery() {
+    using namespace Scheduling;
+    MagnificationFilter filter; Runtime runtime; CountdownTimerRegistration timer;
+    Check(filter.initialize(), "prepare an original owner while the schedule transaction fails");
+    const auto original = fake.effect;
+    Check(filter.enable(), "activate before schedule timer failure"); fake.countdownSet = false;
+    Check(ApplyScheduleSnapshot(runtime, timer, ScheduleOwner(), ID_SCHEDULE_TIMER, {true, 1080, 420}, ScheduleReading(1079, 59000, 1000), [] { return true; }) == ApplyResult::TimerFailed &&
+        !runtime.enabled() && filter.isActive() && filter.needsRestore(), "timer failure stops automatic work without dropping the current display owner");
+    fake.magWriteResults = {Write::FailAfterApply};
+    Check(!filter.disable() && filter.needsRestore() && !filter.isActive() && runtime.observe({ScheduleReading(1080, 0, 2000)}, true) == Event::None,
+        "failed immediate restoration cannot be followed by stale schedule writes");
+    Check(filter.disable() && !filter.needsRestore() && Same(fake.effect, original), "ordinary restore retry uses the same preactivation original after timer failure");
+}
+void ScheduleDispatchActivationAndActiveNoop() {
+    using namespace Scheduling;
+    MagnificationFilter filter; Runtime runtime; SessionTimer countdown;
+    Check(filter.initialize() && runtime.configure({true, 1080, 420}, ScheduleReading(1079, 59000, 1000)) && countdown.configure(1, 0, false), "prepare a confirmed future boundary");
+    const auto clock = ScheduleReading(1080, 0, 2000); const auto original = fake.effect;
+    Check(runtime.observe({clock}, true) == Event::Enable, "consume the event before dispatch");
+    unsigned requests = 0; bool activated = false;
+    const auto enable = [&] { ++requests; activated = filter.enable(); if (activated) countdown.start(1002); };
+    Check(DispatchEnable(filter, clock, [] { return true; }, [] { return ReadScheduleSession(); }, [] { return std::uint64_t{1002}; }, enable) == EnableResult::Requested &&
+        activated && filter.isActive() && filter.needsRestore() && requests == 1 && fake.scheduleSessionQueries == 1, "fresh current-session gating precedes the real checked backend activation");
+    const auto writes = fake.magWrites; const auto remaining = countdown.remainingMilliseconds(2000);
+    Check(DispatchEnable(filter, clock, [] { return true; }, [] { return ReadScheduleSession(); }, [] { return std::uint64_t{1003}; }, enable) == EnableResult::AlreadyActive &&
+        requests == 1 && fake.magWrites == writes && fake.scheduleSessionQueries == 1 && countdown.remainingMilliseconds(2000) == remaining &&
+        runtime.observe({ScheduleReading(1080, 1000, 3000)}, true) == Event::None, "active/duplicate events cannot restage brightness, restart countdown, or run another enable");
+    Check(filter.disable() && Same(fake.effect, original), "scheduled activation retains the same original for immediate restoration");
+}
+void ScheduleDispatchSessionAndStaleGuards() {
+    using namespace Scheduling;
+    for (unsigned failure = 0; failure < 6; ++failure) {
+        Reset(); MagnificationFilter filter; Check(filter.initialize(), "prepare guarded off backend");
+        auto clock = ScheduleReading(1080, 0, 2000); std::uint64_t now = 1002; unsigned requests = 0;
+        if (failure == 0) fake.scheduleSessionInfo.Data.WTSInfoExLevel1.SessionFlags = WTS_SESSIONSTATE_LOCK;
+        if (failure == 1) fake.scheduleSessionQuery = false;
+        if (failure == 2) now = 3001;
+        if (failure == 3) { clock.millisecondsInMinute = 59999; now = 1001; }
+        if (failure == 4) clock.millisecondsInMinute = 60000;
+        const auto writes = fake.magWrites;
+        const auto result = DispatchEnable(filter, clock, [&] { return failure != 5; }, [] { return ReadScheduleSession(); }, [&] { return now; }, [&] { ++requests; });
+        Check(result == (failure < 2 ? EnableResult::SessionBlocked : (failure == 5 ? EnableResult::Skipped : EnableResult::Stale)) &&
+            requests == 0 && fake.magWrites == writes && !filter.isActive() && !filter.needsRestore(), "unknown/locked session, stale/end-of-minute timing, and initial gates cannot make a color write");
+    }
+}
+void ScheduleDispatchRestoreDuringSessionCheck() {
+    using namespace Scheduling;
+    MagnificationFilter filter; Runtime runtime; Check(filter.initialize() && runtime.configure({true, 1080, 420}, ScheduleReading(1079, 59000, 1000)), "prepare reentrant dispatch");
+    const auto clock = ScheduleReading(1080, 0, 2000); Check(runtime.observe({clock}, true) == Event::Enable, "consume before a potentially reentrant query");
+    bool pendingRestore = false; unsigned requests = 0; const auto writes = fake.magWrites;
+    Check(DispatchEnable(filter, clock, [&] { return !pendingRestore; }, [&] {
+        pendingRestore = true; runtime.invalidate(); return ReadScheduleSession();
+    }, [] { return std::uint64_t{1002}; }, [&] { ++requests; }) == EnableResult::Skipped && requests == 0 && fake.magWrites == writes,
+        "a restoration request arriving inside the session query defeats the stale enable intent");
+    pendingRestore = false;
+    Check(runtime.observe({ScheduleReading(1080, 1000, 3000)}, true) == Event::Rebased && runtime.observe({ScheduleReading(1080, 2000, 4000)}, true) == Event::None,
+        "fulfilling restoration cannot replay a consumed current-minute event");
+}
+void ScheduleDispatchBackendFailureAndRestoreRetry() {
+    using namespace Scheduling;
+    MagnificationFilter filter; Runtime runtime; Check(filter.initialize() && runtime.configure({true, 1080, 1081}, ScheduleReading(1079, 59000, 1000)), "prepare failed scheduled activation");
+    fake.effect.transform[0][1] = 0.12f; const auto original = fake.effect; const auto clock = ScheduleReading(1080, 0, 2000);
+    Check(runtime.observe({clock}, true) == Event::Enable, "consume failing activation exactly once");
+    fake.magWriteResults = {Write::FailAfterApply, Write::Fail}; bool activated = true;
+    Check(DispatchEnable(filter, clock, [] { return true; }, [] { return ReadScheduleSession(); }, [] { return std::uint64_t{1002}; }, [&] { activated = filter.enable(); }) == EnableResult::Requested &&
+        !activated && !filter.isActive() && filter.needsRestore(), "request dispatch never promotes a failed/partially rolled-back backend to active");
+    const auto writes = fake.magWrites;
+    Check(runtime.observe({ScheduleReading(1080, 1000, 3000)}, true) == Event::None && fake.magWrites == writes &&
+        runtime.observe({ScheduleReading(1081, 0, 62000)}, false) == Event::Restore, "failed enables are not retried and scheduled restoration bypasses enable gates");
+    RestorationHistory history;
+    { RecordRestorationRequest record(history, RestoreReason::DailySchedule, 0); fake.magWriteResults = {Write::FailAfterApply};
+        Check(!filter.disable() && filter.needsRestore() && !filter.isActive(), "failed scheduled restoration keeps the original and recovery-only state"); record.finish(RestoreOutcome::Failed); }
+    char json[RestorationHistoryJsonBufferSize];
+    Check(FormatRestorationHistoryJson(history, 0, json)->find("\"reason\":\"daily-schedule\"") != std::string_view::npos &&
+        filter.disable() && Same(fake.effect, original), "history distinguishes the schedule, and retry restores an arbitrary original including green/cross-channel terms");
+}
+void ScheduleGammaFixedBrightnessAndCleanupOnlyRecovery() {
+    using namespace Scheduling;
+    GammaRampFilter filter; Runtime runtime; AppPreferences preference; preference.brightnessPercent = 7; preference.fadeIn = FadeInDuration::Minute;
+    Check(filter.initialize() && runtime.configure({true, 1080, 1081}, ScheduleReading(1079, 59000, 1000)), "prepare independent Gamma schedule capability");
+    decltype(fake.ramp) original; std::memcpy(&original, &fake.ramp, sizeof(original));
+    const auto clock = ScheduleReading(1080, 0, 2000); bool enabled = false;
+    Check(runtime.observe({clock}, true) == Event::Enable && DispatchEnable(filter, clock, [] { return true; }, [] { return ReadScheduleSession(); },
+        [] { return std::uint64_t{1002}; }, [&] { enabled = PrepareFadeInActivation(filter, preference.brightnessPercent, preference.fadeIn) && filter.enable(); }) == EnableResult::Requested &&
+        enabled && filter.redMode() == RedMode::StrictRed && filter.brightnessPercent() == 100 && preference.brightnessPercent == 7,
+        "Gamma scheduling uses its established full-scale Strict ramp and keeps unsupported brightness/fade as future Magnification preferences");
+    Check(runtime.observe({ScheduleReading(1081, 0, 62000)}, false) == Event::Restore, "scheduled restore remains immediate on Gamma too");
+    fake.mutexRelease = false;
+    Check(!filter.disable() && !filter.isActive() && filter.needsRestore() && std::memcmp(&original, &fake.ramp, sizeof(original)) == 0,
+        "confirmed calibration restoration with failed mutex release retains cleanup ownership and blocks new activation");
+    const auto writes = fake.gammaWrites; fake.ramp[0][64] = 1337; SessionTimer countdown;
+    Check(!CanEnable(filter, countdown, 0, BackendVerification::NotChecked, false, false, false, true, true, true, false), "cleanup-only ownership blocks automatic activation");
+    fake.mutexRelease = true;
+    Check(filter.disable() && fake.gammaWrites == writes && fake.ramp[0][64] == 1337, "cleanup-only retry releases ownership without overwriting another tool's intervening calibration");
+}
+void ScheduleDispatchClockWrapAndAllocation() {
+    using namespace Scheduling;
+    MagnificationFilter filter; Check(filter.initialize(), "prepare allocation-free dispatch");
+    auto clock = ScheduleReading(1080, 0, 2000); clock.startedTick = (std::numeric_limits<std::uint64_t>::max)() - 1;
+    bool activated = false, noAllocation = false; EnableResult result;
+    { TestMemory::FailNextAllocation failure;
+        result = DispatchEnable(filter, clock, [] { return true; }, [] { return ReadScheduleSession(); }, [] { return std::uint64_t{0}; }, [&] { activated = filter.enable(); });
+        noAllocation = TestMemory::AllocationFailurePending(); }
+    Check(result == EnableResult::Requested && activated && noAllocation && filter.needsRestore(), "guarded dispatch/native session copy/backend activation tolerate monotonic wrap without C++ allocation");
+    Check(filter.disable(), "restore after allocation-free scheduled activation");
+}
+void ScheduleImportRestorationAndOfflineConsentIsolation() {
+    MagnificationFilter filter; AppPreferences candidate; candidate.schedule = {true, 1080, 420};
+    Check(SavePreferences({}) && filter.initialize() && filter.enable(), "prepare an active profile import");
+    fake.magWriteResults = {Write::FailAfterApply}; const auto writes = fake.registryWrites;
+    Check(SaveImportedPreferences(candidate, [&] { return filter.disable(); }) == PreferenceImportResult::RestoreFailed && fake.registryWrites == writes &&
+        !LoadPreferences().preferences.schedule.enabled && filter.needsRestore(), "a profile cannot persist automatic activation while original restoration is unconfirmed");
+    Check(SaveImportedPreferences(candidate, [&] { return filter.disable(); }) == PreferenceImportResult::Saved && !filter.isActive() &&
+        LoadPreferences().preferences == candidate && fake.countdownSets == 0 && fake.clockUtcReads == 0 && fake.scheduleSessionQueries == 0 && fake.startupWrites == 0,
+        "consented profile persistence stays off and cannot implicitly arm timers, query clocks, or enable Windows startup");
+    fake.profileData = *SerializePreferences(candidate);
+    Check(ValidateSettingsProfileFile(L"schedule.profile") == 0 && fake.stdoutText.find("\"schedule\":\"daily\"") != std::string::npos &&
+        fake.clockUtcReads == 0 && fake.scheduleSessionQueries == 0 && fake.countdownSets == 0, "offline schedule validation resolves all fields without runtime activation");
+}
+void ScheduleTrayAndCachedReports() {
+    for (const bool enabled : {false, true}) for (const bool armed : {false, true}) for (const bool allowed : {false, true}) {
+        Reset(); auto state = DefaultMenuState(); state.schedule = {enabled, 1080, 420}; state.scheduleArmed = armed; state.canChangeSchedule = allowed;
+        const auto root = BuildTrayMenu(state); const auto item = FakeMenuCommand(root, ID_TRAY_DAILY_SCHEDULE);
+        Check(item && ((item->flags & MF_GRAYED) != 0) == !allowed && item->label.find(enabled ? "18:00 to 07:00" : "Off") != std::string::npos &&
+            ((item->label.find("not armed") != std::string::npos) == (enabled && !armed)) && !(FakeMenuCommand(root, ID_TRAY_RESTORE)->flags & MF_GRAYED),
+            "tray preferences distinguish Off, armed, and saved-but-not-armed while retaining recovery controls");
+        for (const auto& menu : fake.menus) Check(UniqueMenuAccelerators(*menu), "schedule access preserves every existing menu accelerator");
+        Check(DestroyMenu(root) && AliveFakeMenus() == 0, "the schedule entry uses existing menu ownership");
+    }
+    SupportReportState state; state.dailySchedule = Scheduling::DailyTimes{true, 1080, 420}; state.scheduleArmed = false; state.scheduleTimerInstalled = true;
+    state.scheduleStatus = "Clock unavailable; automatic enable blocked"; state.scheduleError = 4321;
+    state.scheduleTimerFailure = CountdownTimerFailure{CountdownTimerApi::Remove, 0xffffffffu};
+    const auto report = BuildSupportReport(state);
+    Check(report.find("daily (18:00 enable / 07:00 restore; Windows local time)") != std::string::npos &&
+        report.find("Schedule runtime armed: no") != std::string::npos && report.find("Schedule native error: 4321") != std::string::npos &&
+        report.find("KillTimer (error 4294967295)") != std::string::npos && fake.clockUtcReads == 0 && fake.scheduleSessionQueries == 0,
+        "support output separates preferred schedule, logical/native timer state, and cached failure without fresh API reads");
+}
+void ScheduleCompletePreviewAndQueryIsolation() {
+    auto candidate = ComparisonCandidate(2047); char text[1536];
+    const auto preview = FormatPreferencePreview({}, candidate, text, 6);
+    Check(preview && preview->find("Enabled (automatic activation)") != std::string_view::npos && preview->find("18:00 / Restore at: 07:00") != std::string_view::npos &&
+        preview->find("Startup/wake never catches up") != std::string_view::npos && preview->find("display will be restored now") != std::string_view::npos &&
+        preview->find("Enabled schedules may activate at future triggers") != std::string_view::npos,
+        "profile consent discloses automatic activation, local times, future-only delivery, and immediate restoration");
+    const auto length = preview->size();
+    Check(!FormatPreferencePreview({}, candidate, std::span<char>(text, length), 6) && FormatPreferencePreview({}, candidate, std::span<char>(text, length + 1), 6),
+        "complete consent is never replaced by a truncated preview");
+    CurrentPreferencesSnapshot snapshot; snapshot.preferences = candidate; fake.statusReply = *PackCurrentPreferences(snapshot);
+    Check(QueryRunningPreferences() == 0 && fake.statusWparam == REDLIGHT_PREFERENCES_PROTOCOL && fake.stdoutText.find("\"schedule\":\"daily\"") != std::string::npos &&
+        fake.clockUtcReads == 0 && fake.scheduleSessionQueries == 0 && fake.countdownSets == 0 && fake.registryWrites == 0 && fake.gammaWrites == 0 && fake.magWrites == 0,
+        "protocol-2 scripts receive a complete cached configuration without reading clocks/session or affecting display/persistence");
+}
 ScheduleClockResult ReadFakeScheduleClock() {
     fake.clockTickIndex = fake.clockAwakeIndex = 0;
     fake.clockSampling = true;
@@ -6773,8 +7255,8 @@ void FadePreferencePacketsAndPreviewBounds() {
         const auto packet = PackCurrentPreferences(snapshot);
         Check(packet && UnpackCurrentPreferences(*packet) == snapshot, "duration index, all settings, and state flags round-trip without bit overlap");
         for (unsigned index = 5; index <= 7; ++index)
-            Check(!UnpackCurrentPreferences((*packet & ~(7ull << 44)) | (static_cast<std::uint64_t>(index) << 44)), "undefined fade indices are rejected");
-        char json[CurrentPreferencesJsonBufferSize], preview[1024];
+            Check(!UnpackCurrentPreferences((*packet & ~(7ull << 29)) | (static_cast<std::uint64_t>(index) << 29)), "undefined fade indices are rejected");
+        char json[CurrentPreferencesJsonBufferSize], preview[1536];
         const auto text = FormatCurrentPreferencesJson(snapshot, json);
         const auto review = FormatPreferencePreview({}, snapshot.preferences, preview, 5);
         Check(text && text->find(std::string("\"fade_in\":\"") + FadeInToken(duration) + "\"") != std::string_view::npos && review &&
@@ -6787,7 +7269,7 @@ void FadePreferencePacketsAndPreviewBounds() {
         Check(!PackCurrentPreferences(snapshot) && !FormatCurrentPreferencesJson(snapshot, json), "invalid duration never crosses IPC or JSON boundaries");
     }
     auto nondefault = AppPreferences{}; nondefault.fadeIn = FadeInDuration::Seconds5;
-    char preview[1024];
+    char preview[1536];
     for (unsigned schema = 1; schema <= 4; ++schema)
         Check(!FormatPreferencePreview({}, nondefault, preview, schema), "older provenance cannot claim an explicit nondefault duration");
 }
@@ -7228,8 +7710,8 @@ void BrightnessProfileRangeAndMigration() {
     for (unsigned percent = 1; percent <= 100; ++percent) {
         AppPreferences value; value.brightnessPercent = percent;
         const auto serialized = SerializePreferences(value); const auto parsed = ParsePreferences(*serialized);
-        Check(parsed.preferences == value && parsed.inputSchema == 5 && SavePreferences(value) && LoadPreferences().preferences == value,
-            "every brightness persists and round-trips through canonical schema 5");
+        Check(parsed.preferences == value && parsed.inputSchema == 6 && SavePreferences(value) && LoadPreferences().preferences == value,
+            "every brightness persists and round-trips through canonical schema 6");
     }
     const auto current = *SerializePreferences({});
     for (const unsigned percent : {0u, 101u, (std::numeric_limits<unsigned>::max)()}) {
@@ -7293,10 +7775,10 @@ void BrightnessPacketJsonAndDiagnostics() {
     for (unsigned percent = 1; percent <= 100; ++percent) {
         CurrentPreferencesSnapshot value; value.preferences.brightnessPercent = percent;
         const auto packed = PackCurrentPreferences(value);
-        Check(packed && UnpackCurrentPreferences(*packed) == value, "all brightness values round-trip with schema-5 packet ownership/flags intact");
+        Check(packed && UnpackCurrentPreferences(*packed) == value, "all brightness values round-trip with schema-6 packet ownership/flags intact");
     }
     const auto word = *PackCurrentPreferences({});
-    Check(!UnpackCurrentPreferences(word & ~(127ull << 37)) && !UnpackCurrentPreferences((word & ~(127ull << 37)) | (101ull << 37)),
+    Check(!UnpackCurrentPreferences(word & ~(127ull << 22)) && !UnpackCurrentPreferences((word & ~(127ull << 22)) | (101ull << 22)),
         "encoded zero and out-of-range brightness are rejected");
     CurrentPreferencesSnapshot snapshot; snapshot.preferences.brightnessPercent = 7;
     char json[CurrentPreferencesJsonBufferSize];
@@ -7549,6 +8031,21 @@ BOOL WTSRegisterSessionNotification(HWND owner, DWORD flags) {
     fake.sessionRegisteredOwner = owner;
     return 1;
 }
+BOOL WTSQuerySessionInformationW(HANDLE server, DWORD session, WTS_INFO_CLASS info, LPWSTR* output, DWORD* bytes) {
+    ++fake.scheduleSessionQueries; fake.scheduleSessionErrorBefore = fake.lastError;
+    fake.scheduleSessionTargetInvalid |= server != WTS_CURRENT_SERVER_HANDLE || session != WTS_CURRENT_SESSION || info != WTSSessionInfoEx;
+    auto* data = fake.scheduleSessionBytes.data() + (fake.scheduleSessionUnaligned ? 1 : 0);
+    std::memcpy(data, &fake.scheduleSessionInfo, sizeof(fake.scheduleSessionInfo));
+    *output = fake.scheduleSessionBuffer ? reinterpret_cast<LPWSTR>(data) : nullptr;
+    *bytes = fake.scheduleSessionSize;
+    if (!fake.scheduleSessionQuery) { if (fake.scheduleSessionError) fake.lastError = *fake.scheduleSessionError; return FALSE; }
+    fake.lastError = 0xbad; return TRUE;
+}
+void WTSFreeMemory(void* buffer) {
+    ++fake.scheduleSessionFrees;
+    fake.scheduleSessionTargetInvalid |= buffer != fake.scheduleSessionBytes.data() && buffer != fake.scheduleSessionBytes.data() + 1;
+    fake.lastError = ERROR_DISK_FULL;
+}
 BOOL WTSUnRegisterSessionNotification(HWND owner) {
     ++fake.sessionUnregisters; fake.sessionUnregisterOwner = owner; fake.sessionUnregisterErrorBefore = fake.lastError;
     if (!fake.sessionUnregister || owner != fake.sessionRegisteredOwner) { if (fake.sessionErrorSupplied) fake.lastError = fake.sessionError; return FALSE; }
@@ -7684,6 +8181,7 @@ UINT_PTR SetTimer(HWND owner, UINT_PTR id, UINT interval, TIMERPROC callback) {
     if (slot == fake.windowTimers.end()) { fake.lastError = ERROR_NOT_ENOUGH_MEMORY; return 0; }
     *slot = {owner, id};
     fake.countdownInstalled = true; fake.countdownOwner = owner; fake.countdownId = id;
+    if (fake.stopScheduleOnInstall) { auto* runtime = fake.stopScheduleOnInstall; fake.stopScheduleOnInstall = nullptr; runtime->stop(); }
     return fake.countdownReturn;
 }
 BOOL KillTimer(HWND owner, UINT_PTR id) {
@@ -7896,6 +8394,22 @@ std::optional<std::string> RecentLogText() noexcept {
 }
 int main() {
     const std::pair<const char*, void(*)()> tests[] = {
+        {"Schedule session current active/unlocked", ScheduleSessionCurrentActiveUnlockedOnly}, {"Schedule session malformed/unaligned buffers", ScheduleSessionMalformedBuffersAndFlags},
+        {"Schedule session failure/allocation isolation", ScheduleSessionFailureAndAllocationIsolation}, {"Schedule time input/bounds", ScheduleTimeInputAndBounds},
+        {"Schedule profile migration/strict fields", ScheduleProfileMigrationAndStrictFields}, {"Schedule complete preferences packet/JSON", ScheduleFullPreferencesPacketAndJson},
+        {"Schedule runtime consumed dates/rearm", ScheduleRuntimeConsumedDatesSurviveRearm}, {"Schedule runtime clock/zone/busy", ScheduleRuntimeClockZoneAndBusyCancellation},
+        {"Schedule enable gates/countdown priority", ScheduleEnableGateMatrixAndCountdownPriority}, {"Schedule apply ordering/disabled clock", ScheduleApplyOrderingAndDisabledClockIndependence},
+        {"Schedule apply failed saves/cleanup", ScheduleApplyFailedSavesAndOwnedCleanup}, {"Schedule apply timer failures/disable", ScheduleApplyTimerFailureAndLogicalDisable},
+        {"Schedule apply interruption priority", ScheduleApplyInterruptedBeforeAndAfterSave},
+        {"Schedule post-save baseline", ScheduleApplyRefreshesAfterPersistence}, {"Schedule post-save clock/stop", ScheduleApplyPostSaveClockFailureAndStop},
+        {"Schedule modal completion rebase", ScheduleModalObservationRebasesOnExit},
+        {"Schedule apply validation/allocation failure", ScheduleApplyRejectedAndAllocationFailure}, {"Schedule independent native timers", ScheduleTimerCoexistsWithCountdownAndFade},
+        {"Schedule timer failure/original recovery", ScheduleTimerFailureKeepsOriginalRecovery},
+        {"Schedule dispatch activation/active no-op", ScheduleDispatchActivationAndActiveNoop}, {"Schedule dispatch session/stale guards", ScheduleDispatchSessionAndStaleGuards},
+        {"Schedule dispatch queued restoration", ScheduleDispatchRestoreDuringSessionCheck}, {"Schedule dispatch backend failure/restore retry", ScheduleDispatchBackendFailureAndRestoreRetry},
+        {"Schedule Gamma fixed output/cleanup recovery", ScheduleGammaFixedBrightnessAndCleanupOnlyRecovery}, {"Schedule dispatch wrap/allocation", ScheduleDispatchClockWrapAndAllocation},
+        {"Schedule import/offline consent isolation", ScheduleImportRestorationAndOfflineConsentIsolation}, {"Schedule tray/cached reports", ScheduleTrayAndCachedReports},
+        {"Schedule complete preview/query isolation", ScheduleCompletePreviewAndQueryIsolation},
         {"Schedule clock snapshot/status success", ScheduleClockSingleSnapshotAndSuccessStatuses}, {"Schedule clock offsets/midnight/fraction", ScheduleClockOffsetsMidnightAndFraction},
         {"Schedule clock native failure/error provenance", ScheduleClockNativeFailureErrorProvenance}, {"Schedule clock malformed native output", ScheduleClockRejectsMalformedNativeOutput},
         {"Schedule clock semantic zone identity", ScheduleClockSemanticZoneIdentity}, {"Schedule clock capture limits/wrap", ScheduleClockCaptureBoundsAndWrap},
@@ -8154,7 +8668,7 @@ int main() {
         try {
             run();
             Check(fake.gammaUnownedWrites == 0 && fake.mutexClosesWhileOwned == 0, "all gamma writes hold ownership; owned mutex handles are never closed");
-            Check(!fake.startupTargetInvalid && !fake.moduleTargetInvalid, "startup calls target only the self module and exact per-user Run value");
+            Check(!fake.startupTargetInvalid && !fake.moduleTargetInvalid && !fake.scheduleSessionTargetInvalid, "startup/session queries target only the self module, current local session, and exact per-user Run value");
             Check(!fake.sessionRegisteredOwner, "session registration is released while its fake owner remains valid");
             std::printf("PASS %s\n", name);
         }

@@ -4,9 +4,9 @@
 
 namespace {
 constexpr const char* reasons[] = {"manual", "countdown", "timer-failure", "display-change", "power-transition", "session-transition",
-    "explorer-restart", "tray-failure", "external-request", "preferences", "exit", "callback-failure", "deferred-request"};
+    "explorer-restart", "tray-failure", "external-request", "preferences", "exit", "callback-failure", "deferred-request", "daily-schedule"};
 constexpr const char* outcomes[] = {"interrupted", "deferred", "already-clear", "restored", "failed"};
-static_assert(std::size(reasons) == static_cast<unsigned>(RestoreReason::DeferredRequest) + 1);
+static_assert(std::size(reasons) == static_cast<unsigned>(RestoreReason::DailySchedule) + 1);
 static_assert(std::size(outcomes) == static_cast<unsigned>(RestoreOutcome::Failed) + 1);
 }
 

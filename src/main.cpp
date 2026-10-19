@@ -45,6 +45,9 @@
 #include "StartupRegistration.h"
 #include "FadeInControl.h"
 #include "TrayTooltip.h"
+#include "ScheduleApply.h"
+#include "ScheduleDispatch.h"
+#include "ScheduleDialog.h"
 #include "RecentDiagnosticsClipboard.h"
 #include "TrayCommand.h"
 #include "PreferencesClipboard.h"
@@ -81,6 +84,12 @@ SessionTimer g_sessionTimer;
 CountdownTimerRegistration g_countdownRegistration;
 CountdownTimerRegistration g_fadeRegistration;
 RedFadeIn g_fade;
+Scheduling::Runtime g_scheduleRuntime;
+CountdownTimerRegistration g_scheduleRegistration;
+bool g_scheduleSuspended = false, g_scheduleSessionBlocked = false, g_scheduleClockValid = false;
+const char* g_scheduleStatus = "Off";
+std::uint32_t g_scheduleError = 0;
+ScheduleClockStage g_scheduleClockStage = ScheduleClockStage::None;
 bool g_autoRestoreFailureNotified = false;
 BackendPreference g_backendPreference = BackendPreference::Automatic;
 BackendPreference g_startupBackendPreference = BackendPreference::Automatic;
@@ -91,10 +100,19 @@ PreferenceSource g_startupPreferenceSource = PreferenceSource::Defaults;
 bool g_startupPreferenceWarning = false;
 bool g_preferencesApplying = false;
 bool g_uiErrorVisible = false;
+bool g_modalUi = false;
 BackendVerificationCache g_verification;
 RestorationHistory g_restorationHistory;
 DisplayContextCache g_displayContext;
 std::optional<ProcessContextSnapshot> g_processContext;
+
+class ScopedModalUi {
+public:
+    ScopedModalUi() : modal_(g_modalUi), pause_(g_scheduleRuntime) {}
+private:
+    ScopedFlag modal_;
+    Scheduling::ObservationPause pause_;
+};
 
 }
 
@@ -127,6 +145,11 @@ void StartFadeInTimer();
 void OnFadeInTimer();
 bool CompleteFadeForSelection();
 void SetFadeInDuration(FadeInDuration duration);
+void StopSchedule();
+void ArmSchedule();
+void ConfigureDailySchedule(HWND owner);
+void OnScheduleTimer();
+bool ScheduleIsArmed();
 void ConfigureWindowsStartup(bool enable);
 void RefreshWindowsStartup();
 void LogSystemInfo();
@@ -309,6 +332,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
     if (loadedPreferences.warning || !preferencesApplied) {
         ReportError("Some saved settings could not be loaded or applied. Defaults were used where needed. See the diagnostics log.", false);
     }
+    ArmSchedule(); // Saved consent arms future boundaries only; filtering remains off.
 
     MSG msg = {};
     for (;;) {
@@ -325,6 +349,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
             if (error) Diagnostics::LogFormat("GetMessage failed (error %lu); attempting display restoration before exit.", error);
             else Diagnostics::Log("GetMessage failed without a native error code; attempting display restoration before exit.");
         }
+        StopSchedule();
         StopFadeIn();
         if (!g_busy) g_verification = {};
         const auto disposition = TryLoopShutdown(*g_displayFilter, messageResult, g_busy, [] { return IsWindow(nid.hWnd) != FALSE; });
@@ -528,6 +553,7 @@ bool RequestRunningInstanceRestore(bool* handled) {
 void ReportError(const char* message, bool modal) {
     Diagnostics::Log(message);
     if (modal || !g_trayAdded) {
+        ScopedModalUi modalUi;
         if (!MessageBoxA(nid.hWnd, message, "RedLight", MB_OK | MB_ICONERROR)) {
             Diagnostics::LogFormat("MessageBox(error) failed (error %lu).", GetLastError());
         }
@@ -546,8 +572,12 @@ void ReportError(const char* message, bool modal) {
 bool RestoreFilter(RestoreReason reason, bool showError, bool notifyFailure, bool updateTray) {
     RecordRestorationRequest request(g_restorationHistory, reason, GetTickCount64(), []() noexcept -> std::uint64_t { return GetTickCount64(); });
     g_fade.cancel(); // Even a deferred restoration request must prevent another automatic color step.
+    g_scheduleRuntime.invalidate(); // A queued, already-due enable cannot undo this request.
+    g_scheduleClockValid = false;
+    if (reason == RestoreReason::Exit || reason == RestoreReason::CallbackFailure) StopSchedule();
     if (g_busy) { request.finish(RestoreOutcome::Deferred); g_pendingRestore = true; return false; }
     StopFadeIn();
+    if (!g_scheduleRuntime.enabled()) g_scheduleRegistration.remove();
     g_pendingRestore = false;
     g_verification = {};
     bool restored = false;
@@ -605,7 +635,9 @@ void RefreshTrayIconTip() {
     UpdateTrayIconTip(tip);
 }
 
-void ControlRedlight(bool toggle) {
+void ControlRedlight(bool toggle, bool automatic = false) {
+    g_scheduleRuntime.invalidate();
+    g_scheduleClockValid = false;
     const auto intent = SelectFilterControlIntent(toggle, g_busy, g_preferencesApplying, g_pendingRestore,
         g_displayFilter->isActive(), g_displayFilter->needsRestore());
     if (intent == FilterControlIntent::None) return;
@@ -630,7 +662,7 @@ void ControlRedlight(bool toggle) {
         if (!enabled) {
             char message[768];
             sprintf_s(message, "The red filter could not be enabled.\n\n%s", enableError);
-            ReportError(message);
+            ReportError(message, !automatic);
         }
         RefreshTrayIconTip();
     }
@@ -697,6 +729,181 @@ void SetFadeInDuration(FadeInDuration duration) {
     g_preferencesUnsaved = !SavePreferences(g_preferences);
     if (g_preferencesUnsaved) ReportError("The next-activation fade-in preference changed but could not be saved. Retry saving current preferences.");
     Diagnostics::LogFormat("Fade-in preference: %s (next Magnification activation only).", FadeInName(duration));
+}
+
+bool ScheduleIsArmed() {
+    return g_scheduleRuntime.enabled() && g_scheduleRegistration.installed() && g_scheduleClockValid &&
+        !g_scheduleSuspended && !g_scheduleSessionBlocked && g_trayAdded && g_sessionNotifications.isRegistered();
+}
+
+void StopSchedule() {
+    g_scheduleRuntime.stop();
+    g_scheduleClockValid = false;
+    if (!g_scheduleRegistration.remove()) Diagnostics::Log("Schedule is logically stopped; native timer cleanup remains owned for retry.");
+}
+
+void RecordScheduleClock(const ScheduleClockResult& clock) {
+    if (clock.reading) {
+        g_scheduleClockValid = true;
+        if (g_scheduleClockStage != ScheduleClockStage::None) {
+            Diagnostics::Log("Scheduling clock recovered; only future boundaries are eligible.");
+            g_scheduleStatus = "Clock recovered; future triggers only";
+            g_scheduleError = 0;
+        }
+        g_scheduleClockStage = ScheduleClockStage::None;
+        return;
+    }
+    if (g_scheduleClockStage != clock.stage || g_scheduleError != clock.nativeError || g_scheduleClockValid)
+        Diagnostics::LogFormat("Scheduling clock unavailable (stage %u, documented native error %lu); automatic enable blocked.",
+            static_cast<unsigned>(clock.stage), static_cast<unsigned long>(clock.nativeError));
+    g_scheduleClockValid = false; g_scheduleClockStage = clock.stage; g_scheduleError = clock.nativeError;
+    g_scheduleStatus = "Clock unavailable; automatic enable blocked";
+}
+
+bool PrepareScheduleClock(std::optional<ScheduleClockReading>& reading) {
+    if (!g_trayAdded || !g_sessionNotifications.isRegistered() || !IsWindow(nid.hWnd)) {
+        g_scheduleStatus = "Waiting for tray/session controls"; return false;
+    }
+    ScheduleSessionResult session;
+    ScheduleClockResult clock;
+    {
+        ScopedFlag busy(g_busy);
+        session = ReadScheduleSession();
+        if (session.state == ScheduleSessionState::Ready) clock = ReadScheduleClock();
+    }
+    if (g_pendingRestore) { RestoreFilter(RestoreReason::DeferredRequest, false); return false; }
+    if (session.state != ScheduleSessionState::Ready) {
+        if (session.state == ScheduleSessionState::LockedOrInactive) g_scheduleSessionBlocked = true;
+        g_scheduleError = session.nativeError;
+        g_scheduleStatus = "Current session not confirmed active/unlocked";
+        Diagnostics::LogFormat("Schedule not armed: current session is locked/inactive or unavailable (native error %lu).", static_cast<unsigned long>(session.nativeError));
+        return false;
+    }
+    g_scheduleSessionBlocked = g_scheduleSuspended = false;
+    RecordScheduleClock(clock);
+    reading = clock.reading;
+    return reading.has_value();
+}
+
+void FinishScheduleApply(Scheduling::ApplyResult result) {
+    if (g_pendingRestore) RestoreFilter(RestoreReason::DeferredRequest, false);
+    if (result == Scheduling::ApplyResult::Applied || result == Scheduling::ApplyResult::AppliedCleanupPending) {
+        g_scheduleStatus = g_scheduleRuntime.enabled() ? "Armed; future triggers only" : "Off";
+        g_scheduleError = 0;
+        if (!g_scheduleRuntime.enabled()) g_scheduleClockValid = false;
+        if (result == Scheduling::ApplyResult::AppliedCleanupPending && g_scheduleRegistration.installed()) {
+            g_scheduleStatus = "Off; timer cleanup pending";
+            ReportError("Scheduling is Off. Its native timer could not be removed; automatic activation is disabled and cleanup remains available through Restore or Exit.", false);
+        }
+    } else if (result == Scheduling::ApplyResult::TimerFailed) {
+        g_scheduleStatus = "Timer unavailable; use Apply to retry";
+        g_scheduleClockValid = false;
+        g_scheduleError = g_scheduleRegistration.lastFailure() ? g_scheduleRegistration.lastFailure()->errorCode : 0;
+        RestoreFilter(RestoreReason::TimerFailure, false);
+        ReportError("The daily schedule timer could not be confirmed. Automatic activation is disabled; prior preferences and display recovery data are retained. Open Daily schedule and Apply to retry.", false);
+    } else if (result == Scheduling::ApplyResult::ClockUnavailable || result == Scheduling::ApplyResult::Rejected) {
+        g_scheduleRuntime.stop(); g_scheduleClockValid = false;
+        g_scheduleStatus = "Schedule baseline unavailable; not armed";
+        Diagnostics::Log("Schedule configuration/baseline rejected; automatic activation remains disabled.");
+    } else if (result == Scheduling::ApplyResult::Interrupted || result == Scheduling::ApplyResult::AppliedInterrupted) {
+        g_scheduleClockValid = false;
+        g_scheduleStatus = "Arming interrupted; use Apply to retry";
+        Diagnostics::Log("A stop/shutdown/callback request interrupted schedule arming; automatic work remains disabled.");
+    } else if (result == Scheduling::ApplyResult::AppliedClockUnavailable) {
+        g_scheduleClockValid = false;
+        g_scheduleStatus = "Saved; post-save clock unavailable, not armed";
+        Diagnostics::Log("Schedule preferences saved, but the post-save clock baseline is unavailable; automatic work remains stopped.");
+    }
+    if (g_pendingRestore) RestoreFilter(RestoreReason::DeferredRequest, false);
+}
+
+std::optional<ScheduleClockReading> RefreshScheduleBaseline() {
+    const auto clock = ReadScheduleClock();
+    RecordScheduleClock(clock);
+    return clock.reading;
+}
+
+void ArmSchedule() {
+    if (g_busy) { g_scheduleRuntime.invalidate(); g_scheduleClockValid = false; return; }
+    std::optional<ScheduleClockReading> clock;
+    if (g_preferences.schedule.enabled && !PrepareScheduleClock(clock)) { g_scheduleRuntime.stop(); g_scheduleClockValid = false; return; }
+    Scheduling::ApplyResult result;
+    { ScopedFlag busy(g_busy); result = Scheduling::Apply(g_scheduleRuntime, g_scheduleRegistration, nid.hWnd, ID_SCHEDULE_TIMER,
+        g_preferences.schedule, clock, [] { return true; }, RefreshScheduleBaseline, false); }
+    FinishScheduleApply(result);
+}
+
+void ConfigureDailySchedule(HWND owner) {
+    if (g_busy || g_preferencesApplying) return;
+    ScopedFlag transaction(g_preferencesApplying);
+    Scheduling::ObservationPause pause(g_scheduleRuntime);
+    const auto times = ShowScheduleDialog(owner, g_preferences.schedule);
+    if (!times || !IsWindow(owner) || g_busy) return;
+    auto candidate = g_preferences; candidate.schedule = *times;
+    std::optional<ScheduleClockReading> clock;
+    if (times->enabled && !PrepareScheduleClock(clock)) {
+        ReportError("The clock, current unlocked session, or recovery controls could not be confirmed. Your previous schedule remains selected. Check About/logs and Apply again when ready."); return;
+    }
+    Scheduling::ApplyResult result;
+    {
+        ScopedFlag busy(g_busy);
+        result = Scheduling::Apply(g_scheduleRuntime, g_scheduleRegistration, owner, ID_SCHEDULE_TIMER, *times, clock,
+            [&] { return SavePreferences(candidate); }, RefreshScheduleBaseline);
+    }
+    if (result == Scheduling::ApplyResult::Applied || result == Scheduling::ApplyResult::AppliedCleanupPending ||
+        result == Scheduling::ApplyResult::AppliedInterrupted || result == Scheduling::ApplyResult::AppliedClockUnavailable) {
+        g_preferences = candidate; g_preferencesUnsaved = false;
+        Diagnostics::LogFormat("Daily schedule preference: %s (%02u:%02u enable / %02u:%02u restore); future boundaries only.",
+            times->enabled ? "daily" : "Off", times->enableMinute / 60, times->enableMinute % 60, times->restoreMinute / 60, times->restoreMinute % 60);
+    }
+    FinishScheduleApply(result); // Fulfill deferred restoration before any modal error UI.
+    if (ScheduleIsArmed() && g_scheduleRuntime.hasBaseline()) pause.keepFresh();
+    if (result == Scheduling::ApplyResult::AppliedInterrupted) {
+        ReportError("Preferences were saved, but recovery or shutdown interrupted schedule arming. Automatic activation is disabled; Apply the schedule again to retry.", false);
+    } else if (result == Scheduling::ApplyResult::AppliedClockUnavailable) {
+        ReportError("Preferences were saved, but the clock could not be confirmed after saving. Automatic activation is disabled; Apply the schedule again when ready.", false);
+    } else if (result == Scheduling::ApplyResult::SaveFailed) {
+        ReportError("The daily schedule could not be saved. Your previous preferences and logical schedule remain selected; any failed new timer cleanup remains owned.");
+    } else if (result != Scheduling::ApplyResult::TimerFailed && result != Scheduling::ApplyResult::Applied && result != Scheduling::ApplyResult::AppliedCleanupPending) {
+        ReportError("The complete daily schedule could not be prepared. Your previous preferences remain selected.");
+    }
+}
+
+void OnScheduleTimer() {
+    if (!g_scheduleRuntime.enabled() || !g_scheduleRegistration.installed()) return;
+    if (g_scheduleSuspended) { g_scheduleRuntime.invalidate(); g_scheduleClockValid = false; return; }
+    const auto allowed = [&] {
+        return g_scheduleRuntime.enabled() && g_scheduleRuntime.hasBaseline() && g_scheduleClockValid && Scheduling::CanEnable(*g_displayFilter, g_sessionTimer, GetTickCount64(), g_verification.result().state,
+            g_busy || g_modalUi || g_uiErrorVisible, g_preferencesApplying, g_pendingRestore, g_trayAdded, g_sessionNotifications.isRegistered(), g_scheduleRegistration.installed(),
+            g_scheduleSuspended || g_scheduleSessionBlocked);
+    };
+    const bool canEnable = allowed();
+    ScheduleClockResult clock; Scheduling::Event event;
+    {
+        ScopedFlag busy(g_busy);
+        clock = ReadScheduleClock();
+        event = g_scheduleRuntime.observe(clock, canEnable);
+    }
+    RecordScheduleClock(clock);
+    if (g_pendingRestore) { if (!g_busy) RestoreFilter(RestoreReason::DeferredRequest, false); return; }
+    if (event == Scheduling::Event::Restore) {
+        const bool restored = RestoreFilter(RestoreReason::DailySchedule, false);
+        g_scheduleStatus = restored ? "Scheduled restoration completed" : "Scheduled restoration needs recovery";
+        Diagnostics::Log("Daily restore boundary consumed; immediate original restoration requested.");
+    } else if (event == Scheduling::Event::Enable && clock.reading) {
+        const auto result = Scheduling::DispatchEnable(*g_displayFilter, *clock.reading, allowed,
+            [] { ScopedFlag busy(g_busy); const auto session = ReadScheduleSession(); g_scheduleError = session.nativeError; return session; },
+            [] { return GetTickCount64(); }, [] { ControlRedlight(false, true); });
+        g_scheduleStatus = result == Scheduling::EnableResult::Requested ? "Enable requested; see filter status" :
+            (result == Scheduling::EnableResult::AlreadyActive ? "Already active; countdown unchanged" : "Last enable event skipped");
+        Diagnostics::LogFormat("Daily enable boundary consumed (dispatch result %u); no enable retry is queued.", static_cast<unsigned>(result));
+        if (result == Scheduling::EnableResult::SessionBlocked || result == Scheduling::EnableResult::Stale)
+            ReportError("The scheduled enable was skipped because the current session or event time could not be confirmed. No catch-up activation is queued; manual controls remain available.", false);
+    } else if (event == Scheduling::Event::SkippedEnable) {
+        g_scheduleStatus = "Last enable skipped: controls/recovery/busy";
+        Diagnostics::Log("Daily enable boundary skipped by controls, recovery, verification, session, or busy gate; no replay is queued.");
+    }
+    if (g_pendingRestore && !g_busy) RestoreFilter(RestoreReason::DeferredRequest, false);
 }
 
 void StopSessionTimer() {
@@ -792,6 +999,7 @@ void SetExpiryWarning(ExpiryWarning warning) {
 void SaveCurrentPreferences() {
     if (g_busy || g_preferencesApplying) return;
     ScopedFlag transaction(g_preferencesApplying);
+    Scheduling::ObservationPause pause(g_scheduleRuntime);
     g_preferencesUnsaved = !SavePreferences(g_preferences);
     if (g_preferencesUnsaved) {
         ReportError("Current preferences are still unsaved. Filtering and recovery controls remain available. Fix storage access and retry Save current preferences.");
@@ -809,6 +1017,7 @@ void RetrySessionRecovery() {
     if (!registered) {
         ReportError("Session recovery notifications are still unavailable. Restore display remains available. See About and the diagnostics log, then retry session recovery.");
     } else if (restored) {
+        ArmSchedule();
         ShowTrayInfo("RedLight session recovery available", "Session change notifications are registered. RedLight will attempt restoration on lock, unlock, and disconnect events.");
     }
 }
@@ -1000,6 +1209,7 @@ void RefreshWindowsStartup() {
 void ConfigureWindowsStartup(bool enable) {
     if (g_busy || g_preferencesApplying) return;
     ScopedFlag transaction(g_preferencesApplying); // Keep the proposed command stable through the modal review; Restore remains available.
+    Scheduling::ObservationPause pause(g_scheduleRuntime);
     g_windowsStartup.refresh();
     const auto reviewed = g_windowsStartup.snapshot();
     if (!reviewed.readable() || (enable && g_windowsStartup.command().empty())) {
@@ -1152,6 +1362,9 @@ void CopySupportReport(HWND owner) {
     if (g_fade.active()) { state.fadeTarget = g_fade.target(); state.fadeDuration = FadeInName(g_fade.duration()); }
     state.fadeTimerInstalled = g_fadeRegistration.installed();
     state.fadeTimerFailure = g_fadeRegistration.lastFailure();
+    state.dailySchedule = g_preferences.schedule;
+    state.scheduleArmed = ScheduleIsArmed(); state.scheduleStatus = g_scheduleStatus; state.scheduleError = g_scheduleError;
+    state.scheduleTimerInstalled = g_scheduleRegistration.installed(); state.scheduleTimerFailure = g_scheduleRegistration.lastFailure();
     state.windowsStartupEntry = StartupEntryDescription(g_windowsStartup.snapshot().state);
     state.windowsStartupReadError = g_windowsStartup.snapshot().error;
     state.windowsStartupChangeError = g_windowsStartup.lastChangeError();
@@ -1230,7 +1443,9 @@ void ImportSettingsProfile(HWND owner) {
 
 void ConfirmPreferences(HWND owner, const AppPreferences& candidate, const char* title, std::optional<unsigned> inputSchema) {
     if (g_busy || g_preferencesApplying || !ValidPreferences(candidate)) return;
-    char preview[1024];
+    ScopedFlag transaction(g_preferencesApplying);
+    Scheduling::ObservationPause pause(g_scheduleRuntime);
+    char preview[1536];
     if (!FormatPreferencePreview(g_preferences, candidate, preview, inputSchema)) {
         Diagnostics::Log("Preference confirmation preview could not be prepared completely; no change applied.");
         ReportError("The complete preference preview could not be prepared. No settings were applied.");
@@ -1241,8 +1456,7 @@ void ConfirmPreferences(HWND owner, const AppPreferences& candidate, const char*
     if (!answer) Diagnostics::LogFormat("MessageBox(preferences) failed (error %lu).", GetLastError());
     if (answer != IDYES) return;
     // Recheck after the modal preview: native callbacks may have run while it was open.
-    if (g_busy || g_preferencesApplying) return;
-    ScopedFlag transaction(g_preferencesApplying);
+    if (g_busy || !IsWindow(owner)) return;
     const auto saved = SaveImportedPreferences(candidate, [] { return RestoreFilter(RestoreReason::Preferences, true); });
     if (saved == PreferenceImportResult::Rejected || saved == PreferenceImportResult::RestoreFailed) return;
     if (saved == PreferenceImportResult::SaveFailed) {
@@ -1254,6 +1468,8 @@ void ConfirmPreferences(HWND owner, const AppPreferences& candidate, const char*
     g_preferencesUnsaved = false;
     const bool modeApplied = ApplyInactivePreferences(candidate);
     const bool shortcutsApplied = g_hotkeys.change(candidate.shortcuts);
+    ArmSchedule();
+    if (ScheduleIsArmed() && g_scheduleRuntime.hasBaseline()) pause.keepFresh();
     if (!modeApplied || !shortcutsApplied) {
         ReportError("The preferences were saved, but some choices could not be applied in this session. Restart RedLight to use them.");
         return;
@@ -1270,6 +1486,7 @@ const char* FilterStatusText() {
 
 void VerifyBackendState(HWND owner) {
     if (g_busy) return;
+    ScopedModalUi modalUi;
     {
         ScopedFlag busy(g_busy);
         const auto started = GetTickCount64();
@@ -1314,8 +1531,12 @@ void VerifyBackendState(HWND owner) {
 }
 
 void ShowAboutDialog(HWND parent) {
+    ScopedModalUi modalUi;
     char aboutText[2304];
     char fadeProgress[96];
+    char enableAt[6] = "??:??", restoreAt[6] = "??:??";
+    Scheduling::FormatMinute(g_preferences.schedule.enableMinute, enableAt);
+    Scheduling::FormatMinute(g_preferences.schedule.restoreMinute, restoreAt);
     if (g_fade.active()) sprintf_s(fadeProgress, "%u%% -> %u%% (%s)", g_displayFilter->brightnessPercent(), g_fade.target(), FadeInName(g_fade.duration()));
     else strcpy_s(fadeProgress, "Not running");
     char sessionRecovery[96];
@@ -1336,7 +1557,7 @@ void ShowAboutDialog(HWND parent) {
     else sprintf_s(sessionRecovery, "Unavailable (error %lu); retry in Expert controls", g_sessionNotifications.lastError());
     const auto logging = Diagnostics::GetStatus();
     sprintf_s(aboutText, "RedLight " REDLIGHT_VERSION "\nBuild revision: " REDLIGHT_BUILD_REVISION " (" REDLIGHT_SOURCE_STATE ")\n\nBackend: %s\nStartup selection: %s%s\nNext start: %s\nMode: %s\nLuma detail: %s\nPreferred mode/detail: %s / %s\nRed brightness: %u%% (%s)\nPreferred red brightness: %u%%\nStatus: %s\nVerification: %s\nLast check: %s\nSettings: %s\nStartup preferences: %s%s\n\n"
-        "Fade-in next activation: %s (Magnification)\nFade progress: %s\nStart with Windows entry: %s\nToggle shortcut: %s\nRestore shortcut: %s\nShortcut preference: %s\nShortcut preference applied: %s\nLast shortcut error: %s\nSession recovery: %s\nExpiry warning: %s\n\n"
+        "Fade-in next activation: %s (Magnification)\nFade progress: %s\nDaily schedule: %s (%s enable / %s restore)\nSchedule runtime: %s; %s\nStart with Windows entry: %s\nToggle shortcut: %s\nRestore shortcut: %s\nShortcut preference: %s\nShortcut preference applied: %s\nLast shortcut error: %s\nSession recovery: %s\nExpiry warning: %s\n\n"
         "File logging: %s\nMissing file records: %llu\nTruncated records: %llu\nLast file error: %lu\n\n"
         "Logs: %%LOCALAPPDATA%%\\RedLight\nUnsigned release candidate\n"
         "github.com/michaelmawhinney/redlight",
@@ -1350,7 +1571,8 @@ void ShowAboutDialog(HWND parent) {
         BackendVerificationName(g_verification.result().state), verificationTiming,
         g_preferencesUnsaved ? "Unsaved changes" : "Saved/default",
         PreferenceSourceName(g_startupPreferenceSource), g_startupPreferenceWarning ? " (load warnings)" : "",
-        FadeInName(g_preferences.fadeIn), fadeProgress, StartupEntryDescription(g_windowsStartup.snapshot().state),
+        FadeInName(g_preferences.fadeIn), fadeProgress, g_preferences.schedule.enabled ? "daily" : "Off", enableAt, restoreAt,
+        ScheduleIsArmed() ? "armed" : "not armed", g_scheduleStatus, StartupEntryDescription(g_windowsStartup.snapshot().state),
         g_hotkeys.toggle() ? ShortcutBindingName(*g_hotkeys.toggle()) : "Unavailable/disabled",
         g_hotkeys.restore() ? ShortcutBindingName(*g_hotkeys.restore()) : "Unavailable/disabled",
         ShortcutProfileName(g_preferences.shortcuts),
@@ -1393,12 +1615,13 @@ void ShowTrayMenu(HWND hwnd) {
         !g_busy && !g_preferencesApplying && g_windowsStartup.snapshot().readable() && !g_windowsStartup.command().empty(),
         !g_busy && !g_preferencesApplying && g_windowsStartup.snapshot().readable() && g_windowsStartup.snapshot().state != StartupEntryState::Off,
         !g_busy && !g_preferencesApplying, !g_windowsStartup.command().empty(),
-        g_preferences.fadeIn, !g_busy && !g_preferencesApplying};
+        g_preferences.fadeIn, !g_busy && !g_preferencesApplying, g_preferences.schedule, ScheduleIsArmed(), !g_busy && !g_preferencesApplying};
     HMENU menu = BuildTrayMenu(state);
     if (!menu) { ReportError("Could not build the tray menu."); return; }
     if (!SetForegroundWindow(hwnd)) Diagnostics::Log("SetForegroundWindow failed for tray menu.");
-    const UINT command = TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
-        pt.x, pt.y, 0, hwnd, NULL);
+    UINT command = 0;
+    { ScopedModalUi modalUi; command = TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
+        pt.x, pt.y, 0, hwnd, NULL); }
     if (command) PostTrayCommand(hwnd, ResolveTrayMenuCommand(command, state));
     if (!PostMessageA(hwnd, WM_NULL, 0, 0)) Diagnostics::Log("Posting tray menu dismissal failed.");
     if (!Shell_NotifyIconA(NIM_SETFOCUS, &nid)) Diagnostics::Log("Could not restore tray keyboard focus.");
@@ -1416,6 +1639,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             const auto recovery = RecoveryAfterUiFailure(mayChangeFilter, g_pendingRestore, g_busy);
             if (recovery == UiFailureRecovery::Defer) {
                 g_fade.cancel();
+                g_scheduleRuntime.stop(); g_scheduleClockValid = false;
                 g_pendingRestore = true;
                 g_restorationHistory.record({RestoreReason::CallbackFailure, RestoreOutcome::Deferred, GetTickCount64()});
             }
@@ -1423,6 +1647,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 try { RestoreFilter(RestoreReason::CallbackFailure, false); }
                 catch (...) {
                     g_fade.cancel();
+                    g_scheduleRuntime.stop(); g_scheduleClockValid = false;
                     g_pendingRestore = true;
                     Diagnostics::Log("C++ failure during emergency restoration; restore request and recovery data retained.");
                 }
@@ -1464,10 +1689,12 @@ LRESULT HandleWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         return 0;
     }
     case WM_TIMER:
+        if (wParam == ID_SCHEDULE_TIMER) { OnScheduleTimer(); return 0; }
         if (wParam == ID_FADE_TIMER) { OnFadeInTimer(); return 0; }
         if (wParam == ID_SESSION_TIMER) { OnSessionTimer(); return 0; }
         if (wParam == ID_TRAY_RETRY_TIMER && (g_trayAdded || AddTrayIcon())) {
             if (!KillTimer(hwnd, ID_TRAY_RETRY_TIMER)) Diagnostics::Log("Could not stop tray recovery timer.");
+            if (!g_busy && !g_preferencesApplying && !g_scheduleRuntime.enabled()) ArmSchedule();
         }
         return 0;
     case WM_TRAYICON: {
@@ -1526,18 +1753,23 @@ LRESULT HandleWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         case ID_TRAY_STARTUP_REFRESH: RefreshWindowsStartup(); break;
         case ID_TRAY_CUSTOM_BRIGHTNESS:
             if (CanChangeBrightness(*g_displayFilter, g_busy, g_preferencesApplying, g_pendingRestore)) {
-                if (const auto percent = ShowRedBrightnessDialog(hwnd, g_preferences.brightnessPercent)) SetRedBrightness(*percent);
+                std::optional<unsigned> percent;
+                { ScopedModalUi modalUi; percent = ShowRedBrightnessDialog(hwnd, g_preferences.brightnessPercent); }
+                if (percent) SetRedBrightness(*percent);
             }
             break;
         case ID_TRAY_CUSTOM_SESSION:
             if (!g_busy && !g_preferencesApplying && CanChangeSessionLimit(g_sessionTimer, GetTickCount64(), *g_displayFilter, g_verification.result().state, g_pendingRestore)) {
-                if (const auto minutes = ShowSessionLimitDialog(hwnd, g_sessionTimer.minutes())) SetSessionLimit(*minutes);
+                std::optional<unsigned> minutes;
+                { ScopedModalUi modalUi; minutes = ShowSessionLimitDialog(hwnd, g_sessionTimer.minutes()); }
+                if (minutes) SetSessionLimit(*minutes);
             }
             break;
         case ID_TRAY_RESTART_COUNTDOWN: RestartCountdown(); break;
         case ID_TRAY_RESTORE: RestoreFilter(RestoreReason::Manual, true); break;
         case ID_TRAY_MODE_STRICT_RED: SetRedModeFromTray(RedMode::StrictRed); break;
         case ID_TRAY_MODE_LUMA_RED: SetRedModeFromTray(RedMode::LumaRed); break;
+        case ID_TRAY_DAILY_SCHEDULE: ConfigureDailySchedule(hwnd); break;
         case ID_TRAY_ABOUT: ShowAboutDialog(hwnd); break;
         case ID_TRAY_COPY_REPORT: CopySupportReport(hwnd); break;
         case ID_TRAY_COPY_STATUS_JSON: CopyStatusJson(hwnd); break;
@@ -1630,24 +1862,39 @@ LRESULT HandleWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         Diagnostics::Log("External restore request received.");
         return RestoreFilter(RestoreReason::ExternalRequest, false) ? TRUE : FALSE;
     case WM_DISPLAYCHANGE:
-        Diagnostics::Log("Display configuration changed; restoring filter. Re-enable manually.");
+        Diagnostics::Log(g_preferences.schedule.enabled ? "Display configuration changed; restoring filter. Only future schedule boundaries remain eligible." :
+            "Display configuration changed; restoring filter. Re-enable manually.");
         RestoreFilter(RestoreReason::DisplayChange, false);
         RefreshDisplayContext(DisplayContextReason::DisplayChange);
         return 0;
+    case WM_TIMECHANGE:
+    case WM_SETTINGCHANGE:
+        g_scheduleRuntime.invalidate(); g_scheduleClockValid = false;
+        break;
     case WM_POWERBROADCAST:
         if (wParam == PBT_APMSUSPEND || wParam == PBT_APMRESUMEAUTOMATIC || wParam == PBT_APMRESUMESUSPEND) {
-            Diagnostics::Log("Power transition; restoring filter. Re-enable manually.");
+            g_scheduleSuspended = wParam == PBT_APMSUSPEND;
+            Diagnostics::Log(g_preferences.schedule.enabled ? "Power transition; restoring filter. No schedule catch-up activation is allowed." :
+                "Power transition; restoring filter. Re-enable manually.");
             RestoreFilter(RestoreReason::PowerTransition, false);
             RefreshDisplayContext(DisplayContextReason::PowerTransition);
+            if (!g_scheduleSuspended) ArmSchedule();
         }
         return TRUE;
     case WM_WTSSESSION_CHANGE:
+        if (wParam == WTS_SESSION_LOCK || wParam == WTS_CONSOLE_DISCONNECT || wParam == WTS_REMOTE_DISCONNECT || wParam == WTS_SESSION_LOGOFF)
+            g_scheduleSessionBlocked = true;
+        if (wParam == WTS_SESSION_UNLOCK || wParam == WTS_CONSOLE_CONNECT || wParam == WTS_REMOTE_CONNECT)
+            g_scheduleSessionBlocked = false;
+        g_scheduleRuntime.invalidate(); g_scheduleClockValid = false;
         if (wParam == WTS_SESSION_LOCK || wParam == WTS_SESSION_UNLOCK ||
             wParam == WTS_CONSOLE_DISCONNECT || wParam == WTS_REMOTE_DISCONNECT) {
-            Diagnostics::Log("Session transition; restoring filter. Re-enable manually.");
+            Diagnostics::Log(g_preferences.schedule.enabled ? "Session transition; restoring filter. Only future schedule boundaries remain eligible." :
+                "Session transition; restoring filter. Re-enable manually.");
             RestoreFilter(RestoreReason::SessionTransition, false);
             RefreshDisplayContext(DisplayContextReason::SessionTransition);
         }
+        if (wParam == WTS_SESSION_UNLOCK || wParam == WTS_CONSOLE_CONNECT || wParam == WTS_REMOTE_CONNECT) ArmSchedule();
         return 0;
     case WM_QUERYENDSESSION:
         // Honor Windows session termination; no modal recovery prompt can safely
@@ -1659,12 +1906,13 @@ LRESULT HandleWindowMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         if (wParam) {
             if (RestoreFilter(RestoreReason::Exit, false, /*notifyFailure=*/false, /*updateTray=*/false)) DestroyTrayWindow(hwnd);
             else Diagnostics::Log("Committed session-end restoration incomplete; retaining controls and snapshot until Windows terminates. Recovery is best effort.");
-        }
+        } else ArmSchedule(); // A canceled end-session query may rearm future events, preserving consumed dates.
         return 0;
     case WM_CLOSE:
         if (RestoreFilter(RestoreReason::Exit, true)) DestroyTrayWindow(hwnd);
         return 0;
     case WM_DESTROY:
+        StopSchedule();
         StopFadeIn();
         StopSessionTimer();
         if (!g_hotkeys.release()) Diagnostics::Log("Some shortcut registrations could not be released before window destruction.");

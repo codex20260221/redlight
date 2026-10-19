@@ -6,6 +6,7 @@
 #include "ExpiryWarning.h"
 #include "StartupRegistration.h"
 #include "FadeInDuration.h"
+#include "SchedulePreferences.h"
 
 struct TrayMenuState {
     bool needsRestore;
@@ -30,6 +31,8 @@ struct TrayMenuState {
     bool startupPathAvailable = false;
     FadeInDuration fadeIn = FadeInDuration::Off;
     bool canChangeFadeIn = true;
+    Scheduling::DailyTimes schedule;
+    bool scheduleArmed = false, canChangeSchedule = true;
 };
 // Ownership of the returned root menu transfers to the caller.
 HMENU BuildTrayMenu(const TrayMenuState& state);

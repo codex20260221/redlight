@@ -5,6 +5,7 @@
 #include "ShortcutProfile.h"
 #include "ExpiryWarning.h"
 #include "FadeInDuration.h"
+#include "SchedulePreferences.h"
 #include "Utf8.h"
 #include <charconv>
 #include <array>
@@ -14,18 +15,19 @@
 #include <string>
 #include <string_view>
 
-inline constexpr unsigned PreferencesProfileVersion = 5;
-inline constexpr std::array PreferencesInputSchemas{1u, 2u, 3u, 4u, 5u};
+inline constexpr unsigned PreferencesProfileVersion = 6;
+inline constexpr std::array PreferencesInputSchemas{1u, 2u, 3u, 4u, 5u, 6u};
 inline constexpr std::size_t PreferencesProfileMaxBytes = 4096;
 static_assert(PreferencesInputSchemas.back() == PreferencesProfileVersion);
-struct ProfileSchemaDefaults { bool shortcuts, expiryWarning, brightness, fadeIn; };
+struct ProfileSchemaDefaults { bool shortcuts, expiryWarning, brightness, fadeIn, schedule; };
 inline constexpr std::optional<ProfileSchemaDefaults> DefaultsForProfileSchema(unsigned schema) noexcept {
     switch (schema) {
-    case 1: return ProfileSchemaDefaults{true, true, true, true};
-    case 2: return ProfileSchemaDefaults{false, true, true, true};
-    case 3: return ProfileSchemaDefaults{false, false, true, true};
-    case 4: return ProfileSchemaDefaults{false, false, false, true};
-    case 5: return ProfileSchemaDefaults{false, false, false, false};
+    case 1: return ProfileSchemaDefaults{true, true, true, true, true};
+    case 2: return ProfileSchemaDefaults{false, true, true, true, true};
+    case 3: return ProfileSchemaDefaults{false, false, true, true, true};
+    case 4: return ProfileSchemaDefaults{false, false, false, true, true};
+    case 5: return ProfileSchemaDefaults{false, false, false, false, true};
+    case 6: return ProfileSchemaDefaults{false, false, false, false, false};
     default: return std::nullopt;
     }
 }
@@ -39,6 +41,7 @@ struct AppPreferences {
     ExpiryWarning expiryWarning = ExpiryWarning::Off;
     unsigned brightnessPercent = DefaultRedBrightness;
     FadeInDuration fadeIn = FadeInDuration::Off;
+    Scheduling::DailyTimes schedule;
     bool operator==(const AppPreferences&) const = default;
 };
 inline bool ValidPreferences(const AppPreferences& value) {
@@ -46,7 +49,7 @@ inline bool ValidPreferences(const AppPreferences& value) {
         IsValidLumaProfile(static_cast<unsigned>(value.luma)) &&
         IsValidBackendPreference(static_cast<unsigned>(value.backend)) && value.sessionMinutes <= SessionTimer::maxMinutes &&
         IsValidShortcutProfile(static_cast<unsigned>(value.shortcuts)) && IsValidExpiryWarning(value.expiryWarning) &&
-        ValidRedBrightness(value.brightnessPercent) && ValidFadeInDuration(value.fadeIn);
+        ValidRedBrightness(value.brightnessPercent) && ValidFadeInDuration(value.fadeIn) && value.schedule.valid();
 }
 inline const char* PreferenceModeToken(RedMode value) noexcept {
     switch (value) {
@@ -74,10 +77,13 @@ inline const char* PreferenceBackendToken(BackendPreference value) noexcept {
 inline std::optional<std::string> SerializePreferences(const AppPreferences& value) {
     if (!ValidPreferences(value)) return std::nullopt;
     char text[256];
+    char enableAt[6], restoreAt[6];
+    if (!Scheduling::FormatMinute(value.schedule.enableMinute, enableAt) || !Scheduling::FormatMinute(value.schedule.restoreMinute, restoreAt)) return std::nullopt;
     const int length = std::snprintf(text, sizeof(text),
-        "[RedLightProfile]\r\nversion=%u\r\nmode=%s\r\nluma=%s\r\nbackend=%s\r\nsession_minutes=%u\r\nhotkeys=%s\r\nexpiry_warning=%s\r\nbrightness_percent=%u\r\nfade_in=%s\r\n",
+        "[RedLightProfile]\r\nversion=%u\r\nmode=%s\r\nluma=%s\r\nbackend=%s\r\nsession_minutes=%u\r\nhotkeys=%s\r\nexpiry_warning=%s\r\nbrightness_percent=%u\r\nfade_in=%s\r\nschedule=%s\r\nenable_at=%s\r\nrestore_at=%s\r\n",
         PreferencesProfileVersion, PreferenceModeToken(value.mode), PreferenceLumaToken(value.luma), PreferenceBackendToken(value.backend),
-        value.sessionMinutes, ShortcutProfileToken(value.shortcuts), ExpiryWarningToken(value.expiryWarning), value.brightnessPercent, FadeInToken(value.fadeIn));
+        value.sessionMinutes, ShortcutProfileToken(value.shortcuts), ExpiryWarningToken(value.expiryWarning), value.brightnessPercent, FadeInToken(value.fadeIn),
+        value.schedule.enabled ? "daily" : "off", enableAt, restoreAt);
     if (length < 0 || static_cast<std::size_t>(length) >= sizeof(text)) return std::nullopt;
     return std::string(text, static_cast<std::size_t>(length));
 }
@@ -169,6 +175,17 @@ inline PreferencesParseResult ParsePreferences(std::string_view input) {
             const auto duration = ParseFadeInDuration(field);
             if (!duration) return {std::nullopt, "Invalid fade-in duration", lineNumber};
             value.fadeIn = *duration;
+        } else if (key == "schedule") {
+            flag = 512;
+            if (field == "daily") value.schedule.enabled = true;
+            else if (field == "off") value.schedule.enabled = false;
+            else return {std::nullopt, "Schedule must be off or daily", lineNumber};
+        } else if (key == "enable_at" || key == "restore_at") {
+            flag = key == "enable_at" ? 1024u : 2048u;
+            const auto minute = Scheduling::ParseMinute(field);
+            if (!minute) return {std::nullopt, "Schedule time must be HH:MM (00:00 to 23:59)", lineNumber};
+            if (flag == 1024) value.schedule.enableMinute = *minute;
+            else value.schedule.restoreMinute = *minute;
         } else return {std::nullopt, "Unknown profile field", lineNumber};
         if (seen & flag) return {std::nullopt, "Duplicate profile field", lineNumber};
         seen |= flag;
@@ -177,7 +194,8 @@ inline PreferencesParseResult ParsePreferences(std::string_view input) {
     if (version < 3 && (seen & 64)) return {std::nullopt, "Expiry warnings require profile version 3", lineNumber};
     if (version < 4 && (seen & 128)) return {std::nullopt, "Red brightness requires profile version 4", lineNumber};
     if (version < 5 && (seen & 256)) return {std::nullopt, "Fade-in requires profile version 5", lineNumber};
-    if (!header || seen != (version == 5 ? 511u : (version == 4 ? 255u : (version == 3 ? 127u : (version == 2 ? 63u : 31u))))) return {std::nullopt, "Profile section or required fields are missing", lineNumber};
+    if (version < 6 && (seen & 3584)) return {std::nullopt, "Scheduling requires profile version 6", lineNumber};
+    if (!header || seen != (version == 6 ? 4095u : (version == 5 ? 511u : (version == 4 ? 255u : (version == 3 ? 127u : (version == 2 ? 63u : 31u)))))) return {std::nullopt, "Profile section or required fields are missing", lineNumber};
     const auto defaults = DefaultsForProfileSchema(version);
     if (!defaults) return {std::nullopt, "Unsupported profile version", lineNumber};
     // Older schema defaults are fixed by their contract, independent of future app defaults.
@@ -185,5 +203,7 @@ inline PreferencesParseResult ParsePreferences(std::string_view input) {
     if (defaults->expiryWarning) value.expiryWarning = ExpiryWarning::Off;
     if (defaults->brightness) value.brightnessPercent = DefaultRedBrightness;
     if (defaults->fadeIn) value.fadeIn = FadeInDuration::Off;
+    if (defaults->schedule) value.schedule = {};
+    if (!value.schedule.valid()) return {std::nullopt, "Enabled schedule times must differ", lineNumber};
     return {value, nullptr, 0, version};
 }

@@ -58,3 +58,19 @@ BEGIN
  DEFPUSHBUTTON "&Apply", IDOK, 116, 100, 52, 14
  PUSHBUTTON "&Cancel", IDCANCEL, 176, 100, 52, 14
 END
+
+IDD_DAILY_SCHEDULE DIALOGEX 0, 0, 280, 174
+STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Daily schedule"
+FONT 9, "Segoe UI"
+BEGIN
+ CONTROL "&Enable automatic daily filtering", IDC_SCHEDULE_ENABLED, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 12, 12, 256, 12
+ LTEXT "&Turn on at (HH:MM):", -1, 12, 35, 132, 12
+ EDITTEXT IDC_SCHEDULE_ENABLE_AT, 154, 32, 64, 15, ES_AUTOHSCROLL | WS_TABSTOP
+ LTEXT "&Restore at (HH:MM):", -1, 12, 58, 132, 12
+ EDITTEXT IDC_SCHEDULE_RESTORE_AT, 154, 55, 64, 15, ES_AUTOHSCROLL | WS_TABSTOP
+ LTEXT "Windows local time, 24-hour format. Only future triggers run while RedLight and its controls are available. Startup/wake never catches up; missed times are skipped.", -1, 12, 80, 256, 38
+ LTEXT "Manual controls last until the next future trigger. Restore and Exit remain immediate. Start with Windows is separate.", -1, 12, 120, 256, 22
+ DEFPUSHBUTTON "&Apply", IDOK, 156, 150, 52, 14
+ PUSHBUTTON "&Cancel", IDCANCEL, 216, 150, 52, 14
+END

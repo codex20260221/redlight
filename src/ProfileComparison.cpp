@@ -44,11 +44,15 @@ int CompareSavedSettingsProfile(const AppPreferences& candidate) noexcept {
             "],\"saved_source\":\"%s\",\"changes\":{", PreferenceSourceToken(loaded.source));
         if (length < 0 || static_cast<std::size_t>(length) >= sizeof(output) - used) return ComparisonFormatFailure();
         used += static_cast<std::size_t>(length);
-        const auto tokens = [](const AppPreferences& value) {
+        char savedEnable[6], savedRestore[6], candidateEnable[6], candidateRestore[6];
+        if (!Scheduling::FormatMinute(loaded.preferences.schedule.enableMinute, savedEnable) || !Scheduling::FormatMinute(loaded.preferences.schedule.restoreMinute, savedRestore) ||
+            !Scheduling::FormatMinute(candidate.schedule.enableMinute, candidateEnable) || !Scheduling::FormatMinute(candidate.schedule.restoreMinute, candidateRestore)) return ComparisonFormatFailure();
+        const auto tokens = [](const AppPreferences& value, const char* enableAt, const char* restoreAt) {
             return std::array<const char*, ProfileDifferenceFieldNames.size()>{PreferenceModeToken(value.mode), PreferenceLumaToken(value.luma),
-                PreferenceBackendToken(value.backend), nullptr, ShortcutProfileToken(value.shortcuts), ExpiryWarningToken(value.expiryWarning), nullptr, FadeInToken(value.fadeIn)};
+                PreferenceBackendToken(value.backend), nullptr, ShortcutProfileToken(value.shortcuts), ExpiryWarningToken(value.expiryWarning), nullptr, FadeInToken(value.fadeIn),
+                value.schedule.enabled ? "daily" : "off", enableAt, restoreAt};
         };
-        const auto savedTokens = tokens(loaded.preferences), candidateTokens = tokens(candidate);
+        const auto savedTokens = tokens(loaded.preferences, savedEnable, savedRestore), candidateTokens = tokens(candidate, candidateEnable, candidateRestore);
         first = true;
         for (std::size_t index = 0; index < ProfileDifferenceFieldNames.size(); ++index) {
             if ((*mask & (1u << index)) == 0) continue;

@@ -7,14 +7,14 @@
 
 enum class RestoreReason {
     Manual, Countdown, TimerFailure, DisplayChange, PowerTransition, SessionTransition,
-    ExplorerRestart, TrayFailure, ExternalRequest, Preferences, Exit, CallbackFailure, DeferredRequest
+    ExplorerRestart, TrayFailure, ExternalRequest, Preferences, Exit, CallbackFailure, DeferredRequest, DailySchedule
 };
 enum class RestoreOutcome { Interrupted, Deferred, AlreadyClear, Restored, Failed };
 inline const char* RestoreReasonName(RestoreReason reason) noexcept {
     switch (reason) {
     case RestoreReason::Manual: return "Manual control";
     case RestoreReason::Countdown: return "Countdown expiry/retry";
-    case RestoreReason::TimerFailure: return "Countdown timer failure";
+    case RestoreReason::TimerFailure: return "Window timer failure";
     case RestoreReason::DisplayChange: return "Display change";
     case RestoreReason::PowerTransition: return "Power transition";
     case RestoreReason::SessionTransition: return "Session transition";
@@ -25,6 +25,7 @@ inline const char* RestoreReasonName(RestoreReason reason) noexcept {
     case RestoreReason::Exit: return "Exit/session ending";
     case RestoreReason::CallbackFailure: return "Callback failure recovery";
     case RestoreReason::DeferredRequest: return "Deferred restore replay";
+    case RestoreReason::DailySchedule: return "Daily schedule restore";
     }
     return "Unknown";
 }

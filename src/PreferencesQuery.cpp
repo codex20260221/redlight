@@ -15,7 +15,7 @@ int WritePreferenceQuery(std::string_view output, int result) noexcept {
 int QueryRunningPreferences() noexcept {
     try {
         const HWND tray = FindWindowA("RedLight.TrayWindow", "RedLight");
-        if (!tray) return WritePreferenceQuery("{\"protocol\":1,\"status\":\"not-running\",\"preferences\":null}\n", 3);
+        if (!tray) return WritePreferenceQuery("{\"protocol\":2,\"status\":\"not-running\",\"preferences\":null}\n", 3);
         DWORD_PTR reply = 0;
         SetLastError(ERROR_SUCCESS); // The API can fail without setting an error.
         if (!SendMessageTimeoutA(tray, WM_REDLIGHT_PREFERENCES, REDLIGHT_PREFERENCES_PROTOCOL, 0,
@@ -23,14 +23,14 @@ int QueryRunningPreferences() noexcept {
             const DWORD error = GetLastError();
             if (error) Diagnostics::LogFormat("Current preference query failed or timed out (error %lu).", error);
             else Diagnostics::Log("Current preference query failed or timed out; no native error code was provided.");
-            return WritePreferenceQuery("{\"protocol\":1,\"status\":\"query-failed\",\"preferences\":null}\n", 1);
+            return WritePreferenceQuery("{\"protocol\":2,\"status\":\"query-failed\",\"preferences\":null}\n", 1);
         }
         const auto snapshot = UnpackCurrentPreferences(static_cast<std::uint64_t>(reply));
         char output[CurrentPreferencesJsonBufferSize];
         const auto text = snapshot ? FormatCurrentPreferencesJson(*snapshot, output) : std::nullopt;
         if (!text) {
             Diagnostics::Log("Current preference query received an unsupported or invalid response.");
-            return WritePreferenceQuery("{\"protocol\":1,\"status\":\"invalid-response\",\"preferences\":null}\n", 1);
+            return WritePreferenceQuery("{\"protocol\":2,\"status\":\"invalid-response\",\"preferences\":null}\n", 1);
         }
         return WritePreferenceQuery(*text, 0);
     } catch (...) {

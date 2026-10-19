@@ -75,6 +75,7 @@ ScheduleClockResult ReadScheduleClock() noexcept {
     result.utcMilliseconds = *utcCalendar;
     result.awakeMilliseconds = (awakeStart + awakeElapsed / 2) / 10000;
     result.captureMilliseconds = elapsed;
+    result.startedTick = started;
     result.zone = *identity;
     return {result};
 }

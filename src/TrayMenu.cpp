@@ -111,6 +111,11 @@ HMENU BuildTrayMenu(const TrayMenuState& state) {
         !expert.add(ID_TRAY_IMPORT_PROFILE, "&Import settings profile from clipboard") ||
         !expert.add(0, NULL, MF_SEPARATOR) || !expert.add(ID_TRAY_RESET_PREFERENCES, "Reset preferences to &defaults...")) return NULL;
     char toggleLabel[128], restoreLabel[128];
+    char scheduleLabel[96], enableAt[6], restoreAt[6];
+    if (!state.schedule.valid() || !Scheduling::FormatMinute(state.schedule.enableMinute, enableAt) ||
+        !Scheduling::FormatMinute(state.schedule.restoreMinute, restoreAt)) return NULL;
+    if (!state.schedule.enabled) strcpy_s(scheduleLabel, "Daily sc&hedule (Off)...");
+    else sprintf_s(scheduleLabel, "Daily sc&hedule (%s to %s%s)...", enableAt, restoreAt, state.scheduleArmed ? "" : "; not armed");
     const char* absent = state.shortcutProfile == ShortcutProfile::Disabled ? "Disabled" : "Unavailable";
     const char* action = state.restoreRequested || (state.needsRestore && !state.backendActive) ? "Retry rec&overy" :
         (state.backendActive ? "Turn o&ff" : "Turn &on");
@@ -124,6 +129,7 @@ HMENU BuildTrayMenu(const TrayMenuState& state) {
         !root.child(brightness, state.supportsBrightness ? "Red &brightness" : "Preferred red &brightness (Magnification)") ||
         !root.child(fade, state.supportsBrightness ? "Fade-&in (next activation)" : "Preferred fade-&in (Magnification)") ||
         !root.child(session, "Auto-restore &time limit") ||
+        !root.add(ID_TRAY_DAILY_SCHEDULE, scheduleLabel, MF_STRING | (state.canChangeSchedule ? MF_ENABLED : MF_GRAYED)) ||
         !root.child(startup, "Start with &Windows", state.startupEntry == StartupEntryState::ThisExecutable ? MF_CHECKED : MF_ENABLED) ||
         !root.add(0, NULL, MF_SEPARATOR) || !root.child(expert, "&Expert controls") ||
         !root.add(ID_TRAY_LOGS, "Open &logs folder") || !root.add(ID_TRAY_ABOUT, "&About") ||

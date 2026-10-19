@@ -10,6 +10,7 @@
 #include "UtcTimestamp.h"
 #include "ProcessContext.h"
 #include "SessionNotificationDiagnostics.h"
+#include "SchedulePreferences.h"
 #include <cstdint>
 #include <optional>
 #include <sstream>
@@ -28,6 +29,11 @@ struct SupportReportState {
     std::optional<unsigned> fadeTarget;
     std::optional<bool> fadeTimerInstalled;
     std::optional<CountdownTimerFailure> fadeTimerFailure;
+    std::optional<Scheduling::DailyTimes> dailySchedule;
+    std::string_view scheduleStatus = "Not reported";
+    std::optional<bool> scheduleArmed, scheduleTimerInstalled;
+    std::uint32_t scheduleError = 0;
+    std::optional<CountdownTimerFailure> scheduleTimerFailure;
     std::string_view windowsStartupEntry = "Not reported";
     std::uint32_t windowsStartupReadError = 0, windowsStartupChangeError = 0;
     std::string_view windowsStartupPath = "Not reported";
@@ -111,6 +117,20 @@ inline std::string BuildSupportReport(const SupportReportState& state) {
     else report << "not reported";
     report << "\r\nLast fade timer API failure (retained after retry): ";
     if (state.fadeTimerFailure) report << CountdownTimerApiName(state.fadeTimerFailure->operation) << " (error " << state.fadeTimerFailure->errorCode << ")";
+    else report << "none recorded";
+    report << "\r\nDaily schedule preference: ";
+    if (state.dailySchedule && state.dailySchedule->valid()) {
+        char enableAt[6], restoreAt[6];
+        if (Scheduling::FormatMinute(state.dailySchedule->enableMinute, enableAt) && Scheduling::FormatMinute(state.dailySchedule->restoreMinute, restoreAt))
+            report << (state.dailySchedule->enabled ? "daily" : "Off") << " (" << enableAt << " enable / " << restoreAt << " restore; Windows local time)";
+        else report << "invalid";
+    } else report << "not reported";
+    report << "\r\nSchedule runtime armed: ";
+    if (state.scheduleArmed) report << (*state.scheduleArmed ? "yes (future boundaries only)" : "no"); else report << "not reported";
+    report << "\r\nSchedule status/last result: " << state.scheduleStatus << "\r\nSchedule native error: " << state.scheduleError << "\r\nNative schedule timer: ";
+    if (state.scheduleTimerInstalled) report << (*state.scheduleTimerInstalled ? "owned (may remain after failed cleanup)" : "not installed"); else report << "not reported";
+    report << "\r\nLast schedule timer API failure (retained after retry): ";
+    if (state.scheduleTimerFailure) report << CountdownTimerApiName(state.scheduleTimerFailure->operation) << " (error " << state.scheduleTimerFailure->errorCode << ")";
     else report << "none recorded";
     report << "\r\nState: "
         << FilterStatusDescription(state.active, state.needsRestore, !state.lastError.empty(), state.verification, state.restoreRequested)

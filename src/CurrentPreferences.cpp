@@ -6,7 +6,7 @@ std::optional<std::string_view> FormatCurrentPreferencesJson(const CurrentPrefer
     const auto value = FormatPreferencesJson(snapshot.preferences, preferences);
     if (!value) return std::nullopt;
     const int length = std::snprintf(output.data(), output.size(),
-        "{\"protocol\":1,\"status\":\"current-preferences\",\"source\":\"current-session\",\"profile_schema\":%u,"
+        "{\"protocol\":2,\"status\":\"current-preferences\",\"source\":\"current-session\",\"profile_schema\":%u,"
         "\"settings_unsaved\":%s,\"busy\":%s,\"startup_source\":\"%s\",\"startup_load_warning\":%s,\"preferences\":%.*s}\n",
         PreferencesProfileVersion, snapshot.settingsUnsaved ? "true" : "false", snapshot.busy ? "true" : "false",
         PreferenceSourceToken(snapshot.startupSource), snapshot.startupLoadWarning ? "true" : "false", static_cast<int>(value->size()), value->data());

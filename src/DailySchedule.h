@@ -1,19 +1,11 @@
 #pragma once
+#include "SchedulePreferences.h"
 #include <chrono>
 #include <cstdint>
 #include <optional>
 
-// Research policy only: not included by RedLight, persisted, or natively wired.
-// The caller supplies a checked UTC/local conversion from one clock snapshot.
-namespace SchedulePrototype {
-struct DailyTimes {
-    bool enabled = false;
-    unsigned enableMinute = 0, restoreMinute = 0;
-    bool valid() const noexcept {
-        return enableMinute < 1440 && restoreMinute < 1440 && (!enabled || enableMinute != restoreMinute);
-    }
-    bool operator==(const DailyTimes&) const = default;
-};
+// Supplied-time policy; the caller provides a checked UTC/local clock snapshot.
+namespace Scheduling {
 struct Sample {
     unsigned year = 0, month = 0, day = 0, minute = 0, millisecondsInMinute = 0;
     std::uint64_t utcMilliseconds = 0; // Since 1601-01-01; must match the local conversion.
@@ -104,4 +96,4 @@ private:
     std::optional<Observation> previous_;
     std::optional<std::uint32_t> enableDate_, restoreDate_;
 };
-} // namespace SchedulePrototype
+} // namespace Scheduling
